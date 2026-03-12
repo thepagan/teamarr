@@ -216,7 +216,8 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Version | `pyproject.toml` line 7 |
 | Dependencies | `pyproject.toml` |
 | League configs | `teamarr/database/schema.sql` |
-| Schema version | `teamarr/database/schema.sql` (v69) |
+<<<<<<< HEAD
+| Schema version | `teamarr/database/schema.sql` (v70) |
 | Provider registration | `teamarr/providers/__init__.py` |
 
 ## Architecture
@@ -366,4 +367,3 @@ docker logs --tail 100 teamarr              # Docker container stdout
 - `browser_screenshot` - Capture page screenshot
 
 Use for: Visual verification of UI changes, testing frontend flows, debugging styling issues.
-
