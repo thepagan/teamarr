@@ -1283,7 +1283,6 @@ class ChannelLifecycleService:
         # Auto-append keyword only if template didn't use {exception_keyword}
         if exception_keyword and not template_uses_keyword:
             base_name = f"{base_name} ({exception_keyword})"
-
         # Auto-append feed label when feed_team is present
         if feed_team and feed_label_style:
             feed_label = self._build_feed_label(
