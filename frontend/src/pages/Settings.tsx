@@ -1078,7 +1078,6 @@ export function Settings() {
       setNFHS(nfhsData)
     }
   }, [nfhsData])
-
   // Sync channel range inputs from lifecycle on initial load only
   const channelRangeInitializedRef = useRef(false)
   useEffect(() => {
@@ -2043,6 +2042,132 @@ export function Settings() {
             disabled={updateLifecycle.isPending}
           >
             {updateLifecycle.isPending ? (
+              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4 mr-1" />
+            )}
+            Save
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Feed Separation (HOME/AWAY Detection) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Feed Separation</CardTitle>
+          <CardDescription>
+            Detect HOME/AWAY or team name labels in stream names and create separate channels per broadcast feed
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Master toggle */}
+          <div className="flex items-center justify-between">
+            <div className="space-y-0.5">
+              <Label>Enable Feed Separation</Label>
+              <p className="text-xs text-muted-foreground">
+                When enabled, streams labeled HOME/AWAY or with team names are split into separate channels
+              </p>
+            </div>
+            <Switch
+              checked={feedSeparation.enabled}
+              onCheckedChange={(checked) =>
+                setFeedSeparation({ ...feedSeparation, enabled: checked })
+              }
+            />
+          </div>
+
+          {/* Nested options (only when enabled) */}
+          {feedSeparation.enabled && (
+            <div className="space-y-4 pl-2 border-l-2 border-muted ml-1">
+              {/* Home terms */}
+              <div className="space-y-1.5">
+                <Label htmlFor="feed-home-terms">Home Feed Terms</Label>
+                <Input
+                  id="feed-home-terms"
+                  value={feedSeparation.home_terms.join(", ")}
+                  onChange={(e) =>
+                    setFeedSeparation({
+                      ...feedSeparation,
+                      home_terms: e.target.value.split(",").map((t) => t.trim()).filter(Boolean),
+                    })
+                  }
+                  placeholder="HOME"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Comma-separated terms that indicate a home feed (e.g., HOME, Home Feed)
+                </p>
+              </div>
+
+              {/* Away terms */}
+              <div className="space-y-1.5">
+                <Label htmlFor="feed-away-terms">Away Feed Terms</Label>
+                <Input
+                  id="feed-away-terms"
+                  value={feedSeparation.away_terms.join(", ")}
+                  onChange={(e) =>
+                    setFeedSeparation({
+                      ...feedSeparation,
+                      away_terms: e.target.value.split(",").map((t) => t.trim()).filter(Boolean),
+                    })
+                  }
+                  placeholder="AWAY"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Comma-separated terms that indicate an away feed (e.g., AWAY, Away Feed)
+                </p>
+              </div>
+
+              {/* Detect team names toggle */}
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label>Detect Team Names</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Also detect team names as feed indicators (e.g., &quot;Orioles Feed&quot; resolves to home team)
+                  </p>
+                </div>
+                <Switch
+                  checked={feedSeparation.detect_team_names}
+                  onCheckedChange={(checked) =>
+                    setFeedSeparation({ ...feedSeparation, detect_team_names: checked })
+                  }
+                />
+              </div>
+
+              {/* Label style */}
+              <div className="space-y-1.5">
+                <Label htmlFor="feed-label-style">Feed Label Style</Label>
+                <Select
+                  id="feed-label-style"
+                  value={feedSeparation.label_style}
+                  onChange={(e) =>
+                    setFeedSeparation({
+                      ...feedSeparation,
+                      label_style: e.target.value as FeedSeparationSettings["label_style"],
+                    })
+                  }
+                >
+                  <option value="team_name">Team Name (e.g., &quot;Orioles Feed&quot;)</option>
+                  <option value="short_name">Short Name (e.g., &quot;BAL Feed&quot;)</option>
+                  <option value="home_away">Home/Away (e.g., &quot;Home Feed&quot;)</option>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  How feed labels appear in channel names
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Save button */}
+          <Button
+            onClick={() =>
+              updateFeedSeparation.mutate(feedSeparation, {
+                onSuccess: () => toast.success("Feed separation settings saved"),
+                onError: () => toast.error("Failed to save feed separation settings"),
+              })
+            }
+            disabled={updateFeedSeparation.isPending}
+          >
+            {updateFeedSeparation.isPending ? (
               <Loader2 className="h-4 w-4 mr-1 animate-spin" />
             ) : (
               <Save className="h-4 w-4 mr-1" />
