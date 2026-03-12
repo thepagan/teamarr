@@ -1291,6 +1291,14 @@ class ChannelLifecycleService:
             if feed_label:
                 base_name = f"{base_name} ({feed_label})"
 
+        # Auto-append feed label when feed_team is present
+        if feed_team and feed_label_style:
+            feed_label = self._build_feed_label(
+                feed_team, event, feed_label_style
+            )
+            if feed_label:
+                base_name = f"{base_name} ({feed_label})"
+
         # Prepend "POSTPONED | " if event is postponed and setting is enabled
         if is_event_postponed(event):
             from teamarr.database.settings import get_epg_settings
