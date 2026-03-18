@@ -574,7 +574,7 @@ def get_dashboard_stats(conn: Connection) -> dict:
         FROM managed_channels mc
         LEFT JOIN event_epg_groups eg ON mc.event_epg_group_id = eg.id
         WHERE mc.deleted_at IS NULL AND mc.event_epg_group_id IS NOT NULL
-        GROUP BY mc.event_epg_group_id
+        GROUP BY mc.event_epg_group_id, eg.name
         ORDER BY count DESC
     """).fetchall()
     channel_group_breakdown = [
