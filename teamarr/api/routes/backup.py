@@ -440,17 +440,20 @@ async def restore_backup(file: UploadFile = File(...)):
     from teamarr.services.backup_service import create_backup_service
 
     is_postgres = _is_postgres_url(get_database_url())
-    expected_suffix = ".sql" if is_postgres else ".db"
+    allowed_suffixes = (".sql", ".db") if is_postgres else (".db",)
 
-    if not file.filename or not file.filename.endswith(expected_suffix):
+    if not file.filename or not file.filename.endswith(allowed_suffixes):
+        allowed_label = " or ".join(allowed_suffixes)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid file type. Please upload a {expected_suffix} file.",
+            detail=f"Invalid file type. Please upload a {allowed_label} file.",
         )
+
+    upload_suffix = Path(file.filename).suffix.lower()
 
     backup_service = create_backup_service(get_db)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=expected_suffix) as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=upload_suffix) as tmp:
         tmp_path = Path(tmp.name)
         try:
             content = await file.read()

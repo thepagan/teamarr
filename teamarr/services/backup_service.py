@@ -9,6 +9,7 @@ Provides functionality for:
 """
 
 import logging
+import re
 import sqlite3
 import subprocess
 from collections.abc import Callable
@@ -466,6 +467,8 @@ class BackupService:
     def restore_backup_from_path(self, backup_path: Path) -> tuple[bool, str, str | None]:
         """Restore the active database from a backup file path."""
         if self._is_postgres():
+            if backup_path.suffix.lower() == ".db":
+                return self._import_sqlite_backup_into_postgres(backup_path)
             return self._restore_postgres_backup(backup_path)
         return self._restore_sqlite_backup(backup_path)
 
@@ -557,6 +560,189 @@ class BackupService:
             "Database restored. Please restart the application for changes to take effect.",
             str(pre_restore_path) if pre_restore_path else None,
         )
+
+    def _import_sqlite_backup_into_postgres(self, backup_path: Path) -> tuple[bool, str, str | None]:
+        """Import a SQLite Teamarr backup into the active PostgreSQL database."""
+        try:
+            source_conn = sqlite3.connect(str(backup_path))
+            source_conn.row_factory = sqlite3.Row
+        except sqlite3.DatabaseError as exc:
+            return False, f"Invalid SQLite database: {exc}", None
+
+        pre_restore_path = None
+        try:
+            settings_row = source_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
+            ).fetchone()
+            if not settings_row:
+                return False, "Invalid backup file: missing required Teamarr tables", None
+
+            self._ensure_backup_dir()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pre_restore_path = self._backup_path / f"teamarr_pre_restore_{timestamp}.sql"
+            self._create_postgres_backup(pre_restore_path)
+            logger.info("[RESTORE] Created pre-restore backup at %s", pre_restore_path)
+
+            source_tables = self._get_sqlite_tables(source_conn)
+
+            with self._db_factory() as conn:
+                target_tables = self._get_postgres_tables(conn)
+                common_tables = [table for table in source_tables if table in target_tables]
+
+                self._truncate_postgres_tables(conn, target_tables)
+
+                import_order = self._toposort_sqlite_tables(source_conn, common_tables)
+                for table_name in import_order:
+                    self._copy_sqlite_table_to_postgres(source_conn, conn, table_name)
+
+                self._reset_postgres_sequences(conn, common_tables)
+        except Exception as exc:
+            logger.error("[RESTORE] Failed to import SQLite backup %s into PostgreSQL: %s", backup_path.name, exc)
+            return False, str(exc), str(pre_restore_path) if pre_restore_path else None
+        finally:
+            source_conn.close()
+
+        logger.info("[RESTORE] Imported SQLite backup %s into PostgreSQL", backup_path.name)
+        return (
+            True,
+            "SQLite backup imported into PostgreSQL. Please restart the application for changes to take effect.",
+            str(pre_restore_path) if pre_restore_path else None,
+        )
+
+    def _get_sqlite_tables(self, conn: sqlite3.Connection) -> list[str]:
+        """Return user tables from a SQLite backup in stable schema order."""
+        rows = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY rowid
+            """
+        ).fetchall()
+        return [row["name"] for row in rows]
+
+    def _get_postgres_tables(self, conn: Any) -> list[str]:
+        """Return user tables in the active PostgreSQL schema."""
+        rows = conn.execute(
+            """
+            SELECT tablename AS table_name
+            FROM pg_catalog.pg_tables
+            WHERE schemaname = current_schema()
+            ORDER BY tablename
+            """
+        ).fetchall()
+        return [row["table_name"] for row in rows]
+
+    def _toposort_sqlite_tables(
+        self,
+        sqlite_conn: sqlite3.Connection,
+        tables: list[str],
+    ) -> list[str]:
+        """Order tables so referenced parents are imported before children."""
+        table_set = set(tables)
+        deps: dict[str, set[str]] = {table: set() for table in tables}
+        reverse_deps: dict[str, set[str]] = {table: set() for table in tables}
+
+        for table in tables:
+            pragma_table = table.replace('"', '""')
+            fk_rows = sqlite_conn.execute(f'PRAGMA foreign_key_list("{pragma_table}")').fetchall()
+            for fk in fk_rows:
+                parent = fk["table"]
+                if parent in table_set and parent != table:
+                    deps[table].add(parent)
+                    reverse_deps[parent].add(table)
+
+        ready = sorted(table for table, parents in deps.items() if not parents)
+        ordered: list[str] = []
+
+        while ready:
+            table = ready.pop(0)
+            ordered.append(table)
+            for child in sorted(reverse_deps[table]):
+                deps[child].discard(table)
+                if not deps[child] and child not in ordered and child not in ready:
+                    ready.append(child)
+
+        if len(ordered) != len(tables):
+            remaining = [table for table in tables if table not in ordered]
+            ordered.extend(remaining)
+
+        return ordered
+
+    def _truncate_postgres_tables(self, conn: Any, table_names: list[str]) -> None:
+        """Remove all existing PostgreSQL data before restore/import."""
+        if not table_names:
+            return
+        quoted_tables = ", ".join(self._quote_ident(table_name) for table_name in table_names)
+        conn.execute(f"TRUNCATE TABLE {quoted_tables} RESTART IDENTITY CASCADE")
+
+    def _copy_sqlite_table_to_postgres(
+        self,
+        source_conn: sqlite3.Connection,
+        target_conn: Any,
+        table_name: str,
+    ) -> None:
+        """Copy all rows from a SQLite table into PostgreSQL."""
+        pragma_table = table_name.replace('"', '""')
+        columns = [
+            row["name"]
+            for row in source_conn.execute(f'PRAGMA table_info("{pragma_table}")').fetchall()
+        ]
+        if not columns:
+            return
+
+        selected_columns = ", ".join(self._quote_ident(column_name) for column_name in columns)
+        source_rows = source_conn.execute(
+            f'SELECT {selected_columns} FROM "{pragma_table}"'
+        ).fetchall()
+        if not source_rows:
+            return
+
+        insert_columns = ", ".join(self._quote_ident(column_name) for column_name in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        insert_sql = (
+            f"INSERT INTO {self._quote_ident(table_name)} ({insert_columns}) "
+            f"VALUES ({placeholders})"
+        )
+        target_conn.executemany(insert_sql, [tuple(row[column] for column in columns) for row in source_rows])
+
+    def _reset_postgres_sequences(self, conn: Any, table_names: list[str]) -> None:
+        """Reset PostgreSQL sequences to match imported explicit IDs."""
+        for table_name in table_names:
+            if not self._table_has_integer_id_column(conn, table_name):
+                continue
+            quoted_table = self._quote_ident(table_name)
+            conn.execute(
+                f"""
+                SELECT setval(
+                    pg_get_serial_sequence('{table_name}', 'id'),
+                    COALESCE((SELECT MAX(id) FROM {quoted_table}), 1),
+                    (SELECT COUNT(*) > 0 FROM {quoted_table})
+                )
+                WHERE pg_get_serial_sequence('{table_name}', 'id') IS NOT NULL
+                """
+            )
+
+    def _table_has_integer_id_column(self, conn: Any, table_name: str) -> bool:
+        """Return whether a PostgreSQL table has an integer-like id column."""
+        row = conn.execute(
+            """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = ?
+              AND column_name = 'id'
+            """,
+            (table_name,),
+        ).fetchone()
+        return bool(row and row["data_type"] in {"smallint", "integer", "bigint"})
+
+    def _quote_ident(self, identifier: str) -> str:
+        """Quote a SQL identifier for PostgreSQL/SQLite."""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+            raise ValueError(f"Invalid SQL identifier: {identifier}")
+        return f'"{identifier}"'
 
     def get_backup_filepath(self, filename: str) -> Path | None:
         """Get full path to a backup file.

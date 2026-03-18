@@ -136,6 +136,7 @@ def init_db(db_path: Path | str | None = None) -> None:
             conn.executescript(schema_sql)
             _normalize_postgres_schema(conn)
             conn.execute("SELECT id FROM settings LIMIT 1")
+            _maybe_auto_import_sqlite_into_postgres(conn, path)
 
         logger.info("[DB] PostgreSQL schema initialized")
         return
@@ -307,6 +308,71 @@ def _normalize_postgres_schema(conn: Any) -> None:
                 ALTER COLUMN {row["column_name"]} SET DEFAULT {default_literal}
                 """
             )
+
+
+def _maybe_auto_import_sqlite_into_postgres(conn: Any, sqlite_path: Path) -> None:
+    """Auto-import an existing SQLite Teamarr database into an empty PostgreSQL database."""
+    if not getattr(conn, "dialect", None) == "postgres":
+        return
+
+    if not _postgres_is_bootstrap_empty(conn):
+        return
+
+    if not sqlite_path.exists():
+        return
+
+    if not _is_valid_teamarr_sqlite_backup(sqlite_path):
+        return
+
+    from teamarr.services.backup_service import create_backup_service
+
+    logger.info("[DB] Empty PostgreSQL database detected; importing existing SQLite database from %s", sqlite_path)
+    backup_service = create_backup_service(get_db)
+    success, message, _ = backup_service.restore_backup_from_path(sqlite_path)
+    if not success:
+        raise RuntimeError(f"Automatic SQLite-to-PostgreSQL import failed: {message}")
+    logger.info("[DB] %s", message)
+
+
+def _postgres_is_bootstrap_empty(conn: Any) -> bool:
+    """Return True when PostgreSQL only has schema/seed data and no user content yet."""
+    bootstrap_tables = (
+        "teams",
+        "event_epg_groups",
+        "managed_channels",
+        "team_aliases",
+        "league_cache",
+        "team_cache",
+        "epg_matched_streams",
+        "epg_failed_matches",
+        "stream_match_cache",
+        "match_corrections",
+        "processing_runs",
+        "stats_snapshots",
+    )
+
+    for table_name in bootstrap_tables:
+        row = conn.execute(f'SELECT COUNT(*) AS count FROM "{table_name}"').fetchone()
+        if row and row["count"]:
+            return False
+    return True
+
+
+def _is_valid_teamarr_sqlite_backup(sqlite_path: Path) -> bool:
+    """Return True when the path points to a valid Teamarr SQLite database."""
+    try:
+        conn = sqlite3.connect(str(sqlite_path))
+        conn.row_factory = sqlite3.Row
+        settings_row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
+        ).fetchone()
+        leagues_row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='leagues'"
+        ).fetchone()
+        conn.close()
+        return bool(settings_row and leagues_row)
+    except sqlite3.DatabaseError:
+        return False
 
 
 def _rename_league_id_column_if_needed(conn: sqlite3.Connection) -> None:
