@@ -287,11 +287,24 @@ def _normalize_postgres_schema(conn: Any) -> None:
 
     for row in columns:
         if row["data_type"] == "integer":
+            default_literal = "TRUE" if row["column_name"] == "enabled" else "FALSE"
+            conn.execute(
+                f"""
+                ALTER TABLE leagues
+                ALTER COLUMN {row["column_name"]} DROP DEFAULT
+                """
+            )
             conn.execute(
                 f"""
                 ALTER TABLE leagues
                 ALTER COLUMN {row["column_name"]} TYPE BOOLEAN
                 USING ({row["column_name"]} <> 0)
+                """
+            )
+            conn.execute(
+                f"""
+                ALTER TABLE leagues
+                ALTER COLUMN {row["column_name"]} SET DEFAULT {default_literal}
                 """
             )
 
