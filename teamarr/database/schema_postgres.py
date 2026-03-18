@@ -36,6 +36,12 @@ def build_postgres_schema(sqlite_schema_sql: str) -> str:
     )
     schema_sql = re.sub(r"\bBOOLEAN\s+DEFAULT\s+1\b", "BOOLEAN DEFAULT TRUE", schema_sql)
     schema_sql = re.sub(r"\bBOOLEAN\s+DEFAULT\s+0\b", "BOOLEAN DEFAULT FALSE", schema_sql)
+    schema_sql = re.sub(r"\benabled\s+INTEGER\s+DEFAULT\s+1\b", "enabled BOOLEAN DEFAULT TRUE", schema_sql)
+    schema_sql = re.sub(
+        r"\bimport_enabled\s+INTEGER\s+DEFAULT\s+0\b",
+        "import_enabled BOOLEAN DEFAULT FALSE",
+        schema_sql,
+    )
     schema_sql = re.sub(r"(\w+)\s+COLLATE\s+NOCASE", r"LOWER(\1)", schema_sql)
     schema_sql = schema_sql.replace(" JSON DEFAULT ", " JSONB DEFAULT ")
     schema_sql = re.sub(r"\bJSON\b", "JSONB", schema_sql)

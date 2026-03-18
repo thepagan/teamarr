@@ -134,6 +134,7 @@ def init_db(db_path: Path | str | None = None) -> None:
 
         with get_db(db_path) as conn:
             conn.executescript(schema_sql)
+            _normalize_postgres_schema(conn)
             conn.execute("SELECT id FROM settings LIMIT 1")
 
         logger.info("[DB] PostgreSQL schema initialized")
@@ -267,6 +268,32 @@ def _verify_database_integrity(conn: sqlite3.Connection, path: Path) -> None:
         # Set global flag for V1 detection - don't raise error, let migration handle it
         global _v1_database_detected
         _v1_database_detected = True
+
+
+def _normalize_postgres_schema(conn: Any) -> None:
+    """Normalize PostgreSQL column types for legacy SQLite-style definitions."""
+    if not getattr(conn, "dialect", None) == "postgres":
+        return
+
+    columns = conn.execute(
+        """
+        SELECT table_name, column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'leagues'
+          AND column_name IN ('enabled', 'import_enabled')
+        """
+    ).fetchall()
+
+    for row in columns:
+        if row["data_type"] == "integer":
+            conn.execute(
+                f"""
+                ALTER TABLE leagues
+                ALTER COLUMN {row["column_name"]} TYPE BOOLEAN
+                USING ({row["column_name"]} <> 0)
+                """
+            )
 
 
 def _rename_league_id_column_if_needed(conn: sqlite3.Connection) -> None:
