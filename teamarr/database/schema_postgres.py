@@ -42,6 +42,7 @@ def build_postgres_schema(sqlite_schema_sql: str) -> str:
         "import_enabled BOOLEAN DEFAULT FALSE",
         schema_sql,
     )
+    schema_sql = _translate_schema_boolean_predicates(schema_sql)
     schema_sql = re.sub(r"(\w+)\s+COLLATE\s+NOCASE", r"LOWER(\1)", schema_sql)
     schema_sql = schema_sql.replace(" JSON DEFAULT ", " JSONB DEFAULT ")
     schema_sql = re.sub(r"\bJSON\b", "JSONB", schema_sql)
@@ -71,6 +72,28 @@ EXECUTE FUNCTION set_updated_at();"""
     if trigger_sql:
         parts.append(trigger_sql)
     return "\n\n".join(part for part in parts if part) + "\n"
+
+
+def _translate_schema_boolean_predicates(sql: str) -> str:
+    boolean_columns = {
+        match.group(1)
+        for match in re.finditer(r"^\s*(\w+)\s+BOOLEAN\b", sql, flags=re.IGNORECASE | re.MULTILINE)
+    }
+    translated = sql
+    for column_name in boolean_columns:
+        translated = re.sub(
+            rf"\b{re.escape(column_name)}\s*=\s*1\b",
+            f"{column_name} = TRUE",
+            translated,
+            flags=re.IGNORECASE,
+        )
+        translated = re.sub(
+            rf"\b{re.escape(column_name)}\s*=\s*0\b",
+            f"{column_name} = FALSE",
+            translated,
+            flags=re.IGNORECASE,
+        )
+    return translated
 
 
 def _translate_insert_or_ignore(sql: str) -> str:
