@@ -107,7 +107,7 @@ def _translate_insert_or_ignore(sql: str) -> str:
 
 def _translate_schema_upserts(sql: str) -> str:
     replacements = {
-        "sports": ("sport_code", ["display_name"]),
+        "sports": ("sport_code", ["display_name"], []),
         "leagues": (
             "league_code",
             [
@@ -127,10 +127,11 @@ def _translate_schema_upserts(sql: str) -> str:
                 "fallback_league_id",
                 "tsdb_tier",
             ],
+            ["import_enabled"],
         ),
     }
 
-    for table_name, (conflict_target, update_columns) in replacements.items():
+    for table_name, (conflict_target, update_columns, boolean_columns) in replacements.items():
         sql = re.sub(
             rf"INSERT\s+OR\s+REPLACE\s+INTO\s+{table_name}\s*\((?P<columns>.*?)\)\s*VALUES\s*(?P<values>.*?);",
             lambda match: _build_upsert_sql(
@@ -139,6 +140,7 @@ def _translate_schema_upserts(sql: str) -> str:
                 match.group("values"),
                 conflict_target,
                 update_columns,
+                boolean_columns,
             ),
             sql,
             flags=re.IGNORECASE | re.DOTALL,
@@ -153,9 +155,67 @@ def _build_upsert_sql(
     values_sql: str,
     conflict_target: str,
     update_columns: list[str],
+    boolean_columns: list[str],
 ) -> str:
+    columns = [column.strip() for column in columns_sql.split(",")]
+    translated_values = _translate_upsert_boolean_values(values_sql, columns, set(boolean_columns))
     set_sql = ",\n    ".join(f"{column} = EXCLUDED.{column}" for column in update_columns)
     return (
-        f"INSERT INTO {table_name} ({columns_sql}) VALUES {values_sql}\n"
+        f"INSERT INTO {table_name} ({columns_sql}) VALUES {translated_values}\n"
         f"ON CONFLICT ({conflict_target}) DO UPDATE SET\n    {set_sql};"
     )
+
+
+def _translate_upsert_boolean_values(
+    values_sql: str,
+    columns: list[str],
+    boolean_columns: set[str],
+) -> str:
+    if not boolean_columns:
+        return values_sql
+
+    boolean_indexes = {index for index, column in enumerate(columns) if column in boolean_columns}
+    if not boolean_indexes:
+        return values_sql
+
+    def replace_tuple(match: re.Match[str]) -> str:
+        inner = match.group("inner")
+        parts = _split_sql_csv(inner)
+        for index in boolean_indexes:
+            if index >= len(parts):
+                continue
+            token = parts[index].strip()
+            if token == "1":
+                parts[index] = "TRUE"
+            elif token == "0":
+                parts[index] = "FALSE"
+        return "(" + ", ".join(parts) + ")"
+
+    return re.sub(r"\((?P<inner>[^()]*)\)", replace_tuple, values_sql)
+
+
+def _split_sql_csv(sql: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+
+    for char in sql:
+        if char == "'" and not in_double:
+            in_single = not in_single
+            current.append(char)
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            current.append(char)
+            continue
+        if char == "," and not in_single and not in_double:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+
+    if current:
+        parts.append("".join(current).strip())
+
+    return parts
