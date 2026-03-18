@@ -2,8 +2,6 @@
 
 import logging
 import os
-import shutil
-import sqlite3
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -20,15 +18,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/backup")
 
 
-def _ensure_sqlite_backup_mode() -> None:
-    """Reject SQLite file backup flows when PostgreSQL is configured."""
-    if _is_postgres_url(get_database_url()):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="SQLite file backup/restore endpoints are not available when using PostgreSQL.",
-        )
-
-
 # =============================================================================
 # VALIDATION HELPERS
 # =============================================================================
@@ -41,7 +30,7 @@ def _validate_backup_filename(filename: str) -> None:
     """
     if (
         not filename.startswith("teamarr_")
-        or not filename.endswith(".db")
+        or Path(filename).suffix not in {".db", ".sql"}
         or "/" in filename
         or "\\" in filename
         or ".." in filename
@@ -110,6 +99,11 @@ class BackupSettingsUpdate(BaseModel):
     path: str | None = None
 
 
+def _get_backup_media_type(filename: str) -> str:
+    """Return the download media type for a backup file."""
+    return "application/sql" if filename.endswith(".sql") else "application/x-sqlite3"
+
+
 # =============================================================================
 # BACKUP MANAGEMENT ENDPOINTS
 # =============================================================================
@@ -148,8 +142,6 @@ async def create_backup():
 
     Creates a new backup file in the configured backup directory.
     """
-    _ensure_sqlite_backup_mode()
-
     from teamarr.services.backup_service import create_backup_service
 
     backup_service = create_backup_service(get_db)
@@ -253,8 +245,6 @@ async def restore_from_backup(filename: str):
     Creates a pre-restore backup of the current database before restoring.
     The application will need to be restarted for changes to take effect.
     """
-    _ensure_sqlite_backup_mode()
-
     from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
@@ -282,8 +272,6 @@ async def download_specific_backup(filename: str):
     Args:
         filename: The backup filename to download
     """
-    _ensure_sqlite_backup_mode()
-
     from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
@@ -300,7 +288,7 @@ async def download_specific_backup(filename: str):
     return FileResponse(
         path=str(backup_path),
         filename=filename,
-        media_type="application/x-sqlite3",
+        media_type=_get_backup_media_type(filename),
     )
 
 
@@ -403,9 +391,23 @@ async def update_backup_settings(update: BackupSettingsUpdate):
 async def download_backup():
     """Download a backup of the database.
 
-    Returns the SQLite database file as a downloadable attachment.
+    Returns the active backend as a downloadable backup attachment.
     """
-    _ensure_sqlite_backup_mode()
+    if _is_postgres_url(get_database_url()):
+        from teamarr.services.backup_service import create_backup_service
+
+        backup_service = create_backup_service(get_db)
+        result = backup_service.create_backup(manual=True)
+        if not result.success or not result.filepath or not result.filename:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.error or "Failed to create backup",
+            )
+        return FileResponse(
+            path=result.filepath,
+            filename=result.filename,
+            media_type=_get_backup_media_type(result.filename),
+        )
 
     if not DEFAULT_DB_PATH.exists():
         raise HTTPException(
@@ -430,67 +432,43 @@ async def download_backup():
 async def restore_backup(file: UploadFile = File(...)):
     """Restore database from uploaded backup.
 
-    The uploaded file must be a valid SQLite database.
+    The uploaded file must match the active database backend.
     A backup of the current database is created before restoring.
 
     WARNING: This will replace ALL current data!
     """
-    _ensure_sqlite_backup_mode()
+    from teamarr.services.backup_service import create_backup_service
 
-    # Validate file extension
-    if not file.filename or not file.filename.endswith(".db"):
+    is_postgres = _is_postgres_url(get_database_url())
+    expected_suffix = ".sql" if is_postgres else ".db"
+
+    if not file.filename or not file.filename.endswith(expected_suffix):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type. Please upload a .db file.",
+            detail=f"Invalid file type. Please upload a {expected_suffix} file.",
         )
 
-    # Create temp file to validate upload
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+    backup_service = create_backup_service(get_db)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=expected_suffix) as tmp:
         tmp_path = Path(tmp.name)
         try:
-            # Write uploaded content to temp file
             content = await file.read()
             tmp.write(content)
             tmp.flush()
 
-            # Validate it's a valid SQLite database
-            try:
-                conn = sqlite3.connect(str(tmp_path))
-                cursor = conn.cursor()
-                # Check for expected tables
-                cursor.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
-                )
-                if not cursor.fetchone():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Invalid backup file: missing required tables",
-                    )
-                conn.close()
-            except sqlite3.DatabaseError as e:
+            success, message, pre_restore_path = backup_service.restore_backup_from_path(tmp_path)
+            if not success:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid SQLite database: {e}",
-                ) from e
-
-            # Create backup of current database before restoring
-            backup_path = None
-            if DEFAULT_DB_PATH.exists():
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = DEFAULT_DB_PATH.parent / f"teamarr_pre_restore_{timestamp}.db"
-                shutil.copy2(DEFAULT_DB_PATH, backup_path)
-                logger.info("[RESTORE] Created pre-restore backup at %s", backup_path)
-
-            # Replace database with uploaded file
-            shutil.copy2(tmp_path, DEFAULT_DB_PATH)
-            logger.info("[RESTORE] Database restored from uploaded backup")
+                    detail=message,
+                )
 
             return RestoreResponse(
                 success=True,
-                message="Database restored. Please restart the application for changes to take effect.",  # noqa: E501
-                backup_path=str(backup_path) if backup_path else None,
+                message=message,
+                backup_path=pre_restore_path,
             )
 
         finally:
-            # Clean up temp file
             tmp_path.unlink(missing_ok=True)

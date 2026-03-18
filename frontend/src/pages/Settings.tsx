@@ -528,12 +528,12 @@ function BackupRestoreCard() {
           <div className="flex items-center gap-4">
             <div className="flex-1">
               <p className="text-xs text-muted-foreground mb-2">
-                Upload a .db backup file to restore. A pre-restore backup will be created first.
+                Upload a backup file to restore. Use `.db` for SQLite or `.sql` for PostgreSQL. A pre-restore backup will be created first.
               </p>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".db"
+                accept=".db,.sql"
                 onChange={handleUploadRestore}
                 className="hidden"
               />

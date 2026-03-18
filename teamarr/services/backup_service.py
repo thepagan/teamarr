@@ -10,6 +10,7 @@ Provides functionality for:
 
 import logging
 import sqlite3
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,12 +56,13 @@ class RotationResult:
 class BackupService:
     """Service for managing database backups.
 
-    Backups are SQLite database copies stored in a configurable directory.
+    Backups are backend-native database copies stored in a configurable directory.
     Protected backups have a .protected marker file alongside them.
 
     Naming convention:
     - Scheduled: teamarr_scheduled_YYYYMMDD_HHMMSS.db
     - Manual: teamarr_manual_YYYYMMDD_HHMMSS.db
+    - PostgreSQL manual/scheduled backups use .sql instead of .db
     """
 
     def __init__(
@@ -87,6 +89,22 @@ class BackupService:
 
         return DEFAULT_DB_PATH
 
+    def _is_postgres(self) -> bool:
+        """Return whether the active backend is PostgreSQL."""
+        from teamarr.database.connection import _is_postgres_url, get_database_url
+
+        return _is_postgres_url(get_database_url())
+
+    def _get_database_url(self) -> str | None:
+        """Return the active DATABASE_URL, if any."""
+        from teamarr.database.connection import get_database_url
+
+        return get_database_url()
+
+    def _get_backup_extension(self) -> str:
+        """Return the backup file extension for the active backend."""
+        return ".sql" if self._is_postgres() else ".db"
+
     def _generate_filename(self, backup_type: str) -> str:
         """Generate backup filename with timestamp.
 
@@ -94,10 +112,10 @@ class BackupService:
             backup_type: 'scheduled' or 'manual'
 
         Returns:
-            Filename like 'teamarr_manual_20240115_143052.db'
+            Filename like 'teamarr_manual_20240115_143052.db' or '.sql'
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"teamarr_{backup_type}_{timestamp}.db"
+        return f"teamarr_{backup_type}_{timestamp}{self._get_backup_extension()}"
 
     def _get_protected_marker_path(self, backup_path: Path) -> Path:
         """Get path to protection marker file.
@@ -108,7 +126,7 @@ class BackupService:
         Returns:
             Path to .protected marker file
         """
-        return backup_path.with_suffix(".db.protected")
+        return backup_path.with_suffix(f"{backup_path.suffix}.protected")
 
     def _is_protected(self, backup_path: Path) -> bool:
         """Check if a backup is protected.
@@ -130,12 +148,15 @@ class BackupService:
         Returns:
             Tuple of (backup_type, datetime) or None if invalid
         """
-        if not filename.startswith("teamarr_") or not filename.endswith(".db"):
+        if not filename.startswith("teamarr_"):
+            return None
+        suffix = Path(filename).suffix
+        if suffix not in {".db", ".sql"}:
             return None
 
         try:
-            # teamarr_TYPE_YYYYMMDD_HHMMSS.db
-            parts = filename[8:-3].split("_")  # Remove 'teamarr_' and '.db'
+            # teamarr_TYPE_YYYYMMDD_HHMMSS.(db|sql)
+            parts = Path(filename).stem[8:].split("_")
             if len(parts) < 3:
                 return None
 
@@ -166,30 +187,10 @@ class BackupService:
         backup_filepath = self._backup_path / filename
 
         try:
-            from teamarr.database.connection import _is_postgres_url, get_database_url
-
-            if _is_postgres_url(get_database_url()):
-                return BackupResult(
-                    success=False,
-                    error="Built-in backups currently support SQLite only. Use pg_dump for PostgreSQL.",
-                )
-
-            db_path = self._get_db_path()
-
-            if not db_path.exists():
-                return BackupResult(
-                    success=False,
-                    error=f"Database file not found: {db_path}",
-                )
-
-            # Use sqlite3.backup() for safe copy of live database
-            src = sqlite3.connect(str(db_path))
-            dst = sqlite3.connect(str(backup_filepath))
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
+            if self._is_postgres():
+                self._create_postgres_backup(backup_filepath)
+            else:
+                self._create_sqlite_backup(backup_filepath)
 
             # Get file size
             size_bytes = backup_filepath.stat().st_size
@@ -218,6 +219,64 @@ class BackupService:
                 error=str(e),
             )
 
+    def _create_sqlite_backup(self, backup_filepath: Path) -> None:
+        """Create a SQLite file backup."""
+        db_path = self._get_db_path()
+
+        if not db_path.exists():
+            raise FileNotFoundError(f"Database file not found: {db_path}")
+
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(backup_filepath))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+
+    def _create_postgres_backup(self, backup_filepath: Path) -> None:
+        """Create a PostgreSQL SQL dump using pg_dump."""
+        database_url = self._get_database_url()
+        if not database_url:
+            raise RuntimeError("DATABASE_URL is not configured for PostgreSQL backup")
+
+        self._run_postgres_command(
+            [
+                "pg_dump",
+                f"--file={backup_filepath}",
+                f"--dbname={database_url}",
+                "--format=plain",
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                "--no-privileges",
+            ],
+            action="create PostgreSQL backup",
+        )
+
+    def _run_postgres_command(self, command: list[str], *, action: str) -> None:
+        """Run a PostgreSQL client command and raise a friendly error on failure."""
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            tool = Path(command[0]).name
+            raise RuntimeError(
+                f"{tool} is not installed in the Teamarr runtime. Install PostgreSQL client tools to {action}."
+            ) from exc
+
+        if result.returncode == 0:
+            return
+
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        detail = stderr or stdout or f"exit code {result.returncode}"
+        raise RuntimeError(f"Failed to {action}: {detail}")
+
     def list_backups(self) -> list[BackupInfo]:
         """List all backup files with metadata.
 
@@ -227,27 +286,28 @@ class BackupService:
         self._ensure_backup_dir()
 
         backups = []
-        for file_path in self._backup_path.glob("teamarr_*.db"):
-            parsed = self._parse_backup_filename(file_path.name)
-            if not parsed:
-                continue
+        for pattern in ("teamarr_*.db", "teamarr_*.sql"):
+            for file_path in self._backup_path.glob(pattern):
+                parsed = self._parse_backup_filename(file_path.name)
+                if not parsed:
+                    continue
 
-            backup_type, created_at = parsed
+                backup_type, created_at = parsed
 
-            try:
-                stat = file_path.stat()
-                backups.append(
-                    BackupInfo(
-                        filename=file_path.name,
-                        filepath=str(file_path),
-                        size_bytes=stat.st_size,
-                        created_at=created_at,
-                        is_protected=self._is_protected(file_path),
-                        backup_type=backup_type,
+                try:
+                    stat = file_path.stat()
+                    backups.append(
+                        BackupInfo(
+                            filename=file_path.name,
+                            filepath=str(file_path),
+                            size_bytes=stat.st_size,
+                            created_at=created_at,
+                            is_protected=self._is_protected(file_path),
+                            backup_type=backup_type,
+                        )
                     )
-                )
-            except OSError:
-                continue
+                except OSError:
+                    continue
 
         # Sort by creation time, newest first
         backups.sort(key=lambda b: b.created_at, reverse=True)
@@ -401,6 +461,17 @@ class BackupService:
         if not backup_path.exists():
             return False, "Backup not found", None
 
+        return self.restore_backup_from_path(backup_path)
+
+    def restore_backup_from_path(self, backup_path: Path) -> tuple[bool, str, str | None]:
+        """Restore the active database from a backup file path."""
+        if self._is_postgres():
+            return self._restore_postgres_backup(backup_path)
+        return self._restore_sqlite_backup(backup_path)
+
+    def _restore_sqlite_backup(self, backup_path: Path) -> tuple[bool, str, str | None]:
+        """Restore the SQLite database from a backup file."""
+
         # Validate the backup is a valid SQLite database
         try:
             conn = sqlite3.connect(str(backup_path))
@@ -437,7 +508,50 @@ class BackupService:
             dst.close()
             src.close()
 
-        logger.info("[RESTORE] Database restored from %s", filename)
+        logger.info("[RESTORE] Database restored from %s", backup_path.name)
+        return (
+            True,
+            "Database restored. Please restart the application for changes to take effect.",
+            str(pre_restore_path) if pre_restore_path else None,
+        )
+
+    def _restore_postgres_backup(self, backup_path: Path) -> tuple[bool, str, str | None]:
+        """Restore PostgreSQL from a SQL dump file."""
+        if backup_path.suffix.lower() != ".sql":
+            return False, "PostgreSQL restore requires a .sql backup file", None
+
+        if not backup_path.exists() or backup_path.stat().st_size == 0:
+            return False, "Backup file is empty or missing", None
+
+        pre_restore_path = None
+        try:
+            self._ensure_backup_dir()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pre_restore_path = self._backup_path / f"teamarr_pre_restore_{timestamp}.sql"
+            self._create_postgres_backup(pre_restore_path)
+            logger.info("[RESTORE] Created pre-restore backup at %s", pre_restore_path)
+
+            database_url = self._get_database_url()
+            if not database_url:
+                return False, "DATABASE_URL is not configured for PostgreSQL restore", None
+
+            self._run_postgres_command(
+                [
+                    "psql",
+                    f"--dbname={database_url}",
+                    "--single-transaction",
+                    "--set",
+                    "ON_ERROR_STOP=1",
+                    "--file",
+                    str(backup_path),
+                ],
+                action="restore PostgreSQL backup",
+            )
+        except Exception as e:
+            logger.error("[RESTORE] Failed to restore PostgreSQL backup %s: %s", backup_path.name, e)
+            return False, str(e), str(pre_restore_path) if pre_restore_path else None
+
+        logger.info("[RESTORE] PostgreSQL database restored from %s", backup_path.name)
         return (
             True,
             "Database restored. Please restart the application for changes to take effect.",

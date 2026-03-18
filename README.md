@@ -49,6 +49,10 @@ services:
 
 SQLite remains the default backend. Teamarr only uses PostgreSQL when `DATABASE_URL` is set to a `postgres://` or `postgresql://` DSN.
 
+Backups remain backend-native:
+- SQLite instances create and restore `.db` backups
+- PostgreSQL instances create and restore `.sql` dumps
+
 ## Upgrading from Legacy (1.x)
 
 **There is no automatic migration path from legacy 1.x releases** due to significant architectural changes.
