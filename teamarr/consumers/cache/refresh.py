@@ -521,10 +521,16 @@ class CacheRefresher:
             ]
             cursor.executemany(
                 """
-                INSERT OR REPLACE INTO league_cache
+                INSERT INTO league_cache
                 (league_slug, provider, league_name, sport, logo_url,
                  team_count, last_refreshed)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (league_slug, provider) DO UPDATE SET
+                    league_name = EXCLUDED.league_name,
+                    sport = EXCLUDED.sport,
+                    logo_url = EXCLUDED.logo_url,
+                    team_count = EXCLUDED.team_count,
+                    last_refreshed = EXCLUDED.last_refreshed
                 """,
                 league_data,
             )

@@ -417,9 +417,13 @@ class PersistentTTLCache:
                         data_json = json.dumps(value, default=str)
                         conn.execute(
                             """
-                            INSERT OR REPLACE INTO service_cache
+                            INSERT INTO service_cache
                             (cache_key, data_json, expires_at, created_at)
                             VALUES (?, ?, ?, ?)
+                            ON CONFLICT (cache_key) DO UPDATE SET
+                                data_json = EXCLUDED.data_json,
+                                expires_at = EXCLUDED.expires_at,
+                                created_at = EXCLUDED.created_at
                             """,
                             (key, data_json, expires_at.isoformat(), now),
                         )

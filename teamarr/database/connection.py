@@ -1,16 +1,26 @@
 """Database connection management.
 
-Simple SQLite connection handling with schema initialization.
+Defaults to SQLite and switches to PostgreSQL when DATABASE_URL points to a
+PostgreSQL backend.
 """
 
 import json
 import logging
+import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+
+try:
+    import psycopg2
+except Exception:  # pragma: no cover - optional dependency
+    psycopg2 = None
 
 from teamarr.database.checkpoint_v43 import apply_checkpoint_v43
+from teamarr.database.postgres_compat import PostgresConnectionWrapper
+from teamarr.database.schema_postgres import build_postgres_schema
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +39,41 @@ def is_v1_database_detected() -> bool:
     return _v1_database_detected
 
 
-def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
+def get_database_url() -> str | None:
+    """Return DATABASE_URL from the environment if configured."""
+    value = os.getenv("DATABASE_URL")
+    return value.strip() if value else None
+
+
+def _is_postgres_url(database_url: str | None) -> bool:
+    """Check whether DATABASE_URL points to PostgreSQL."""
+    if not database_url:
+        return False
+    lowered = database_url.lower()
+    return lowered.startswith("postgres://") or lowered.startswith("postgresql://")
+
+
+def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection | Any:
     """Get a database connection.
 
     Args:
         db_path: Path to database file. Uses DEFAULT_DB_PATH if not specified.
 
     Returns:
-        SQLite connection with row factory set to sqlite3.Row
+        SQLite connection by default, or PostgreSQL wrapper when DATABASE_URL is configured.
     """
+    database_url = get_database_url()
+    if _is_postgres_url(database_url):
+        if psycopg2 is None:
+            raise RuntimeError(
+                "DATABASE_URL points to PostgreSQL, but psycopg2 is not installed. "
+                "Install a PostgreSQL driver before using this backend."
+            )
+
+        raw_conn = psycopg2.connect(database_url)
+        raw_conn.autocommit = False
+        return PostgresConnectionWrapper(raw_conn)
+
     path = Path(db_path) if db_path else DEFAULT_DB_PATH
 
     # timeout=30: Wait up to 30 seconds if database is locked by another connection
@@ -59,7 +95,7 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
 
 
 @contextmanager
-def get_db(db_path: Path | str | None = None) -> Generator[sqlite3.Connection, None, None]:
+def get_db(db_path: Path | str | None = None) -> Generator[sqlite3.Connection | Any, None, None]:
     """Context manager for database connections.
 
     Usage:
@@ -91,6 +127,18 @@ def init_db(db_path: Path | str | None = None) -> None:
         RuntimeError: If database file exists but is not a valid V2 database
     """
     path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    database_url = get_database_url()
+
+    if _is_postgres_url(database_url):
+        schema_sql = build_postgres_schema(SCHEMA_PATH.read_text())
+
+        with get_db(db_path) as conn:
+            conn.executescript(schema_sql)
+            conn.execute("SELECT id FROM settings LIMIT 1")
+
+        logger.info("[DB] PostgreSQL schema initialized")
+        return
+
     schema_sql = SCHEMA_PATH.read_text()
 
     try:
@@ -1796,6 +1844,21 @@ def reset_db(db_path: Path | str | None = None) -> None:
     Args:
         db_path: Path to database file. Uses DEFAULT_DB_PATH if not specified.
     """
+    if _is_postgres_url(get_database_url()):
+        with get_db(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT tablename
+                FROM pg_catalog.pg_tables
+                WHERE schemaname = current_schema()
+                """
+            ).fetchall()
+            for row in rows:
+                conn.execute(f'DROP TABLE IF EXISTS "{row["tablename"]}" CASCADE')
+
+        init_db(db_path)
+        return
+
     path = Path(db_path) if db_path else DEFAULT_DB_PATH
 
     if path.exists():

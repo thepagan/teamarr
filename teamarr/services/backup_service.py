@@ -166,6 +166,14 @@ class BackupService:
         backup_filepath = self._backup_path / filename
 
         try:
+            from teamarr.database.connection import _is_postgres_url, get_database_url
+
+            if _is_postgres_url(get_database_url()):
+                return BackupResult(
+                    success=False,
+                    error="Built-in backups currently support SQLite only. Use pg_dump for PostgreSQL.",
+                )
+
             db_path = self._get_db_path()
 
             if not db_path.exists():

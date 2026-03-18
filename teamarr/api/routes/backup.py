@@ -13,11 +13,20 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from teamarr.database import get_db
-from teamarr.database.connection import DEFAULT_DB_PATH
+from teamarr.database.connection import DEFAULT_DB_PATH, _is_postgres_url, get_database_url
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/backup")
+
+
+def _ensure_sqlite_backup_mode() -> None:
+    """Reject SQLite file backup flows when PostgreSQL is configured."""
+    if _is_postgres_url(get_database_url()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="SQLite file backup/restore endpoints are not available when using PostgreSQL.",
+        )
 
 
 # =============================================================================
@@ -139,6 +148,8 @@ async def create_backup():
 
     Creates a new backup file in the configured backup directory.
     """
+    _ensure_sqlite_backup_mode()
+
     from teamarr.services.backup_service import create_backup_service
 
     backup_service = create_backup_service(get_db)
@@ -242,6 +253,8 @@ async def restore_from_backup(filename: str):
     Creates a pre-restore backup of the current database before restoring.
     The application will need to be restarted for changes to take effect.
     """
+    _ensure_sqlite_backup_mode()
+
     from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
@@ -269,6 +282,8 @@ async def download_specific_backup(filename: str):
     Args:
         filename: The backup filename to download
     """
+    _ensure_sqlite_backup_mode()
+
     from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
@@ -390,6 +405,8 @@ async def download_backup():
 
     Returns the SQLite database file as a downloadable attachment.
     """
+    _ensure_sqlite_backup_mode()
+
     if not DEFAULT_DB_PATH.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -418,6 +435,8 @@ async def restore_backup(file: UploadFile = File(...)):
 
     WARNING: This will replace ALL current data!
     """
+    _ensure_sqlite_backup_mode()
+
     # Validate file extension
     if not file.filename or not file.filename.endswith(".db"):
         raise HTTPException(

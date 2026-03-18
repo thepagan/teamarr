@@ -260,12 +260,16 @@ _app_state: dict = {}
 async def lifespan(app: FastAPI):
     """Application lifespan handler - runs on startup and shutdown."""
     from teamarr.database import get_db, init_db
-    from teamarr.database.connection import is_v1_database_detected
+    from teamarr.database.connection import _is_postgres_url, get_database_url, is_v1_database_detected
     from teamarr.dispatcharr import close_dispatcharr
 
     # Startup - minimal blocking, then background tasks
     setup_logging()
     logger.info("[STARTUP] Starting Teamarr...")
+
+    database_url = get_database_url()
+    if _is_postgres_url(database_url):
+        logger.info("[STARTUP] PostgreSQL detected via DATABASE_URL; using PostgreSQL connection path.")
 
     # Initialize database (fast) - this also detects V1 databases
     init_db()

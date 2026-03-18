@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from teamarr.database.connection import DEFAULT_DB_PATH, get_connection
+from teamarr.database.connection import DEFAULT_DB_PATH, _is_postgres_url, get_connection, get_database_url
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,9 @@ def detect_v1_database() -> bool:
     - league_cache
     - processing_runs
     """
+    if _is_postgres_url(get_database_url()):
+        return False
+
     db_path = Path(DEFAULT_DB_PATH)
     if not db_path.exists():
         return False
@@ -101,6 +104,12 @@ async def archive_v1_database():
     Moves the V1 database to .teamarr.v1.bak and allows
     the app to create a fresh V2 database on next startup.
     """
+    if _is_postgres_url(get_database_url()):
+        raise HTTPException(
+            status_code=400,
+            detail="V1 SQLite archive flow is not applicable when Teamarr is using PostgreSQL.",
+        )
+
     db_path = Path(DEFAULT_DB_PATH)
     backup_path = get_backup_path()
 
@@ -132,6 +141,12 @@ async def archive_v1_database():
 @router.get("/download-backup")
 async def download_v1_backup():
     """Download the archived V1 database backup."""
+    if _is_postgres_url(get_database_url()):
+        raise HTTPException(
+            status_code=404,
+            detail="No SQLite V1 backup is available when Teamarr is configured for PostgreSQL.",
+        )
+
     backup_path = get_backup_path()
 
     if not backup_path.exists():

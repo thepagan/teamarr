@@ -4,6 +4,8 @@ Dynamic EPG Generator for Sports Channels
 
 ## Quick Start
 
+SQLite:
+
 ```yaml
 services:
   teamarr:
@@ -21,6 +23,31 @@ services:
 ```bash
 docker compose up -d
 ```
+
+PostgreSQL:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: teamarr
+      POSTGRES_USER: teamarr
+      POSTGRES_PASSWORD: teamarr
+
+  teamarr:
+    image: ghcr.io/pharaoh-labs/teamarr:latest
+    depends_on:
+      - postgres
+    ports:
+      - 9195:9195
+    environment:
+      - TZ=America/Detroit
+      - DATABASE_URL=postgresql://teamarr:teamarr@postgres:5432/teamarr
+```
+
+SQLite remains the default backend. Teamarr only uses PostgreSQL when `DATABASE_URL` is set to a `postgres://` or `postgresql://` DSN.
 
 ## Upgrading from Legacy (1.x)
 
