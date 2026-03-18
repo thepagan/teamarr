@@ -180,7 +180,7 @@ class PostgresConnectionWrapper:
     def __init__(self, raw_connection: Any):
         self._raw_connection = raw_connection
         self._serial_pk_cache: dict[str, bool] = {}
-        self._boolean_column_cache: set[str] | None = None
+        self._column_type_cache: dict[str, dict[str, str]] | None = None
 
     def cursor(self) -> PostgresCursorWrapper:
         return PostgresCursorWrapper(self, self._raw_connection.cursor())
@@ -264,22 +264,24 @@ class PostgresConnectionWrapper:
         self._serial_pk_cache[table_name] = result
         return result
 
-    def _get_boolean_columns(self) -> set[str]:
-        if self._boolean_column_cache is not None:
-            return self._boolean_column_cache
+    def _get_column_types(self) -> dict[str, dict[str, str]]:
+        if self._column_type_cache is not None:
+            return self._column_type_cache
 
         with self._raw_connection.cursor() as cur:
             cur.execute(
                 """
-                SELECT column_name
+                SELECT table_name, column_name, data_type
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
-                  AND data_type = 'boolean'
                 """
             )
-            self._boolean_column_cache = {row[0] for row in cur.fetchall()}
+            column_types: dict[str, dict[str, str]] = {}
+            for table_name, column_name, data_type in cur.fetchall():
+                column_types.setdefault(table_name, {})[column_name] = data_type
+            self._column_type_cache = column_types
 
-        return self._boolean_column_cache
+        return self._column_type_cache
 
     def _maybe_handle_sqlite_metadata(
         self,
@@ -403,21 +405,99 @@ class PostgresConnectionWrapper:
         return translated
 
     def _translate_boolean_comparisons(self, query: str) -> str:
-        translated = query
-        for column_name in self._get_boolean_columns():
-            translated = re.sub(
-                rf"\b{re.escape(column_name)}\s*=\s*1\b",
-                f"{column_name} = TRUE",
-                translated,
-                flags=re.IGNORECASE,
-            )
-            translated = re.sub(
-                rf"\b{re.escape(column_name)}\s*=\s*0\b",
-                f"{column_name} = FALSE",
-                translated,
-                flags=re.IGNORECASE,
-            )
+        aliases = self._extract_query_tables(query)
+
+        def replace_qualified(match: re.Match[str]) -> str:
+            alias = match.group("alias")
+            column = match.group("column")
+            operator = match.group("operator")
+            value = match.group("value")
+            table_name = aliases.get(alias.lower())
+            if table_name is None:
+                return match.group(0)
+            translated_value = self._translate_boolean_literal(table_name, column, value)
+            if translated_value is None:
+                return match.group(0)
+            return f"{alias}.{column} {operator} {translated_value}"
+
+        def replace_unqualified(match: re.Match[str]) -> str:
+            column = match.group("column")
+            operator = match.group("operator")
+            value = match.group("value")
+            table_name = self._resolve_unqualified_table(column, aliases)
+            if table_name is None:
+                return match.group(0)
+            translated_value = self._translate_boolean_literal(table_name, column, value)
+            if translated_value is None:
+                return match.group(0)
+            return f"{column} {operator} {translated_value}"
+
+        translated = re.sub(
+            r"(?P<alias>[a-zA-Z_][a-zA-Z0-9_]*)\.(?P<column>[a-zA-Z_][a-zA-Z0-9_]*)\s*"
+            r"(?P<operator>=|!=|<>)\s*(?P<value>TRUE|FALSE|0|1)\b",
+            replace_qualified,
+            query,
+            flags=re.IGNORECASE,
+        )
+        translated = re.sub(
+            r"(?<!\.)\b(?P<column>[a-zA-Z_][a-zA-Z0-9_]*)\s*"
+            r"(?P<operator>=|!=|<>)\s*(?P<value>TRUE|FALSE|0|1)\b",
+            replace_unqualified,
+            translated,
+            flags=re.IGNORECASE,
+        )
         return translated
+
+    def _extract_query_tables(self, query: str) -> dict[str, str]:
+        aliases: dict[str, str] = {}
+        for match in re.finditer(
+            r"\b(?:FROM|JOIN|UPDATE|INTO)\s+([a-zA-Z_][a-zA-Z0-9_]*)"
+            r"(?:\s+(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*))?",
+            query,
+            flags=re.IGNORECASE,
+        ):
+            table_name = match.group(1)
+            alias = match.group(2) or table_name
+            aliases[table_name.lower()] = table_name
+            aliases[alias.lower()] = table_name
+        return aliases
+
+    def _resolve_unqualified_table(self, column_name: str, aliases: dict[str, str]) -> str | None:
+        candidate_tables = {
+            table_name
+            for table_name in set(aliases.values())
+            if column_name in self._get_column_types().get(table_name, {})
+        }
+        if len(candidate_tables) == 1:
+            return next(iter(candidate_tables))
+        return None
+
+    def _translate_boolean_literal(
+        self,
+        table_name: str,
+        column_name: str,
+        value: str,
+    ) -> str | None:
+        data_type = self._get_column_types().get(table_name, {}).get(column_name)
+        if data_type is None:
+            return None
+
+        literal = value.upper()
+        if data_type == "boolean":
+            if literal == "1":
+                return "TRUE"
+            if literal == "0":
+                return "FALSE"
+            return None
+
+        if data_type in {"smallint", "integer", "bigint"}:
+            if literal == "TRUE":
+                return "1"
+            if literal == "FALSE":
+                return "0"
+            return None
+
+        return None
 
 
 def _translate_insert_or_ignore(query: str) -> str:
