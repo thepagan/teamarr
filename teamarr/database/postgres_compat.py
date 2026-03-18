@@ -20,6 +20,7 @@ _SQLITE_MASTER_TABLE_RE = re.compile(
     """,
     re.IGNORECASE | re.DOTALL | re.VERBOSE,
 )
+_IDENTIFIER_PATTERN = r'"?[a-zA-Z_][a-zA-Z0-9_]*"?'
 
 
 def _normalize_value(value: Any) -> Any:
@@ -473,13 +474,13 @@ class PostgresConnectionWrapper:
     def _extract_query_tables(self, query: str) -> dict[str, str]:
         aliases: dict[str, str] = {}
         for match in re.finditer(
-            r"\b(?:FROM|JOIN|UPDATE|INTO)\s+([a-zA-Z_][a-zA-Z0-9_]*)"
-            r"(?:\s+(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*))?",
+            rf"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?P<table>{_IDENTIFIER_PATTERN})"
+            rf"(?:\s+(?:AS\s+)?(?P<alias>{_IDENTIFIER_PATTERN}))?",
             query,
             flags=re.IGNORECASE,
         ):
-            table_name = match.group(1)
-            alias = match.group(2) or table_name
+            table_name = match.group("table").strip('"')
+            alias = (match.group("alias") or table_name).strip('"')
             aliases[table_name.lower()] = table_name
             aliases[alias.lower()] = table_name
         return aliases
@@ -490,14 +491,14 @@ class PostgresConnectionWrapper:
         aliases: dict[str, str],
     ) -> dict[int, tuple[str, str]]:
         match = re.search(
-            r"INSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\((?P<columns>.*?)\)\s*VALUES\s*\((?P<values>.*?)\)",
+            rf"INSERT\s+INTO\s+(?P<table>{_IDENTIFIER_PATTERN})\s*\((?P<columns>.*?)\)\s*VALUES\s*\((?P<values>.*?)\)",
             query,
             flags=re.IGNORECASE | re.DOTALL,
         )
         if not match:
             return {}
 
-        table_name = match.group(1)
+        table_name = match.group("table").strip('"')
         aliases.setdefault(table_name.lower(), table_name)
         columns = [part.strip().strip('"') for part in match.group("columns").split(",")]
         values_sql = match.group("values")
@@ -521,7 +522,6 @@ class PostgresConnectionWrapper:
                 if value_slot < len(columns):
                     mapping[placeholder_index] = (table_name, columns[value_slot])
                 placeholder_index += 1
-                value_slot += 1
             elif char == ",":
                 value_slot += 1
 
@@ -553,8 +553,8 @@ class PostgresConnectionWrapper:
             else:
                 prefix = query[max(0, pos - 120) : pos]
                 match = re.search(
-                    r"(?:(?P<alias>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
-                    r"(?P<column>[a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*$",
+                    rf"(?:(?P<alias>{_IDENTIFIER_PATTERN})\.)?"
+                    rf"(?P<column>{_IDENTIFIER_PATTERN})\s*=\s*$",
                     prefix,
                     flags=re.IGNORECASE,
                 )
@@ -562,10 +562,10 @@ class PostgresConnectionWrapper:
                     contexts.append(None)
                 else:
                     alias = match.group("alias")
-                    column_name = match.group("column")
+                    column_name = match.group("column").strip('"')
                     table_name = None
                     if alias:
-                        table_name = aliases.get(alias.lower())
+                        table_name = aliases.get(alias.strip('"').lower())
                     else:
                         table_name = self._resolve_unqualified_table(column_name, aliases)
                     contexts.append((table_name, column_name) if table_name else None)
