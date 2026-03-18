@@ -394,6 +394,7 @@ class PostgresConnectionWrapper:
 
     def _translate_query(self, query: str, *, translate_placeholders: bool = True) -> str:
         translated = query
+        translated = _translate_transaction_statements(translated)
         translated = _translate_insert_or_ignore(translated)
         translated = _translate_datetime_calls(translated)
         translated = _translate_group_concat(translated)
@@ -693,3 +694,9 @@ def _translate_placeholders(query: str) -> str:
         output.append(char)
 
     return "".join(output)
+
+
+def _translate_transaction_statements(query: str) -> str:
+    translated = re.sub(r"^\s*BEGIN\s+IMMEDIATE\s*;?\s*$", "BEGIN", query, flags=re.IGNORECASE)
+    translated = re.sub(r"^\s*BEGIN\s+EXCLUSIVE\s*;?\s*$", "BEGIN", translated, flags=re.IGNORECASE)
+    return translated
