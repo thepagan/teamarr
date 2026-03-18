@@ -115,15 +115,16 @@ class PostgresCursorWrapper:
         if meta_cursor is not None:
             return meta_cursor
 
+        coerced_params = self._connection._coerce_params(query, params)
         translated = self._connection._translate_query(
             query,
-            translate_placeholders=params is not None,
+            translate_placeholders=coerced_params is not None,
         )
 
-        if params is None:
+        if coerced_params is None:
             self._cursor.execute(translated)
         else:
-            self._cursor.execute(translated, tuple(params))
+            self._cursor.execute(translated, tuple(coerced_params))
 
         if query.lstrip().upper().startswith("INSERT"):
             self.lastrowid = self._connection._fetch_lastrowid(self._cursor, query)
@@ -131,7 +132,7 @@ class PostgresCursorWrapper:
         return self
 
     def executemany(self, query: str, param_sets: Iterable[Sequence[Any]]):
-        param_sets = list(param_sets)
+        param_sets = [self._connection._coerce_params(query, params) or () for params in param_sets]
         translated = self._connection._translate_query(
             query,
             translate_placeholders=bool(param_sets),
@@ -448,6 +449,27 @@ class PostgresConnectionWrapper:
         )
         return translated
 
+    def _coerce_params(self, query: str, params: Sequence[Any] | None) -> Sequence[Any] | None:
+        if params is None:
+            return None
+
+        aliases = self._extract_query_tables(query)
+        insert_columns = self._infer_insert_placeholder_columns(query, aliases)
+        placeholder_contexts = self._infer_placeholder_columns(query, aliases, insert_columns)
+        if not placeholder_contexts:
+            return params
+
+        coerced = list(params)
+        for index, value in enumerate(coerced):
+            if index >= len(placeholder_contexts):
+                break
+            context = placeholder_contexts[index]
+            if context is None:
+                continue
+            table_name, column_name = context
+            coerced[index] = self._coerce_value_for_column(table_name, column_name, value)
+        return coerced
+
     def _extract_query_tables(self, query: str) -> dict[str, str]:
         aliases: dict[str, str] = {}
         for match in re.finditer(
@@ -461,6 +483,95 @@ class PostgresConnectionWrapper:
             aliases[table_name.lower()] = table_name
             aliases[alias.lower()] = table_name
         return aliases
+
+    def _infer_insert_placeholder_columns(
+        self,
+        query: str,
+        aliases: dict[str, str],
+    ) -> dict[int, tuple[str, str]]:
+        match = re.search(
+            r"INSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\((?P<columns>.*?)\)\s*VALUES\s*\((?P<values>.*?)\)",
+            query,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return {}
+
+        table_name = match.group(1)
+        aliases.setdefault(table_name.lower(), table_name)
+        columns = [part.strip().strip('"') for part in match.group("columns").split(",")]
+        values_sql = match.group("values")
+
+        mapping: dict[int, tuple[str, str]] = {}
+        placeholder_index = 0
+        value_slot = 0
+        in_single = False
+        in_double = False
+
+        for char in values_sql:
+            if char == "'" and not in_double:
+                in_single = not in_single
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                continue
+            if in_single or in_double:
+                continue
+            if char == "?":
+                if value_slot < len(columns):
+                    mapping[placeholder_index] = (table_name, columns[value_slot])
+                placeholder_index += 1
+                value_slot += 1
+            elif char == ",":
+                value_slot += 1
+
+        return mapping
+
+    def _infer_placeholder_columns(
+        self,
+        query: str,
+        aliases: dict[str, str],
+        insert_columns: dict[int, tuple[str, str]],
+    ) -> list[tuple[str, str] | None]:
+        contexts: list[tuple[str, str] | None] = []
+        in_single = False
+        in_double = False
+        placeholder_index = 0
+
+        for pos, char in enumerate(query):
+            if char == "'" and not in_double:
+                in_single = not in_single
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                continue
+            if char != "?" or in_single or in_double:
+                continue
+
+            if placeholder_index in insert_columns:
+                contexts.append(insert_columns[placeholder_index])
+            else:
+                prefix = query[max(0, pos - 120) : pos]
+                match = re.search(
+                    r"(?:(?P<alias>[a-zA-Z_][a-zA-Z0-9_]*)\.)?"
+                    r"(?P<column>[a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*$",
+                    prefix,
+                    flags=re.IGNORECASE,
+                )
+                if not match:
+                    contexts.append(None)
+                else:
+                    alias = match.group("alias")
+                    column_name = match.group("column")
+                    table_name = None
+                    if alias:
+                        table_name = aliases.get(alias.lower())
+                    else:
+                        table_name = self._resolve_unqualified_table(column_name, aliases)
+                    contexts.append((table_name, column_name) if table_name else None)
+            placeholder_index += 1
+
+        return contexts
 
     def _resolve_unqualified_table(self, column_name: str, aliases: dict[str, str]) -> str | None:
         candidate_tables = {
@@ -498,6 +609,14 @@ class PostgresConnectionWrapper:
             return None
 
         return None
+
+    def _coerce_value_for_column(self, table_name: str, column_name: str, value: Any) -> Any:
+        data_type = self._get_column_types().get(table_name, {}).get(column_name)
+        if data_type == "boolean" and value in (0, 1):
+            return bool(value)
+        if data_type in {"smallint", "integer", "bigint"} and isinstance(value, bool):
+            return int(value)
+        return value
 
 
 def _translate_insert_or_ignore(query: str) -> str:
