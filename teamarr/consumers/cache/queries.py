@@ -152,7 +152,7 @@ class TeamLeagueCache:
                         SELECT lc.league_slug, lc.provider,
                                lc.league_name, lc.sport, lc.logo_url,
                                NULL as logo_url_dark,
-                               lc.team_count, 0 as import_enabled,
+                               lc.team_count, FALSE as import_enabled,
                                NULL as league_alias,
                                NULL as tsdb_tier,
                                2 as priority

@@ -50,18 +50,44 @@ class NFHSProvider(SportsProvider):
     _shared_upcoming_events_by_scope_lock = threading.RLock()
     _shared_latest_team_rows_lock = threading.RLock()
     _shared_raw_team_row_count_cache: dict[tuple[str, ...], int] = {}
+    _logged_settings_failure = False
+    _logged_provider_disabled = False
+    _logged_missing_state_codes = False
 
     name = "nfhs"
 
     def __init__(self) -> None:
         self.client = NFHSClient()
 
+    @classmethod
+    def _log_settings_failure_once(cls, exc: Exception) -> None:
+        if cls._logged_settings_failure:
+            return
+        logger.warning("[NFHS] Failed to load settings; disabling provider: %s", exc)
+        cls._logged_settings_failure = True
+
+    @classmethod
+    def _log_provider_disabled_once(cls) -> None:
+        if cls._logged_provider_disabled:
+            return
+        logger.info("[NFHS] Provider disabled; skipping NFHS discovery")
+        cls._logged_provider_disabled = True
+
+    @classmethod
+    def _log_missing_state_codes_once(cls) -> None:
+        if cls._logged_missing_state_codes:
+            return
+        logger.warning("[NFHS] NFHS enabled but no state codes are configured; skipping discovery")
+        cls._logged_missing_state_codes = True
+
     def _get_runtime_state_filter(self) -> set[str]:
         """Return enabled NFHS state codes from persisted settings, or an empty set on read failure."""
+        cls = type(self)
         try:
             with get_connection() as conn:
                 settings = get_nfhs_settings(conn)
                 if not settings.enabled:
+                    cls._log_provider_disabled_once()
                     return set()
                 return {
                     code.strip().upper()
@@ -69,7 +95,7 @@ class NFHSProvider(SportsProvider):
                     if isinstance(code, str) and code.strip()
                 }
         except Exception as exc:
-            logger.warning("[NFHS] Failed to load NFHS settings from database; disabling NFHS provider: %s", exc)
+            cls._log_settings_failure_once(exc)
             return set()
 
     # ------------------------------------------------------------------
@@ -93,7 +119,6 @@ class NFHSProvider(SportsProvider):
         """
         state_filter = self._get_runtime_state_filter()
         if not state_filter:
-            logger.info("[NFHS] Provider disabled (no state codes configured); skipping team discovery")
             return []
         teams: List[Team] = []
         latest_team_rows = self._get_latest_team_rows()
@@ -176,7 +201,6 @@ class NFHSProvider(SportsProvider):
         """Fetch NFHS SEARCH upcoming events per school for an optional league and date."""
         state_filter = self._get_runtime_state_filter()
         if not state_filter:
-            logger.info("[NFHS] Provider disabled (no state codes configured); skipping event discovery")
             return []
         target_date_str = None
         if target_date is not None:
@@ -387,7 +411,7 @@ class NFHSProvider(SportsProvider):
         raw_team_rows: list[dict] = []
 
         if not state_filter:
-            logger.warning("[NFHS] NFHS is enabled but no state codes are configured; skipping team discovery")
+            type(self)._log_missing_state_codes_once()
             return raw_team_rows
 
         for state_code in sorted(state_filter):
