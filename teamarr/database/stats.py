@@ -1063,7 +1063,7 @@ def get_match_stats_summary(conn: Connection, run_id: int | None = None) -> dict
                SUM(CASE WHEN from_cache = 1 THEN 1 ELSE 0 END) as from_cache
         FROM epg_matched_streams
         WHERE run_id = ?
-        GROUP BY group_id
+        GROUP BY group_id, group_name
         """,
         (run_id,),
     ).fetchall()
@@ -1096,7 +1096,7 @@ def get_match_stats_summary(conn: Connection, run_id: int | None = None) -> dict
         SELECT group_id, group_name, COUNT(*) as count
         FROM epg_failed_matches
         WHERE run_id = ?
-        GROUP BY group_id
+        GROUP BY group_id, group_name
         """,
         (run_id,),
     ).fetchall()

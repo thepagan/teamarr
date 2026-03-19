@@ -221,7 +221,7 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
                         event_id = excluded.event_id,
@@ -230,7 +230,7 @@ class StreamMatchCache:
                         last_seen_generation = excluded.last_seen_generation,
                         match_method = excluded.match_method,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE user_corrected = 0  -- Don't overwrite user corrections
+                    WHERE user_corrected = FALSE  -- Don't overwrite user corrections
                     """,
                     (
                         fingerprint,
@@ -289,13 +289,13 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, '', NULL, ?, 'no_match', 0,
+                    VALUES (?, ?, ?, ?, ?, '', NULL, ?, 'no_match', FALSE,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
                         last_seen_generation = excluded.last_seen_generation,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE user_corrected = 0  -- Don't overwrite user corrections
+                    WHERE user_corrected = FALSE  -- Don't overwrite user corrections
                     """,
                     (
                         fingerprint,
@@ -348,7 +348,7 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected, corrected_at,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'user_corrected', 1, CURRENT_TIMESTAMP,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, 'user_corrected', TRUE, CURRENT_TIMESTAMP,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
@@ -356,7 +356,7 @@ class StreamMatchCache:
                         league = excluded.league,
                         cached_event_data = excluded.cached_event_data,
                         match_method = 'user_corrected',
-                        user_corrected = 1,
+                        user_corrected = TRUE,
                         corrected_at = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
                     """,
@@ -398,7 +398,7 @@ class StreamMatchCache:
                 cursor = conn.execute(
                     """
                     DELETE FROM stream_match_cache
-                    WHERE fingerprint = ? AND user_corrected = 1
+                    WHERE fingerprint = ? AND user_corrected = TRUE
                     """,
                     (fingerprint,),
                 )
@@ -471,7 +471,7 @@ class StreamMatchCache:
                         DELETE FROM stream_match_cache
                         WHERE last_seen_generation < ?
                           AND event_id = ?
-                          AND user_corrected = 0
+                          AND user_corrected = FALSE
                         """,
                         (failed_threshold, FAILED_MATCH_EVENT_ID),
                     )
@@ -489,7 +489,7 @@ class StreamMatchCache:
                         DELETE FROM stream_match_cache
                         WHERE last_seen_generation < ?
                           AND event_id != ?
-                          AND user_corrected = 0
+                          AND user_corrected = FALSE
                         """,
                         (success_threshold, FAILED_MATCH_EVENT_ID),
                     )
@@ -670,7 +670,7 @@ def get_user_corrections(
         SELECT fingerprint, group_id, stream_id, stream_name,
                event_id, league, match_method, corrected_at
         FROM stream_match_cache
-        WHERE user_corrected = 1
+        WHERE user_corrected = TRUE
     """
     params: list = []
 
