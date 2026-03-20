@@ -198,6 +198,22 @@ def list_categories():
     }
 
 
+@router.get("/export")
+def bulk_export(
+    category: CategoryType | None = None,
+):
+    """Export detection keywords as JSON."""
+    from teamarr.database.detection_keywords import export_keywords
+
+    with get_db() as conn:
+        keywords = export_keywords(conn, category=category)
+        return {
+            "exported_at": datetime.now().isoformat(),
+            "count": len(keywords),
+            "keywords": keywords,
+        }
+
+
 @router.get("/{category}", response_model=DetectionKeywordListResponse)
 def list_by_category(
     category: CategoryType,
@@ -332,19 +348,3 @@ def bulk_import(
         failed=failed,
         errors=errors,
     )
-
-
-@router.get("/export")
-def bulk_export(
-    category: CategoryType | None = None,
-):
-    """Export detection keywords as JSON."""
-    from teamarr.database.detection_keywords import export_keywords
-
-    with get_db() as conn:
-        keywords = export_keywords(conn, category=category)
-        return {
-            "exported_at": datetime.now().isoformat(),
-            "count": len(keywords),
-            "keywords": keywords,
-        }
