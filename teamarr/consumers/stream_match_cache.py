@@ -338,6 +338,7 @@ class StreamMatchCache:
         """
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
         cached_json = json.dumps(cached_data, default=_json_serializer)
+        generation = get_generation_counter(self._get_connection)
 
         try:
             with self._get_connection() as conn:
@@ -348,7 +349,7 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected, corrected_at,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, 'user_corrected', TRUE, CURRENT_TIMESTAMP,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user_corrected', TRUE, CURRENT_TIMESTAMP,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
@@ -368,6 +369,7 @@ class StreamMatchCache:
                         event_id,
                         league,
                         cached_json,
+                        generation,
                     ),
                 )
                 conn.commit()
