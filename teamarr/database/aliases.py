@@ -247,19 +247,29 @@ def bulk_create_aliases(
 
     for a in aliases:
         try:
-            create_alias(
-                conn,
-                alias=a["alias"],
-                league=a["league"],
-                team_id=a["team_id"],
-                team_name=a["team_name"],
-                provider=a.get("provider", "espn"),
+            cursor = conn.execute(
+                """
+                INSERT INTO team_aliases (alias, league, provider, team_id, team_name)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (alias, league) DO NOTHING
+                """,
+                (
+                    a["alias"].strip().lower(),
+                    a["league"].lower(),
+                    a.get("provider", "espn"),
+                    a["team_id"],
+                    a["team_name"],
+                ),
             )
-            created += 1
+            if cursor.rowcount and cursor.rowcount > 0:
+                created += 1
+            else:
+                skipped += 1
         except Exception as e:
             logger.debug("[ALIAS] Skipped '%s': %s", a.get("alias"), e)
             skipped += 1
 
+    conn.commit()
     return created, skipped
 
 
