@@ -224,7 +224,15 @@ def get_team_picker_leagues(conn: Connection) -> list[dict]:
         FROM team_cache tc
         LEFT JOIN leagues l ON l.league_code = tc.league
         LEFT JOIN league_cache lc ON lc.league_slug = tc.league
-        GROUP BY tc.league, tc.sport, tc.provider
+        GROUP BY
+            tc.league,
+            tc.sport,
+            tc.provider,
+            l.league_code,
+            l.display_name,
+            lc.league_name,
+            l.logo_url,
+            lc.logo_url
         ORDER BY
             is_configured DESC,
             tc.sport,
