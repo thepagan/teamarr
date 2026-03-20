@@ -1,7 +1,7 @@
 services:
   teamarr:
     build: .
-    container_name: teamarr-postgres
+    container_name: teamarr-dev
     restart: unless-stopped
     ports:
       - 9195:9195
