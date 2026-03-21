@@ -10,6 +10,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -176,6 +177,9 @@ class TeamMatcher:
         self._fuzzy = get_matcher()
         self._days_ahead = days_ahead
         self._prepared_events: dict[tuple[str, str], PreparedEvent] = {}
+        self._profile_timings: dict[str, float] = {}
+        self._profile_counts: dict[str, int] = {}
+        self._candidate_counts: list[int] = []
         # Load user-defined aliases from database
         # Forward cache: (alias, league) -> canonical
         self._user_aliases: UserAliasCache = self._load_user_aliases()
@@ -197,6 +201,45 @@ class TeamMatcher:
             len(self._user_aliases),
             len(self._reverse_aliases),
         )
+
+    def reset_profile(self) -> None:
+        """Reset accumulated profiling counters for a batch run."""
+        self._profile_timings.clear()
+        self._profile_counts.clear()
+        self._candidate_counts.clear()
+
+    def get_profile_summary(self) -> dict[str, float]:
+        """Return aggregate profiling metrics for the current batch."""
+        summary: dict[str, float] = dict(self._profile_timings)
+
+        cache_checks = self._profile_counts.get("cache_checks", 0)
+        alias_checks = self._profile_counts.get("alias_checks", 0)
+        fuzzy_checks = self._profile_counts.get("fuzzy_checks", 0)
+        summary["cache_checks"] = cache_checks
+        summary["alias_checks"] = alias_checks
+        summary["fuzzy_checks"] = fuzzy_checks
+        summary["cache_hits_internal"] = self._profile_counts.get("cache_hits", 0)
+        summary["cache_writes"] = self._profile_counts.get("cache_writes", 0)
+        summary["prefilter_calls"] = self._profile_counts.get("prefilter_calls", 0)
+
+        if self._candidate_counts:
+            sorted_counts = sorted(self._candidate_counts)
+            p95_index = min(len(sorted_counts) - 1, int(len(sorted_counts) * 0.95))
+            summary["candidate_count_avg"] = sum(sorted_counts) / len(sorted_counts)
+            summary["candidate_count_p95"] = sorted_counts[p95_index]
+            summary["candidate_count_max"] = sorted_counts[-1]
+        else:
+            summary["candidate_count_avg"] = 0.0
+            summary["candidate_count_p95"] = 0.0
+            summary["candidate_count_max"] = 0.0
+
+        return summary
+
+    def _record_profile_time(self, key: str, duration: float) -> None:
+        self._profile_timings[key] = self._profile_timings.get(key, 0.0) + duration
+
+    def _increment_profile_count(self, key: str, amount: int = 1) -> None:
+        self._profile_counts[key] = self._profile_counts.get(key, 0) + amount
 
     def match_single_league(
         self,
@@ -250,8 +293,12 @@ class TeamMatcher:
         )
 
         # Check cache first
+        self._increment_profile_count("cache_checks")
+        cache_start = perf_counter()
         cache_result = self._check_cache(ctx)
+        self._record_profile_time("cache_lookup", perf_counter() - cache_start)
         if cache_result:
+            self._increment_profile_count("cache_hits")
             return cache_result
 
         # Fetch events from MATCH_WINDOW_DAYS back to days_ahead
@@ -276,12 +323,33 @@ class TeamMatcher:
                 parsed_team2=ctx.team2,
             )
 
+        original_event_count = len(events)
+        prefilter_start = perf_counter()
+        events = self._prefilter_single_league_events(
+            events,
+            ctx.team1,
+            ctx.team2,
+            ctx.team1,
+            ctx.team2,
+        )
+        self._record_profile_time("candidate_prefilter", perf_counter() - prefilter_start)
+        self._increment_profile_count("prefilter_calls")
+        self._increment_profile_count(
+            "prefilter_candidates_removed", original_event_count - len(events)
+        )
+        self._candidate_counts.append(len(events))
+
         # Try to match (is_event_ongoing filters out completed yesterday events)
+        match_start = perf_counter()
         result = self._match_against_events(ctx, events, league)
+        self._record_profile_time("team_match_eval", perf_counter() - match_start)
 
         # Cache successful matches
         if result.is_matched and result.event:
+            cache_write_start = perf_counter()
             self._cache_result(ctx, result)
+            self._record_profile_time("cache_write", perf_counter() - cache_write_start)
+            self._increment_profile_count("cache_writes")
 
         return result
 
@@ -347,8 +415,12 @@ class TeamMatcher:
         )
 
         # Check cache first
+        self._increment_profile_count("cache_checks")
+        cache_start = perf_counter()
         cache_result = self._check_cache(ctx)
+        self._record_profile_time("cache_lookup", perf_counter() - cache_start)
         if cache_result:
+            self._increment_profile_count("cache_hits")
             return cache_result
 
         # Detect league hint (can be single league or list for umbrella brands like EFL)
@@ -408,19 +480,47 @@ class TeamMatcher:
                 parsed_team2=ctx.team2,
             )
 
+        team1_normalized = normalize_for_matching(ctx.team1) if ctx.team1 else None
+        team2_normalized = normalize_for_matching(ctx.team2) if ctx.team2 else None
+        fallback_t1, fallback_t2, _has_stripped_fallback = self._prepare_stripped_fallback(
+            ctx.team1, ctx.team2, team1_normalized, team2_normalized
+        )
+        original_event_count = len(all_events)
+        prefilter_start = perf_counter()
+        all_events = self._prefilter_multi_league_events(
+            all_events,
+            team1_normalized,
+            team2_normalized,
+            fallback_t1,
+            fallback_t2,
+        )
+        self._record_profile_time("candidate_prefilter", perf_counter() - prefilter_start)
+        self._increment_profile_count("prefilter_calls")
+        self._increment_profile_count(
+            "prefilter_candidates_removed", original_event_count - len(all_events)
+        )
+        self._candidate_counts.append(len(all_events))
+
         # Try to match against all events
+        match_start = perf_counter()
         result = self._match_against_multi_league_events(ctx, all_events)
+        self._record_profile_time("team_match_eval", perf_counter() - match_start)
 
         # If match failed with NO_EVENT_FOUND, try reverse alias resolution
         # This handles cases where classifier couldn't detect league but user has aliases
         if result.is_failed and result.failed_reason == FailedReason.NO_EVENT_FOUND:
+            reverse_alias_start = perf_counter()
             retry_result = self._try_reverse_alias_match(ctx, all_events, leagues_to_search)
+            self._record_profile_time("reverse_alias_retry", perf_counter() - reverse_alias_start)
             if retry_result and retry_result.is_matched:
                 result = retry_result
 
         # Cache successful matches
         if result.is_matched and result.event:
+            cache_write_start = perf_counter()
             self._cache_result(ctx, result)
+            self._record_profile_time("cache_write", perf_counter() - cache_write_start)
+            self._increment_profile_count("cache_writes")
 
         return result
 
@@ -537,13 +637,6 @@ class TeamMatcher:
         # can never detect that parentheticals were removed.
         fallback_t1, fallback_t2, has_stripped_fallback = self._prepare_stripped_fallback(
             ctx.team1, ctx.team2, team1_normalized, team2_normalized
-        )
-        events = self._prefilter_single_league_events(
-            events,
-            team1_normalized,
-            team2_normalized,
-            fallback_t1,
-            fallback_t2,
         )
 
         # Check if we have date validation from the stream
@@ -715,13 +808,6 @@ class TeamMatcher:
         # can never detect that parentheticals were removed.
         fallback_t1, fallback_t2, has_stripped_fallback = self._prepare_stripped_fallback(
             ctx.team1, ctx.team2, team1_normalized, team2_normalized
-        )
-        events = self._prefilter_multi_league_events(
-            events,
-            team1_normalized,
-            team2_normalized,
-            fallback_t1,
-            fallback_t2,
         )
 
         # Check if we have date validation from the stream
@@ -1092,6 +1178,8 @@ class TeamMatcher:
         Returns:
             Tuple of (method, confidence) if matched, None otherwise
         """
+        fuzzy_start = perf_counter()
+        self._increment_profile_count("fuzzy_checks")
         prepared = self._get_prepared_event(event)
         home_normalized = prepared.home_normalized
         away_normalized = prepared.away_normalized
@@ -1122,7 +1210,10 @@ class TeamMatcher:
 
             # Use dedicated threshold for both-teams matching (lower because min() is strict)
             if best_score >= BOTH_TEAMS_THRESHOLD:
-                return (MatchMethod.FUZZY, best_score)
+                result = (MatchMethod.FUZZY, best_score)
+                self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
+                return result
+            self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
             return None
 
         elif team1 or team2:
@@ -1134,9 +1225,13 @@ class TeamMatcher:
 
             # For single-team matches, always require high confidence
             if score >= HIGH_CONFIDENCE_THRESHOLD:
-                return (MatchMethod.FUZZY, score)
+                result = (MatchMethod.FUZZY, score)
+                self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
+                return result
+            self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
             return None
 
+        self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
         return None
 
     def _get_prepared_event(self, event: Event) -> PreparedEvent:
@@ -1218,7 +1313,10 @@ class TeamMatcher:
         Returns:
             Tuple of (ALIAS, 100.0) if both teams match via alias, None otherwise
         """
+        alias_start = perf_counter()
+        self._increment_profile_count("alias_checks")
         if not team1 and not team2:
+            self._record_profile_time("alias_match", perf_counter() - alias_start)
             return None
 
         prepared = self._get_prepared_event(event)
@@ -1252,12 +1350,19 @@ class TeamMatcher:
         # Need both teams to match via alias (if both were extracted)
         if team1 and team2:
             if team1_match and team2_match:
-                return (MatchMethod.ALIAS, 100.0)
+                result = (MatchMethod.ALIAS, 100.0)
+                self._record_profile_time("alias_match", perf_counter() - alias_start)
+                return result
         elif team1 and team1_match:
-            return (MatchMethod.ALIAS, 100.0)
+            result = (MatchMethod.ALIAS, 100.0)
+            self._record_profile_time("alias_match", perf_counter() - alias_start)
+            return result
         elif team2 and team2_match:
-            return (MatchMethod.ALIAS, 100.0)
+            result = (MatchMethod.ALIAS, 100.0)
+            self._record_profile_time("alias_match", perf_counter() - alias_start)
+            return result
 
+        self._record_profile_time("alias_match", perf_counter() - alias_start)
         return None
 
     def _load_user_aliases(self) -> UserAliasCache:

@@ -295,6 +295,7 @@ class StreamMatcher:
 
         # Prefetched events (populated in match_all for multi-league matching)
         self._prefetched_events: dict[str, list[Event]] | None = None
+        self._classification_time = 0.0
 
     def match_all(
         self,
@@ -326,6 +327,9 @@ class StreamMatcher:
         # (When called as part of full EPG generation, generation is shared across groups)
         if not self._generation_provided:
             self._generation = increment_generation_counter(self._db_factory)
+
+        self._team_matcher.reset_profile()
+        self._classification_time = 0.0
 
         # Load league event types
         self._load_league_event_types()
@@ -370,10 +374,26 @@ class StreamMatcher:
             if progress_callback:
                 progress_callback(idx, total_streams, stream_name, match_result.matched)
 
+        team_profile = self._team_matcher.get_profile_summary()
         result.phase_timings = {
             "prefetch_events": prefetch_duration,
+            "classify_streams": self._classification_time,
             "match_streams": perf_counter() - match_loop_start,
             "total": perf_counter() - total_start,
+            "cache_lookup": team_profile.get("cache_lookup", 0.0),
+            "candidate_prefilter": team_profile.get("candidate_prefilter", 0.0),
+            "team_match_eval": team_profile.get("team_match_eval", 0.0),
+            "alias_match": team_profile.get("alias_match", 0.0),
+            "fuzzy_scoring": team_profile.get("fuzzy_scoring", 0.0),
+            "reverse_alias_retry": team_profile.get("reverse_alias_retry", 0.0),
+            "cache_write": team_profile.get("cache_write", 0.0),
+            "candidate_count_avg": team_profile.get("candidate_count_avg", 0.0),
+            "candidate_count_p95": team_profile.get("candidate_count_p95", 0.0),
+            "candidate_count_max": team_profile.get("candidate_count_max", 0.0),
+            "cache_checks": team_profile.get("cache_checks", 0.0),
+            "alias_checks": team_profile.get("alias_checks", 0.0),
+            "fuzzy_checks": team_profile.get("fuzzy_checks", 0.0),
+            "cache_writes": team_profile.get("cache_writes", 0.0),
         }
 
         logger.info(
@@ -382,6 +402,24 @@ class StreamMatcher:
             result.total,
             result.included_count,
             result.cache_hit_rate * 100,
+        )
+        logger.info(
+            "[MATCH_PROFILE] streams=%d cache_lookup=%.2fs prefilter=%.2fs eval=%.2fs "
+            "alias=%.2fs fuzzy=%.2fs cache_write=%.2fs candidates(avg=%.1f p95=%.0f max=%.0f) "
+            "checks(cache=%.0f alias=%.0f fuzzy=%.0f)",
+            result.total,
+            team_profile.get("cache_lookup", 0.0),
+            team_profile.get("candidate_prefilter", 0.0),
+            team_profile.get("team_match_eval", 0.0),
+            team_profile.get("alias_match", 0.0),
+            team_profile.get("fuzzy_scoring", 0.0),
+            team_profile.get("cache_write", 0.0),
+            team_profile.get("candidate_count_avg", 0.0),
+            team_profile.get("candidate_count_p95", 0.0),
+            team_profile.get("candidate_count_max", 0.0),
+            team_profile.get("cache_checks", 0.0),
+            team_profile.get("alias_checks", 0.0),
+            team_profile.get("fuzzy_checks", 0.0),
         )
 
         return result
@@ -504,10 +542,12 @@ class StreamMatcher:
         # Determine event type from configured leagues
         league_event_type = self._get_dominant_event_type()
 
+        classify_start = perf_counter()
         classified = classify_stream(
             stream_name, league_event_type, self._custom_regex,
             self._feed_home_terms, self._feed_away_terms,
         )
+        self._classification_time += perf_counter() - classify_start
 
         # Step 2: Handle placeholders (streams that couldn't be classified)
         # Note: Placeholder pattern detection and unsupported sports filtering
