@@ -53,6 +53,19 @@ def _sport_hint_matches(sport_hint: str | list[str], event_sport: str) -> bool:
 UserAliasCache = dict[tuple[str, str], str]
 
 
+@dataclass(frozen=True)
+class PreparedEvent:
+    """Precomputed normalized event-side data for repeated matching."""
+
+    home_normalized: str
+    away_normalized: str
+    event_normalized: str
+    home_abbr: str
+    away_abbr: str
+    home_patterns: tuple[str, ...]
+    away_patterns: tuple[str, ...]
+
+
 @dataclass
 class MatchContext:
     """Context for a matching attempt."""
@@ -121,6 +134,7 @@ class TeamMatcher:
         self._db = db_factory
         self._fuzzy = get_matcher()
         self._days_ahead = days_ahead
+        self._prepared_events: dict[tuple[str, str], PreparedEvent] = {}
         # Load user-defined aliases from database
         # Forward cache: (alias, league) -> canonical
         self._user_aliases: UserAliasCache = self._load_user_aliases()
@@ -810,16 +824,9 @@ class TeamMatcher:
         Requires both abbreviations to be >= 3 chars to avoid matching 2-letter codes
         (SF, NE, KC) that are more likely to appear as noise tokens.
         """
-        home_abbr = (
-            normalize_text(event.home_team.abbreviation)
-            if event.home_team.abbreviation
-            else ""
-        )
-        away_abbr = (
-            normalize_text(event.away_team.abbreviation)
-            if event.away_team.abbreviation
-            else ""
-        )
+        prepared = self._get_prepared_event(event)
+        home_abbr = prepared.home_abbr
+        away_abbr = prepared.away_abbr
 
         if not home_abbr or not away_abbr or len(home_abbr) < 3 or len(away_abbr) < 3:
             return None
@@ -934,9 +941,9 @@ class TeamMatcher:
         Returns:
             Tuple of (method, confidence) if matched, None otherwise
         """
-        # Normalize event team names for comparison
-        home_normalized = normalize_text(event.home_team.name)
-        away_normalized = normalize_text(event.away_team.name)
+        prepared = self._get_prepared_event(event)
+        home_normalized = prepared.home_normalized
+        away_normalized = prepared.away_normalized
 
         # Note: Pipe-separated content (e.g., "Sacramento Kings | Golden 1 Center")
         # is handled naturally by token_set_ratio which finds best token overlap.
@@ -972,10 +979,7 @@ class TeamMatcher:
             # Use stricter threshold since we have less confidence
             single_team = team1 or team2
             single_norm = normalize_text(single_team)
-            event_name = f"{event.home_team.name} vs {event.away_team.name}"
-            event_norm = normalize_text(event_name)
-
-            score = fuzz.token_set_ratio(single_norm, event_norm)
+            score = fuzz.token_set_ratio(single_norm, prepared.event_normalized)
 
             # For single-team matches, always require high confidence
             if score >= HIGH_CONFIDENCE_THRESHOLD:
@@ -983,6 +987,31 @@ class TeamMatcher:
             return None
 
         return None
+
+    def _get_prepared_event(self, event: Event) -> PreparedEvent:
+        """Return memoized normalized event-side data."""
+        cache_key = (event.league, event.id)
+        prepared = self._prepared_events.get(cache_key)
+        if prepared is not None:
+            return prepared
+
+        prepared = PreparedEvent(
+            home_normalized=normalize_text(event.home_team.name),
+            away_normalized=normalize_text(event.away_team.name),
+            event_normalized=normalize_text(f"{event.home_team.name} vs {event.away_team.name}"),
+            home_abbr=normalize_text(event.home_team.abbreviation) if event.home_team.abbreviation else "",
+            away_abbr=normalize_text(event.away_team.abbreviation) if event.away_team.abbreviation else "",
+            home_patterns=tuple(
+                team_pattern.pattern
+                for team_pattern in self._fuzzy.generate_team_patterns(event.home_team)
+            ),
+            away_patterns=tuple(
+                team_pattern.pattern
+                for team_pattern in self._fuzzy.generate_team_patterns(event.away_team)
+            ),
+        )
+        self._prepared_events[cache_key] = prepared
+        return prepared
 
     def _resolve_alias(self, team_name: str, league: str | None) -> str | None:
         """Resolve a team name to its canonical form via alias lookup.
@@ -1038,9 +1067,9 @@ class TeamMatcher:
         if not team1 and not team2:
             return None
 
-        # Generate patterns for alias checking
-        home_patterns = self._fuzzy.generate_team_patterns(event.home_team)
-        away_patterns = self._fuzzy.generate_team_patterns(event.away_team)
+        prepared = self._get_prepared_event(event)
+        home_patterns = prepared.home_patterns
+        away_patterns = prepared.away_patterns
 
         # Get event league for user-defined alias lookup
         event_league = event.league
@@ -1052,18 +1081,18 @@ class TeamMatcher:
         if team1:
             canonical = self._resolve_alias(team1, event_league)
             if canonical:
-                if any(canonical in tp.pattern for tp in home_patterns):
+                if any(canonical in pattern for pattern in home_patterns):
                     team1_match = True
-                elif any(canonical in tp.pattern for tp in away_patterns):
+                elif any(canonical in pattern for pattern in away_patterns):
                     team1_match = True
 
         # Check team2 against aliases (built-in first, then user-defined)
         if team2:
             canonical = self._resolve_alias(team2, event_league)
             if canonical:
-                if any(canonical in tp.pattern for tp in home_patterns):
+                if any(canonical in pattern for pattern in home_patterns):
                     team2_match = True
-                elif any(canonical in tp.pattern for tp in away_patterns):
+                elif any(canonical in pattern for pattern in away_patterns):
                     team2_match = True
 
         # Need both teams to match via alias (if both were extracted)
