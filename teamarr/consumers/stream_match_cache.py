@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -97,7 +98,11 @@ class StreamMatchCache:
             "purged": 0,
             "failed_cached": 0,
             "user_corrections": 0,
+            "touch_flushes": 0,
         }
+        self._memory_entries: dict[str, StreamCacheEntry | None] = {}
+        self._pending_touches: dict[str, int] = {}
+        self._memory_lock = threading.Lock()
 
     def get(
         self,
@@ -118,6 +123,19 @@ class StreamMatchCache:
             StreamCacheEntry if found, None otherwise
         """
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
+
+        with self._memory_lock:
+            if fingerprint in self._memory_entries:
+                cached_entry = self._memory_entries[fingerprint]
+                if cached_entry is None:
+                    self._stats["misses"] += 1
+                    return None
+                if cached_entry.event_id == FAILED_MATCH_EVENT_ID and not include_failed:
+                    self._stats["misses"] += 1
+                    return None
+
+                self._stats["hits"] += 1
+                return cached_entry
 
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -149,15 +167,20 @@ class StreamMatchCache:
                     except json.JSONDecodeError:
                         cached_data = {}
 
-                return StreamCacheEntry(
+                entry = StreamCacheEntry(
                     event_id=row["event_id"],
                     league=row["league"],
                     cached_data=cached_data,
                     match_method=row["match_method"],
                     user_corrected=bool(row["user_corrected"]),
                 )
+                with self._memory_lock:
+                    self._memory_entries[fingerprint] = entry
+                return entry
 
             self._stats["misses"] += 1
+            with self._memory_lock:
+                self._memory_entries[fingerprint] = None
             return None
 
     def is_user_corrected(
@@ -246,6 +269,15 @@ class StreamMatchCache:
                 )
                 conn.commit()
                 self._stats["sets"] += 1
+                with self._memory_lock:
+                    self._memory_entries[fingerprint] = StreamCacheEntry(
+                        event_id=event_id,
+                        league=league,
+                        cached_data=cached_data,
+                        match_method=match_method,
+                        user_corrected=False,
+                    )
+                    self._pending_touches.pop(fingerprint, None)
                 logger.debug(
                     "[STREAM_CACHE_SET] stream_id=%d event_id=%s method=%s",
                     stream_id,
@@ -308,6 +340,15 @@ class StreamMatchCache:
                 )
                 conn.commit()
                 self._stats["failed_cached"] += 1
+                with self._memory_lock:
+                    self._memory_entries[fingerprint] = StreamCacheEntry(
+                        event_id=FAILED_MATCH_EVENT_ID,
+                        league="",
+                        cached_data={},
+                        match_method="no_match",
+                        user_corrected=False,
+                    )
+                    self._pending_touches.pop(fingerprint, None)
                 logger.debug("[STREAM_CACHE_FAILED] stream_id=%d (no match)", stream_id)
                 return True
         except sqlite3.Error as e:
@@ -374,6 +415,15 @@ class StreamMatchCache:
                 )
                 conn.commit()
                 self._stats["user_corrections"] += 1
+                with self._memory_lock:
+                    self._memory_entries[fingerprint] = StreamCacheEntry(
+                        event_id=event_id,
+                        league=league,
+                        cached_data=cached_data,
+                        match_method="user_corrected",
+                        user_corrected=True,
+                    )
+                    self._pending_touches.pop(fingerprint, None)
                 logger.info(
                     "[STREAM_CACHE_CORRECTED] stream_id=%d event_id=%s", stream_id, event_id
                 )
@@ -405,6 +455,9 @@ class StreamMatchCache:
                     (fingerprint,),
                 )
                 conn.commit()
+                with self._memory_lock:
+                    self._memory_entries.pop(fingerprint, None)
+                    self._pending_touches.pop(fingerprint, None)
                 return cursor.rowcount > 0
         except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Remove user correction: %s", e)
