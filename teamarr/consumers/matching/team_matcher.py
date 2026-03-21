@@ -36,6 +36,33 @@ from teamarr.utilities.fuzzy_match import get_matcher, normalize_text
 
 logger = logging.getLogger(__name__)
 
+_TOKEN_STOPWORDS = frozenset(
+    {
+        "at",
+        "club",
+        "fc",
+        "game",
+        "group",
+        "junior",
+        "jr",
+        "ii",
+        "iii",
+        "ladies",
+        "league",
+        "match",
+        "mens",
+        "school",
+        "sports",
+        "state",
+        "team",
+        "university",
+        "varsity",
+        "vs",
+        "women",
+        "womens",
+    }
+)
+
 
 def _sport_hint_matches(sport_hint: str | list[str], event_sport: str) -> bool:
     """Check if a sport hint matches an event's sport.
@@ -47,6 +74,17 @@ def _sport_hint_matches(sport_hint: str | list[str], event_sport: str) -> bool:
     if isinstance(sport_hint, list):
         return event_lower in [s.lower() for s in sport_hint]
     return event_lower == sport_hint.lower()
+
+
+def _meaningful_tokens(value: str | None) -> frozenset[str]:
+    """Extract stable matching tokens from a normalized name."""
+    if not value:
+        return frozenset()
+    return frozenset(
+        token
+        for token in normalize_text(value).split()
+        if len(token) >= 3 and token not in _TOKEN_STOPWORDS and not token.isdigit()
+    )
 
 
 # Type alias for user-defined aliases: (alias_text, league) -> team_name
@@ -64,6 +102,9 @@ class PreparedEvent:
     away_abbr: str
     home_patterns: tuple[str, ...]
     away_patterns: tuple[str, ...]
+    home_tokens: frozenset[str]
+    away_tokens: frozenset[str]
+    event_tokens: frozenset[str]
 
 
 @dataclass
@@ -497,6 +538,13 @@ class TeamMatcher:
         fallback_t1, fallback_t2, has_stripped_fallback = self._prepare_stripped_fallback(
             ctx.team1, ctx.team2, team1_normalized, team2_normalized
         )
+        events = self._prefilter_single_league_events(
+            events,
+            team1_normalized,
+            team2_normalized,
+            fallback_t1,
+            fallback_t2,
+        )
 
         # Check if we have date validation from the stream
         has_date_validation = ctx.classified.normalized.extracted_date is not None
@@ -667,6 +715,13 @@ class TeamMatcher:
         # can never detect that parentheticals were removed.
         fallback_t1, fallback_t2, has_stripped_fallback = self._prepare_stripped_fallback(
             ctx.team1, ctx.team2, team1_normalized, team2_normalized
+        )
+        events = self._prefilter_multi_league_events(
+            events,
+            team1_normalized,
+            team2_normalized,
+            fallback_t1,
+            fallback_t2,
         )
 
         # Check if we have date validation from the stream
@@ -923,6 +978,102 @@ class TeamMatcher:
         has_fallback = fallback_t1 != norm_team1 or fallback_t2 != norm_team2
         return fallback_t1, fallback_t2, has_fallback
 
+    def _candidate_tokens_for_team(self, team_name: str | None) -> frozenset[str]:
+        """Build conservative candidate tokens for a parsed team name."""
+        if not team_name:
+            return frozenset()
+
+        token_sets = [_meaningful_tokens(team_name)]
+
+        built_in = TEAM_ALIASES.get(team_name.lower())
+        if built_in:
+            token_sets.append(_meaningful_tokens(built_in))
+
+        for canonical, _league in self._reverse_resolve_alias(team_name):
+            token_sets.append(_meaningful_tokens(canonical))
+
+        merged: set[str] = set()
+        for token_set in token_sets:
+            merged.update(token_set)
+        return frozenset(merged)
+
+    def _event_matches_candidate_tokens(
+        self,
+        event: Event,
+        team1_tokens: frozenset[str],
+        team2_tokens: frozenset[str],
+    ) -> bool:
+        """Return True when an event is a plausible token-level candidate."""
+        prepared = self._get_prepared_event(event)
+        event_tokens = prepared.event_tokens
+
+        def matches_team(team_tokens: frozenset[str]) -> bool:
+            if not team_tokens:
+                return True
+            return bool(team_tokens & event_tokens)
+
+        if team1_tokens and team2_tokens:
+            return matches_team(team1_tokens) and matches_team(team2_tokens)
+        return matches_team(team1_tokens or team2_tokens)
+
+    def _prefilter_multi_league_events(
+        self,
+        events: list[tuple[str, Event]],
+        team1: str | None,
+        team2: str | None,
+        fallback_t1: str | None,
+        fallback_t2: str | None,
+    ) -> list[tuple[str, Event]]:
+        """Reduce fuzzy candidate count using cheap team-token overlap checks."""
+        team1_tokens = self._candidate_tokens_for_team(team1)
+        team2_tokens = self._candidate_tokens_for_team(team2)
+        fallback_team1_tokens = self._candidate_tokens_for_team(fallback_t1)
+        fallback_team2_tokens = self._candidate_tokens_for_team(fallback_t2)
+
+        tokenized = (
+            team1_tokens
+            or team2_tokens
+            or fallback_team1_tokens
+            or fallback_team2_tokens
+        )
+        if not tokenized:
+            return events
+
+        candidates = [
+            (league, event)
+            for league, event in events
+            if self._event_matches_candidate_tokens(event, team1_tokens, team2_tokens)
+        ]
+        if candidates:
+            return candidates
+
+        fallback_candidates = [
+            (league, event)
+            for league, event in events
+            if self._event_matches_candidate_tokens(
+                event, fallback_team1_tokens, fallback_team2_tokens
+            )
+        ]
+        return fallback_candidates or events
+
+    def _prefilter_single_league_events(
+        self,
+        events: list[Event],
+        team1: str | None,
+        team2: str | None,
+        fallback_t1: str | None,
+        fallback_t2: str | None,
+    ) -> list[Event]:
+        """Single-league wrapper around the same conservative token prefilter."""
+        candidates = self._prefilter_multi_league_events(
+            [("", event) for event in events],
+            team1,
+            team2,
+            fallback_t1,
+            fallback_t2,
+        )
+        return [event for _league, event in candidates]
+
     def _score_teams_against_event(
         self,
         team1: str | None,
@@ -1009,6 +1160,9 @@ class TeamMatcher:
                 team_pattern.pattern
                 for team_pattern in self._fuzzy.generate_team_patterns(event.away_team)
             ),
+            home_tokens=_meaningful_tokens(event.home_team.name),
+            away_tokens=_meaningful_tokens(event.away_team.name),
+            event_tokens=_meaningful_tokens(f"{event.home_team.name} {event.away_team.name}"),
         )
         self._prepared_events[cache_key] = prepared
         return prepared
