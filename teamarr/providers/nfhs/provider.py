@@ -345,8 +345,18 @@ class NFHSProvider(SportsProvider):
                 return event
         return None
 
-    def get_team_schedule(self, league_code: str, team_id: str) -> List[Event]:
-        """Return events for a specific team within a league."""
+    def get_team_schedule(
+        self,
+        team_id: str,
+        league_code: str,
+        days_ahead: int = 14,
+    ) -> List[Event]:
+        """Return events for a specific team within a league.
+
+        NFHS currently derives schedules from upcoming league events, so
+        ``days_ahead`` is accepted for provider API compatibility but is not
+        used yet to further narrow results.
+        """
         schedule: List[Event] = []
 
         for event in self.get_events(league_code):
