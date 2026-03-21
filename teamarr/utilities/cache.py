@@ -21,10 +21,22 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    """Return an aware UTC timestamp for cache comparisons and persistence."""
+    return datetime.now(UTC)
+
+
+def _normalize_datetime(value: datetime) -> datetime:
+    """Normalize stored timestamps to aware UTC datetimes."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 @dataclass
@@ -73,19 +85,19 @@ class TTLCache:
             if entry is None:
                 self._misses += 1
                 return None
-            if datetime.now() > entry.expires_at:
+            if _utc_now() > entry.expires_at:
                 del self._cache[key]
                 self._misses += 1
                 return None
             # Update last accessed time for LRU
-            entry.last_accessed = datetime.now()
+            entry.last_accessed = _utc_now()
             self._hits += 1
             return entry.value
 
     def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
         """Set value with optional custom TTL."""
         ttl = timedelta(seconds=ttl_seconds) if ttl_seconds else self._default_ttl
-        now = datetime.now()
+        now = _utc_now()
         expires_at = now + ttl
 
         with self._lock:
@@ -105,7 +117,7 @@ class TTLCache:
             return
 
         # First, remove expired entries
-        now = datetime.now()
+        now = _utc_now()
         expired_keys = [k for k, v in self._cache.items() if now > v.expires_at]
         for key in expired_keys:
             del self._cache[key]
@@ -132,7 +144,7 @@ class TTLCache:
 
     def cleanup_expired(self) -> int:
         """Remove all expired entries. Returns count removed."""
-        now = datetime.now()
+        now = _utc_now()
         removed = 0
         with self._lock:
             expired_keys = [k for k, v in self._cache.items() if now > v.expires_at]
@@ -153,7 +165,7 @@ class TTLCache:
 
     def stats(self) -> dict:
         """Get cache statistics."""
-        now = datetime.now()
+        now = _utc_now()
         with self._lock:
             total = len(self._cache)
             expired = sum(1 for v in self._cache.values() if now > v.expires_at)
@@ -175,7 +187,7 @@ class TTLCache:
         Returns dict of key -> (value, expires_at) for serialization.
         Only returns non-expired entries.
         """
-        now = datetime.now()
+        now = _utc_now()
         with self._lock:
             return {
                 k: (v.value, v.expires_at) for k, v in self._cache.items() if v.expires_at > now
@@ -186,7 +198,8 @@ class TTLCache:
 
         Used when loading from persistent storage.
         """
-        now = datetime.now()
+        now = _utc_now()
+        expires_at = _normalize_datetime(expires_at)
         if expires_at <= now:
             return  # Already expired, don't load
 
@@ -258,7 +271,7 @@ class PersistentTTLCache:
         """Load non-expired entries from SQLite into memory."""
         from teamarr.database.connection import get_db
 
-        now = datetime.now()
+        now = _utc_now()
         loaded = 0
         expired = 0
 
@@ -270,7 +283,9 @@ class PersistentTTLCache:
 
             for row in rows:
                 try:
-                    expires_at = datetime.fromisoformat(row["expires_at"])
+                    expires_at = _normalize_datetime(
+                        datetime.fromisoformat(row["expires_at"])
+                    )
                     if expires_at > now:
                         value = json.loads(row["data_json"])
                         self._memory_cache.set_with_expiry(row["cache_key"], value, expires_at)
@@ -369,7 +384,7 @@ class PersistentTTLCache:
 
         # Clean SQLite
         try:
-            now = datetime.now().isoformat()
+            now = _utc_now().isoformat()
             with get_db() as conn:
                 cursor = conn.execute("DELETE FROM service_cache WHERE expires_at < ?", (now,))
                 removed += cursor.rowcount
@@ -411,7 +426,7 @@ class PersistentTTLCache:
                     deleted += 1
 
                 # Upsert dirty keys
-                now = datetime.now().isoformat()
+                now = _utc_now().isoformat()
                 for key, (value, expires_at) in to_write.items():
                     try:
                         data_json = json.dumps(value, default=str)
