@@ -221,6 +221,7 @@ class TeamProcessor:
         # Separate teams by provider
         espn_teams = [t for t in teams if t.provider == "espn"]
         tsdb_teams = [t for t in teams if t.provider == "tsdb"]
+        other_teams = [t for t in teams if t.provider not in {"espn", "tsdb"}]
 
         channels: list[dict] = []
 
@@ -298,6 +299,88 @@ class TeamProcessor:
                         progress_callback(processed_count, total_teams, msg)
 
             logger.debug("[TEAM_BATCH] ESPN parallel processing complete")
+
+        # Process non-ESPN, non-TSDB teams in parallel
+        if other_teams:
+            num_workers = min(MAX_WORKERS, len(other_teams))
+            provider_counts: dict[str, int] = {}
+            for team in other_teams:
+                provider_counts[team.provider] = provider_counts.get(team.provider, 0) + 1
+
+            provider_summary = ", ".join(
+                f"{provider}={count}"
+                for provider, count in sorted(provider_counts.items())
+            )
+            logger.info(
+                "[TEAM_BATCH] Other providers: %d teams, %d workers (%s)",
+                len(other_teams),
+                num_workers,
+                provider_summary,
+            )
+
+            # Track in-progress teams for accurate progress display
+            in_progress: set[str] = set()
+            in_progress_lock = threading.Lock()
+
+            def process_with_tracking(team: TeamConfig) -> TeamProcessingResult:
+                """Wrapper to track in-progress state."""
+                with in_progress_lock:
+                    in_progress.add(team.team_name)
+                    if progress_callback:
+                        progress_callback(
+                            processed_count,
+                            total_teams,
+                            f"Processing {team.team_name}...",
+                        )
+                try:
+                    return self._process_team_parallel(team)
+                finally:
+                    with in_progress_lock:
+                        in_progress.discard(team.team_name)
+
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                future_to_team = {
+                    executor.submit(process_with_tracking, team): team for team in other_teams
+                }
+
+                for future in as_completed(future_to_team):
+                    team = future_to_team[future]
+                    processed_count += 1
+                    try:
+                        result = future.result()
+                        batch_result.results.append(result)
+
+                        if result.programmes_generated > 0:
+                            channels.append(
+                                {
+                                    "id": team.channel_id,
+                                    "name": team.team_name,
+                                    "icon": team.channel_logo_url or team.team_logo_url,
+                                }
+                            )
+                    except Exception as e:
+                        logger.exception("[TEAM_ERROR] %s: %s", team.team_name, e)
+                        error_result = TeamProcessingResult(
+                            team_id=team.id,
+                            team_name=team.team_name,
+                            channel_id=team.channel_id,
+                        )
+                        error_result.errors.append(str(e))
+                        error_result.completed_at = datetime.now()
+                        batch_result.results.append(error_result)
+
+                    if progress_callback:
+                        with in_progress_lock:
+                            still_processing = list(in_progress)
+                        if still_processing:
+                            msg = f"Finished {team.team_name}, now processing: {', '.join(still_processing[:3])}"  # noqa: E501
+                            if len(still_processing) > 3:
+                                msg += f" (+{len(still_processing) - 3} more)"
+                        else:
+                            msg = f"Finished {team.team_name}"
+                        progress_callback(processed_count, total_teams, msg)
+
+            logger.debug("[TEAM_BATCH] Other provider parallel processing complete")
 
         # Process TSDB teams sequentially (rate limited API)
         if tsdb_teams:
