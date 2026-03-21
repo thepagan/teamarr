@@ -484,22 +484,48 @@ class StreamMatchCache:
             True if updated
         """
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
+        with self._memory_lock:
+            if fingerprint not in self._memory_entries:
+                return False
+            pending = self._pending_touches.get(fingerprint)
+            if pending is None or generation > pending:
+                self._pending_touches[fingerprint] = generation
+        return True
 
+    def flush_pending_touches(self) -> int:
+        """Flush deferred touch updates in bulk."""
+        with self._memory_lock:
+            pending_touches = self._pending_touches.copy()
+            self._pending_touches.clear()
+
+        if not pending_touches:
+            return 0
+
+        updated = 0
         try:
             with self._get_connection() as conn:
-                cursor = conn.execute(
-                    """
-                    UPDATE stream_match_cache
-                    SET last_seen_generation = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE fingerprint = ?
-                    """,
-                    (generation, fingerprint),
-                )
+                for fingerprint, generation in pending_touches.items():
+                    cursor = conn.execute(
+                        """
+                        UPDATE stream_match_cache
+                        SET last_seen_generation = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE fingerprint = ?
+                        """,
+                        (generation, fingerprint),
+                    )
+                    updated += cursor.rowcount
                 conn.commit()
-                return cursor.rowcount > 0
+            if updated:
+                self._stats["touch_flushes"] += 1
+            return updated
         except sqlite3.Error as e:
-            logger.warning("[STREAM_CACHE_ERROR] Touch failed: %s", e)
-            return False
+            with self._memory_lock:
+                for fingerprint, generation in pending_touches.items():
+                    existing = self._pending_touches.get(fingerprint)
+                    if existing is None or generation > existing:
+                        self._pending_touches[fingerprint] = generation
+            logger.warning("[STREAM_CACHE_ERROR] Flush touches failed: %s", e)
+            return 0
 
     def purge_stale(self, current_generation: int) -> int:
         """Remove stale entries not seen recently.
@@ -514,6 +540,7 @@ class StreamMatchCache:
             Number of entries purged
         """
         purged_total = 0
+        self.flush_pending_touches()
 
         try:
             with self._get_connection() as conn:
@@ -561,6 +588,10 @@ class StreamMatchCache:
                     self._stats["purged"] += purged_total
                     logger.info("[STREAM_CACHE_PURGE] Removed %d total stale entries", purged_total)
 
+                with self._memory_lock:
+                    self._memory_entries.clear()
+                    self._pending_touches.clear()
+
                 return purged_total
         except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Purge failed: %s", e)
@@ -594,6 +625,9 @@ class StreamMatchCache:
                 )
                 conn.commit()
                 deleted = cursor.rowcount > 0
+                with self._memory_lock:
+                    self._memory_entries.pop(fingerprint, None)
+                    self._pending_touches.pop(fingerprint, None)
                 if deleted:
                     logger.debug("[STREAM_CACHE_DELETE] stream_id=%d", stream_id)
                 return deleted
@@ -620,6 +654,9 @@ class StreamMatchCache:
                 )
                 cleared = cursor.rowcount
                 conn.commit()
+                with self._memory_lock:
+                    self._memory_entries.clear()
+                    self._pending_touches.clear()
                 logger.info("[STREAM_CACHE_CLEAR] group=%d entries=%d", group_id, cleared)
                 return cleared
         except sqlite3.Error as e:
@@ -637,6 +674,9 @@ class StreamMatchCache:
                 cursor = conn.execute("DELETE FROM stream_match_cache")
                 cleared = cursor.rowcount
                 conn.commit()
+                with self._memory_lock:
+                    self._memory_entries.clear()
+                    self._pending_touches.clear()
                 logger.info("[STREAM_CACHE_CLEAR] All entries cleared: %d", cleared)
                 return cleared
         except sqlite3.Error as e:
