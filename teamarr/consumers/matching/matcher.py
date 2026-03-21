@@ -24,6 +24,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from time import perf_counter
 from zoneinfo import ZoneInfo
 
 from teamarr.config import get_user_timezone
@@ -124,6 +125,7 @@ class BatchMatchResult:
 
     # Aggregated stats
     aggregator: ResultAggregator = field(default_factory=ResultAggregator)
+    phase_timings: dict[str, float] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -318,6 +320,7 @@ class StreamMatcher:
             len(self._search_leagues),
             target_date,
         )
+        total_start = perf_counter()
 
         # Only increment generation if not provided from parent run
         # (When called as part of full EPG generation, generation is shared across groups)
@@ -329,8 +332,11 @@ class StreamMatcher:
 
         # Prefetch events for multi-league matching (significant performance boost)
         # This fetches events ONCE for all streams instead of per-stream
+        prefetch_duration = 0.0
         if len(self._search_leagues) > 1:
+            prefetch_start = perf_counter()
             self._prefetch_events(target_date, status_callback=status_callback)
+            prefetch_duration = perf_counter() - prefetch_start
         else:
             self._prefetched_events = None
 
@@ -341,6 +347,7 @@ class StreamMatcher:
         )
 
         total_streams = len(streams)
+        match_loop_start = perf_counter()
         for idx, stream in enumerate(streams, 1):
             stream_id = stream.get("id", 0)
             stream_name = stream.get("name", "")
@@ -362,6 +369,12 @@ class StreamMatcher:
             # Report per-stream progress
             if progress_callback:
                 progress_callback(idx, total_streams, stream_name, match_result.matched)
+
+        result.phase_timings = {
+            "prefetch_events": prefetch_duration,
+            "match_streams": perf_counter() - match_loop_start,
+            "total": perf_counter() - total_start,
+        }
 
         logger.info(
             "[COMPLETED] Stream matching: %d/%d matched (%d included), cache_hit_rate=%.1f%%",

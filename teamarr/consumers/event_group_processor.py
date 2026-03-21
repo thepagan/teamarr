@@ -18,6 +18,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
+from time import perf_counter
 from sqlite3 import Connection
 from typing import Any
 
@@ -117,6 +118,7 @@ class ProcessingResult:
 
     # Errors
     errors: list[str] = field(default_factory=list)
+    phase_timings: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Convert to dict for JSON serialization."""
@@ -150,6 +152,7 @@ class ProcessingResult:
                 "xmltv_bytes": self.xmltv_size,
             },
             "errors": self.errors,
+            "phase_timings": self.phase_timings,
         }
 
 
@@ -161,6 +164,7 @@ class BatchProcessingResult:
     completed_at: datetime | None = None
     results: list[ProcessingResult] = field(default_factory=list)
     total_xmltv: str = ""
+    phase_timings: dict[str, float] = field(default_factory=dict)
 
     @property
     def groups_processed(self) -> int:
@@ -222,6 +226,7 @@ class BatchProcessingResult:
             "total_channels_created": self.total_channels_created,
             "total_errors": self.total_errors,
             "results": [r.to_dict() for r in self.results],
+            "phase_timings": self.phase_timings,
         }
 
 
@@ -621,6 +626,7 @@ class EventGroupProcessor:
         """
         target_date = target_date or date.today()
         batch_result = BatchProcessingResult()
+        batch_start = perf_counter()
         self._generation = generation  # Store for use in _do_matching
 
         # Clear caches at start of new generation run
@@ -745,6 +751,12 @@ class EventGroupProcessor:
                     )
 
         batch_result.completed_at = datetime.now()
+        batch_result.phase_timings = self._summarize_batch_timings(
+            batch_result.results,
+            total_duration_seconds=perf_counter() - batch_start,
+        )
+        if batch_result.results:
+            self._log_batch_timing_summary(batch_result)
         return batch_result
 
     def _run_enforcement(
@@ -844,6 +856,7 @@ class EventGroupProcessor:
             status_callback: Optional callback(status_message) for phase updates
         """
         result = ProcessingResult(group_id=group.id, group_name=group.name)
+        group_start = perf_counter()
 
         # Template is required — check subscription templates
         sub_templates = get_subscription_templates(conn)
@@ -870,7 +883,9 @@ class EventGroupProcessor:
             self._store_group_xmltv(conn, group.id, "")
 
             # Step 1: Fetch M3U streams from Dispatcharr
+            phase_start = perf_counter()
             streams = self._fetch_streams(group)
+            result.phase_timings["fetch_streams"] = perf_counter() - phase_start
             result.streams_fetched = len(streams)
             stats_run.streams_fetched = len(streams)
 
@@ -882,7 +897,9 @@ class EventGroupProcessor:
                 return result
 
             # Step 1.5: Apply stream filtering (include/exclude regex)
+            phase_start = perf_counter()
             streams, filter_result = self._filter_streams(streams, group)
+            result.phase_timings["filter_streams"] = perf_counter() - phase_start
             result.streams_after_filter = filter_result.passed_count
             result.filtered_stale = filter_result.filtered_stale
             # Combine all built-in eligibility filters into filtered_not_event
@@ -917,7 +934,9 @@ class EventGroupProcessor:
             # Step 2: Fetch events from data providers
             # Use subscription leagues (per-group override → global fallback)
             effective_leagues = self._get_subscription_leagues(conn, group)
+            phase_start = perf_counter()
             events = self._fetch_events(effective_leagues, target_date)
+            result.phase_timings["fetch_events"] = perf_counter() - phase_start
             logger.info(
                 f"Fetched {len(events)} events for group '{group.name}' leagues={effective_leagues}"
             )
@@ -943,6 +962,7 @@ class EventGroupProcessor:
                 return result
 
             # Step 3: Match streams to events (uses fingerprint cache)
+            phase_start = perf_counter()
             match_result = self._match_streams(
                 streams,
                 group,
@@ -950,6 +970,10 @@ class EventGroupProcessor:
                 stream_progress_callback=stream_progress_callback,
                 status_callback=status_callback,
                 resolved_leagues=effective_leagues,
+            )
+            result.phase_timings["match_streams"] = perf_counter() - phase_start
+            result.phase_timings["prefetch_events"] = match_result.phase_timings.get(
+                "prefetch_events", 0.0
             )
             result.streams_matched = match_result.matched_count
             result.streams_unmatched = match_result.unmatched_count
@@ -1036,9 +1060,11 @@ class EventGroupProcessor:
             if matched_streams:
                 if status_callback:
                     status_callback(f"Processing {len(matched_streams)} channels...")
+                phase_start = perf_counter()
                 lifecycle_result = self._process_channels(
                     matched_streams, group, conn, current_streams=current_streams
                 )
+                result.phase_timings["process_channels"] = perf_counter() - phase_start
                 result.channels_created = len(lifecycle_result.created)
                 result.channels_existing = len(lifecycle_result.existing)
                 result.channels_skipped = len(lifecycle_result.skipped)
@@ -1083,6 +1109,7 @@ class EventGroupProcessor:
 
                 if status_callback:
                     status_callback(f"Generating EPG for {len(xmltv_streams)} events...")
+                phase_start = perf_counter()
                 xmltv_content, programmes_total, event_programmes, pregame, postgame = (
                     self._generate_xmltv(xmltv_streams, group, conn)
                 )
@@ -1101,6 +1128,7 @@ class EventGroupProcessor:
                 # Step 6: Store XMLTV for this group (in database)
                 # Always store, even if empty - this clears stale XMLTV when no events match
                 self._store_group_xmltv(conn, group.id, xmltv_content or "")
+                result.phase_timings["generate_store_xmltv"] = perf_counter() - phase_start
 
             # Mark run as completed successfully
             stats_run.complete(status="completed")
@@ -1134,7 +1162,59 @@ class EventGroupProcessor:
         save_run(conn, stats_run)
 
         result.completed_at = datetime.now()
+        result.phase_timings["total"] = perf_counter() - group_start
+        self._log_group_timing_summary(result)
         return result
+
+    @staticmethod
+    def _format_phase_timings(phase_timings: dict[str, float]) -> str:
+        ordered_keys = [
+            "fetch_streams",
+            "filter_streams",
+            "fetch_events",
+            "prefetch_events",
+            "match_streams",
+            "process_channels",
+            "generate_store_xmltv",
+            "total",
+        ]
+        parts = [
+            f"{key}={phase_timings[key]:.2f}s"
+            for key in ordered_keys
+            if phase_timings.get(key) is not None
+        ]
+        return ", ".join(parts)
+
+    def _log_group_timing_summary(self, result: ProcessingResult) -> None:
+        if not result.phase_timings:
+            return
+        logger.info(
+            "[TIMING] Group '%s' (id=%d): %s",
+            result.group_name,
+            result.group_id,
+            self._format_phase_timings(result.phase_timings),
+        )
+
+    def _summarize_batch_timings(
+        self,
+        results: list[ProcessingResult],
+        total_duration_seconds: float,
+    ) -> dict[str, float]:
+        phase_totals: dict[str, float] = {}
+        for result in results:
+            for phase, duration in result.phase_timings.items():
+                if phase == "total":
+                    continue
+                phase_totals[phase] = phase_totals.get(phase, 0.0) + duration
+        phase_totals["total"] = total_duration_seconds
+        return phase_totals
+
+    def _log_batch_timing_summary(self, batch_result: BatchProcessingResult) -> None:
+        logger.info(
+            "[TIMING] Batch summary across %d groups: %s",
+            len(batch_result.results),
+            self._format_phase_timings(batch_result.phase_timings),
+        )
 
     def _fetch_streams(self, group: EventEPGGroup) -> list[dict]:
         """Fetch M3U streams from Dispatcharr for the group.
