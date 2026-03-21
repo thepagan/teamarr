@@ -183,6 +183,63 @@ class StreamMatchCache:
                 self._memory_entries[fingerprint] = None
             return None
 
+    def preload_streams(self, group_id: int, streams: list[dict[str, Any]]) -> int:
+        """Bulk-load cache rows for a group's streams into the in-memory mirror."""
+        fingerprint_map = {
+            compute_fingerprint(group_id, stream.get("id", 0), stream.get("name", "")): (
+                stream.get("id", 0),
+                stream.get("name", ""),
+            )
+            for stream in streams
+            if stream.get("name") is not None
+        }
+        fingerprints = list(fingerprint_map.keys())
+        if not fingerprints:
+            return 0
+
+        loaded = 0
+        try:
+            with self._get_connection() as conn:
+                for start in range(0, len(fingerprints), 500):
+                    chunk = fingerprints[start : start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT fingerprint, event_id, league, cached_event_data,
+                               match_method, user_corrected
+                        FROM stream_match_cache
+                        WHERE fingerprint IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+
+                    found: set[str] = set()
+                    with self._memory_lock:
+                        for row in rows:
+                            cached_data = {}
+                            if row["cached_event_data"]:
+                                try:
+                                    cached_data = json.loads(row["cached_event_data"])
+                                except json.JSONDecodeError:
+                                    cached_data = {}
+                            self._memory_entries[row["fingerprint"]] = StreamCacheEntry(
+                                event_id=row["event_id"],
+                                league=row["league"],
+                                cached_data=cached_data,
+                                match_method=row["match_method"],
+                                user_corrected=bool(row["user_corrected"]),
+                            )
+                            found.add(row["fingerprint"])
+                            loaded += 1
+
+                        for fingerprint in chunk:
+                            if fingerprint not in found and fingerprint not in self._memory_entries:
+                                self._memory_entries[fingerprint] = None
+            return loaded
+        except sqlite3.Error as e:
+            logger.warning("[STREAM_CACHE_ERROR] Preload failed: %s", e)
+            return 0
+
     def is_user_corrected(
         self,
         group_id: int,

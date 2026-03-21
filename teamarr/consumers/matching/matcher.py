@@ -341,8 +341,14 @@ class StreamMatcher:
             prefetch_start = perf_counter()
             self._prefetch_events(target_date, status_callback=status_callback)
             prefetch_duration = perf_counter() - prefetch_start
+            self._team_matcher.prepare_prefetched_index(self._prefetched_events)
         else:
             self._prefetched_events = None
+            self._team_matcher.prepare_prefetched_index(None)
+
+        preload_start = perf_counter()
+        preloaded_cache_rows = self._cache.preload_streams(self._group_id, streams)
+        preload_duration = perf_counter() - preload_start
 
         result = BatchMatchResult(
             target_date=target_date,
@@ -377,6 +383,7 @@ class StreamMatcher:
         team_profile = self._team_matcher.get_profile_summary()
         result.phase_timings = {
             "prefetch_events": prefetch_duration,
+            "preload_cache": preload_duration,
             "classify_streams": self._classification_time,
             "match_streams": perf_counter() - match_loop_start,
             "total": perf_counter() - total_start,
@@ -402,6 +409,12 @@ class StreamMatcher:
             result.total,
             result.included_count,
             result.cache_hit_rate * 100,
+        )
+        logger.info(
+            "[MATCH_CACHE_PRELOAD] streams=%d loaded_rows=%d duration=%.2fs",
+            result.total,
+            preloaded_cache_rows,
+            preload_duration,
         )
         logger.info(
             "[MATCH_PROFILE] streams=%d cache_lookup=%.2fs prefilter=%.2fs eval=%.2fs "

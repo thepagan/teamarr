@@ -180,6 +180,7 @@ class TeamMatcher:
         self._profile_timings: dict[str, float] = {}
         self._profile_counts: dict[str, int] = {}
         self._candidate_counts: list[int] = []
+        self._prefetched_token_index: dict[str, dict[str, list[Event]]] | None = None
         # Load user-defined aliases from database
         # Forward cache: (alias, league) -> canonical
         self._user_aliases: UserAliasCache = self._load_user_aliases()
@@ -207,6 +208,23 @@ class TeamMatcher:
         self._profile_timings.clear()
         self._profile_counts.clear()
         self._candidate_counts.clear()
+
+    def prepare_prefetched_index(self, prefetched_events: dict[str, list[Event]] | None) -> None:
+        """Build a token index for prefetched multi-league events."""
+        if not prefetched_events:
+            self._prefetched_token_index = None
+            return
+
+        league_indexes: dict[str, dict[str, list[Event]]] = {}
+        for league, events in prefetched_events.items():
+            token_index: dict[str, list[Event]] = {}
+            for event in events:
+                prepared = self._get_prepared_event(event)
+                for token in prepared.event_tokens:
+                    token_index.setdefault(token, []).append(event)
+            league_indexes[league] = token_index
+
+        self._prefetched_token_index = league_indexes
 
     def get_profile_summary(self) -> dict[str, float]:
         """Return aggregate profiling metrics for the current batch."""
@@ -452,6 +470,7 @@ class TeamMatcher:
         # Use prefetched events if available (much faster for multi-stream matching)
         # Otherwise, fetch events: use full 30-day cache for matching
         all_events: list[tuple[str, Event]] = []
+        using_prefetched_events = bool(prefetched_events)
 
         if prefetched_events:
             # Use pre-fetched events (already fetched once for all streams)
@@ -487,13 +506,23 @@ class TeamMatcher:
         )
         original_event_count = len(all_events)
         prefilter_start = perf_counter()
-        all_events = self._prefilter_multi_league_events(
-            all_events,
-            team1_normalized,
-            team2_normalized,
-            fallback_t1,
-            fallback_t2,
-        )
+        if using_prefetched_events:
+            all_events = self._prefilter_prefetched_multi_league_events(
+                leagues_to_search,
+                all_events,
+                team1_normalized,
+                team2_normalized,
+                fallback_t1,
+                fallback_t2,
+            )
+        else:
+            all_events = self._prefilter_multi_league_events(
+                all_events,
+                team1_normalized,
+                team2_normalized,
+                fallback_t1,
+                fallback_t2,
+            )
         self._record_profile_time("candidate_prefilter", perf_counter() - prefilter_start)
         self._increment_profile_count("prefilter_calls")
         self._increment_profile_count(
@@ -1140,6 +1169,72 @@ class TeamMatcher:
                 event, fallback_team1_tokens, fallback_team2_tokens
             )
         ]
+        return fallback_candidates or events
+
+    def _prefilter_prefetched_multi_league_events(
+        self,
+        leagues_to_search: list[str],
+        events: list[tuple[str, Event]],
+        team1: str | None,
+        team2: str | None,
+        fallback_t1: str | None,
+        fallback_t2: str | None,
+    ) -> list[tuple[str, Event]]:
+        """Use a prebuilt token index for prefetched multi-league events."""
+        if not self._prefetched_token_index:
+            return self._prefilter_multi_league_events(events, team1, team2, fallback_t1, fallback_t2)
+
+        team1_tokens = self._candidate_tokens_for_team(team1)
+        team2_tokens = self._candidate_tokens_for_team(team2)
+        fallback_team1_tokens = self._candidate_tokens_for_team(fallback_t1)
+        fallback_team2_tokens = self._candidate_tokens_for_team(fallback_t2)
+
+        def gather_candidates(
+            first_tokens: frozenset[str],
+            second_tokens: frozenset[str],
+        ) -> list[tuple[str, Event]]:
+            keyed_candidates: dict[tuple[str, str], tuple[str, Event]] = {}
+            for league in leagues_to_search:
+                token_index = self._prefetched_token_index.get(league, {})
+                if not token_index:
+                    continue
+
+                first_matches: dict[str, Event] = {}
+                second_matches: dict[str, Event] = {}
+
+                if first_tokens:
+                    for token in first_tokens:
+                        for event in token_index.get(token, []):
+                            first_matches[event.id] = event
+
+                if second_tokens:
+                    for token in second_tokens:
+                        for event in token_index.get(token, []):
+                            second_matches[event.id] = event
+
+                if first_tokens and second_tokens:
+                    candidate_ids = set(first_matches) & set(second_matches)
+                    candidate_events = [
+                        (league, first_matches[event_id] if event_id in first_matches else second_matches[event_id])
+                        for event_id in candidate_ids
+                    ]
+                else:
+                    merged = first_matches or second_matches
+                    candidate_events = [(league, event) for event in merged.values()]
+
+                for candidate_league, candidate_event in candidate_events:
+                    keyed_candidates[(candidate_league, candidate_event.id)] = (
+                        candidate_league,
+                        candidate_event,
+                    )
+
+            return list(keyed_candidates.values())
+
+        candidates = gather_candidates(team1_tokens, team2_tokens)
+        if candidates:
+            return candidates
+
+        fallback_candidates = gather_candidates(fallback_team1_tokens, fallback_team2_tokens)
         return fallback_candidates or events
 
     def _prefilter_single_league_events(
