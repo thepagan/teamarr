@@ -180,7 +180,7 @@ class TeamMatcher:
         self._profile_timings: dict[str, float] = {}
         self._profile_counts: dict[str, int] = {}
         self._candidate_counts: list[int] = []
-        self._prefetched_token_index: dict[str, dict[str, list[Event]]] | None = None
+        self._prefetched_token_index: dict[str, dict[str, dict[str, list[Event]]]] | None = None
         # Load user-defined aliases from database
         # Forward cache: (alias, league) -> canonical
         self._user_aliases: UserAliasCache = self._load_user_aliases()
@@ -215,13 +215,21 @@ class TeamMatcher:
             self._prefetched_token_index = None
             return
 
-        league_indexes: dict[str, dict[str, list[Event]]] = {}
+        league_indexes: dict[str, dict[str, dict[str, list[Event]]]] = {}
         for league, events in prefetched_events.items():
-            token_index: dict[str, list[Event]] = {}
+            token_index = {
+                "any": {},
+                "home": {},
+                "away": {},
+            }
             for event in events:
                 prepared = self._get_prepared_event(event)
                 for token in prepared.event_tokens:
-                    token_index.setdefault(token, []).append(event)
+                    token_index["any"].setdefault(token, []).append(event)
+                for token in prepared.home_tokens:
+                    token_index["home"].setdefault(token, []).append(event)
+                for token in prepared.away_tokens:
+                    token_index["away"].setdefault(token, []).append(event)
             league_indexes[league] = token_index
 
         self._prefetched_token_index = league_indexes
@@ -514,6 +522,8 @@ class TeamMatcher:
                 team2_normalized,
                 fallback_t1,
                 fallback_t2,
+                target_date,
+                user_tz,
             )
         else:
             all_events = self._prefilter_multi_league_events(
@@ -1179,6 +1189,8 @@ class TeamMatcher:
         team2: str | None,
         fallback_t1: str | None,
         fallback_t2: str | None,
+        target_date: date,
+        user_tz: ZoneInfo,
     ) -> list[tuple[str, Event]]:
         """Use a prebuilt token index for prefetched multi-league events."""
         if not self._prefetched_token_index:
@@ -1188,6 +1200,35 @@ class TeamMatcher:
         team2_tokens = self._candidate_tokens_for_team(team2)
         fallback_team1_tokens = self._candidate_tokens_for_team(fallback_t1)
         fallback_team2_tokens = self._candidate_tokens_for_team(fallback_t2)
+
+        def narrow_by_date(candidate_events: list[tuple[str, Event]]) -> list[tuple[str, Event]]:
+            if not candidate_events:
+                return candidate_events
+
+            exact = [
+                item
+                for item in candidate_events
+                if item[1].start_time.astimezone(user_tz).date() == target_date
+            ]
+            if exact:
+                return exact
+
+            near = [
+                item
+                for item in candidate_events
+                if abs((item[1].start_time.astimezone(user_tz).date() - target_date).days) <= 1
+            ]
+            return near or candidate_events
+
+        def events_from_tokens(
+            token_index: dict[str, list[Event]],
+            tokens: frozenset[str],
+        ) -> dict[str, Event]:
+            matches: dict[str, Event] = {}
+            for token in tokens:
+                for event in token_index.get(token, []):
+                    matches[event.id] = event
+            return matches
 
         def gather_candidates(
             first_tokens: frozenset[str],
@@ -1199,28 +1240,38 @@ class TeamMatcher:
                 if not token_index:
                     continue
 
-                first_matches: dict[str, Event] = {}
-                second_matches: dict[str, Event] = {}
-
-                if first_tokens:
-                    for token in first_tokens:
-                        for event in token_index.get(token, []):
-                            first_matches[event.id] = event
-
-                if second_tokens:
-                    for token in second_tokens:
-                        for event in token_index.get(token, []):
-                            second_matches[event.id] = event
-
+                candidate_events: list[tuple[str, Event]] = []
                 if first_tokens and second_tokens:
-                    candidate_ids = set(first_matches) & set(second_matches)
-                    candidate_events = [
-                        (league, first_matches[event_id] if event_id in first_matches else second_matches[event_id])
-                        for event_id in candidate_ids
-                    ]
+                    first_home = events_from_tokens(token_index["home"], first_tokens)
+                    first_away = events_from_tokens(token_index["away"], first_tokens)
+                    second_home = events_from_tokens(token_index["home"], second_tokens)
+                    second_away = events_from_tokens(token_index["away"], second_tokens)
+
+                    strict_ids = (
+                        (set(first_home) & set(second_away))
+                        | (set(first_away) & set(second_home))
+                    )
+                    if strict_ids:
+                        candidate_events = [
+                            (league, first_home.get(event_id)
+                             or first_away.get(event_id)
+                             or second_home.get(event_id)
+                             or second_away.get(event_id))
+                            for event_id in strict_ids
+                        ]
+                    else:
+                        first_matches = events_from_tokens(token_index["any"], first_tokens)
+                        second_matches = events_from_tokens(token_index["any"], second_tokens)
+                        candidate_ids = set(first_matches) & set(second_matches)
+                        candidate_events = [
+                            (league, first_matches.get(event_id) or second_matches.get(event_id))
+                            for event_id in candidate_ids
+                        ]
                 else:
-                    merged = first_matches or second_matches
+                    merged = events_from_tokens(token_index["any"], first_tokens or second_tokens)
                     candidate_events = [(league, event) for event in merged.values()]
+
+                candidate_events = narrow_by_date(candidate_events)
 
                 for candidate_league, candidate_event in candidate_events:
                     keyed_candidates[(candidate_league, candidate_event.id)] = (
