@@ -35,6 +35,13 @@ from teamarr.core import Event
 
 logger = logging.getLogger(__name__)
 
+try:
+    import psycopg2
+except Exception:  # pragma: no cover - optional dependency
+    psycopg2 = None
+
+DB_EXCEPTIONS = (sqlite3.Error, *( (psycopg2.Error,) if psycopg2 else () ))
+
 
 def compute_fingerprint(group_id: int, stream_id: int, stream_name: str) -> str:
     """Compute SHA256 fingerprint for cache lookup.
@@ -236,7 +243,7 @@ class StreamMatchCache:
                             if fingerprint not in found and fingerprint not in self._memory_entries:
                                 self._memory_entries[fingerprint] = None
             return loaded
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.warning("[STREAM_CACHE_ERROR] Preload failed: %s", e)
             return 0
 
@@ -342,7 +349,7 @@ class StreamMatchCache:
                     match_method,
                 )
                 return True
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.error("[STREAM_CACHE_ERROR] Set failed: %s", e)
             return False
 
@@ -408,7 +415,7 @@ class StreamMatchCache:
                     self._pending_touches.pop(fingerprint, None)
                 logger.debug("[STREAM_CACHE_FAILED] stream_id=%d (no match)", stream_id)
                 return True
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.error("[STREAM_CACHE_ERROR] Set failed match: %s", e)
             return False
 
@@ -485,7 +492,7 @@ class StreamMatchCache:
                     "[STREAM_CACHE_CORRECTED] stream_id=%d event_id=%s", stream_id, event_id
                 )
                 return True
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.error("[STREAM_CACHE_ERROR] Set user correction: %s", e)
             return False
 
@@ -516,7 +523,7 @@ class StreamMatchCache:
                     self._memory_entries.pop(fingerprint, None)
                     self._pending_touches.pop(fingerprint, None)
                 return cursor.rowcount > 0
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.warning("[STREAM_CACHE_ERROR] Remove user correction: %s", e)
             return False
 
@@ -575,7 +582,7 @@ class StreamMatchCache:
             if updated:
                 self._stats["touch_flushes"] += 1
             return updated
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             with self._memory_lock:
                 for fingerprint, generation in pending_touches.items():
                     existing = self._pending_touches.get(fingerprint)
@@ -650,7 +657,7 @@ class StreamMatchCache:
                     self._pending_touches.clear()
 
                 return purged_total
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.warning("[STREAM_CACHE_ERROR] Purge failed: %s", e)
             return 0
 
@@ -688,7 +695,7 @@ class StreamMatchCache:
                 if deleted:
                     logger.debug("[STREAM_CACHE_DELETE] stream_id=%d", stream_id)
                 return deleted
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.warning("[STREAM_CACHE_ERROR] Delete failed: %s", e)
             return False
 
@@ -716,7 +723,7 @@ class StreamMatchCache:
                     self._pending_touches.clear()
                 logger.info("[STREAM_CACHE_CLEAR] group=%d entries=%d", group_id, cleared)
                 return cleared
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.warning("[STREAM_CACHE_ERROR] Clear group failed: %s", e)
             return 0
 
@@ -736,7 +743,7 @@ class StreamMatchCache:
                     self._pending_touches.clear()
                 logger.info("[STREAM_CACHE_CLEAR] All entries cleared: %d", cleared)
                 return cleared
-        except sqlite3.Error as e:
+        except DB_EXCEPTIONS as e:
             logger.warning("[STREAM_CACHE_ERROR] Clear all failed: %s", e)
             return 0
 
@@ -758,7 +765,7 @@ def get_generation_counter(get_connection: Callable) -> int:
             cursor = conn.execute("SELECT epg_generation_counter FROM settings WHERE id = 1")
             row = cursor.fetchone()
             return row["epg_generation_counter"] if row else 0
-    except sqlite3.Error:
+    except DB_EXCEPTIONS:
         return 0
 
 

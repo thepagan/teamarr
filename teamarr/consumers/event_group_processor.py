@@ -1157,6 +1157,14 @@ class EventGroupProcessor:
             logger.exception(f"Error processing group {group.name}")
             result.errors.append(str(e))
             stats_run.complete(status="failed", error=str(e))
+            try:
+                conn.rollback()
+            except Exception:
+                logger.debug(
+                    "[GROUP] Failed to rollback transaction after error for group %s",
+                    group.name,
+                    exc_info=True,
+                )
 
         # Save stats run
         save_run(conn, stats_run)
