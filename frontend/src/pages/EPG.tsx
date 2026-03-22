@@ -28,15 +28,9 @@ import {
   useEPGAnalysis,
   useEPGContent,
 } from "@/hooks/useEPG"
-import { useQuery } from "@tanstack/react-query"
 import {
   getTeamXmltvUrl,
 } from "@/api/epg"
-import { getLeagues } from "@/api/teams"
-import { getNFHSSettings } from "@/api/settings"
-import type { FailedMatch, MatchedStream, EventSearchResult, CorrectableStream } from "@/api/epg"
-import type { CachedLeague } from "@/api/teams"
-import { getLeagueDisplayName } from "@/lib/utils"
 
 function formatDuration(ms: number | null): string {
   if (!ms) return "-"
@@ -89,63 +83,6 @@ export function EPG() {
   // EPG URL for IPTV apps
   const epgUrl = `${window.location.origin}${getTeamXmltvUrl()}`
 
-  // Fetch leagues for event matcher
-  const { data: leaguesData, isLoading: leaguesLoading } = useQuery({
-    queryKey: ["cache", "leagues"],
-    queryFn: () => getLeagues(false),
-    enabled: matcher.open,
-    staleTime: 5 * 60 * 1000,
-  })
-
-  const { data: nfhsSettings } = useQuery({
-    queryKey: ["settings", "nfhs"],
-    queryFn: getNFHSSettings,
-    enabled: matcher.open,
-    staleTime: 5 * 60 * 1000,
-  })
-
-  // Sort leagues by sport then name (null-safe)
-  const sortedLeagues = useMemo(() => {
-    if (!leaguesData?.leagues) return []
-    const visibleLeagues = [...leaguesData.leagues].filter((league) => {
-      if (league.provider === "nfhs" && !nfhsSettings?.enabled) return false
-      return true
-    })
-    return visibleLeagues.sort((a, b) => {
-      // Sport comparison (null-safe)
-      const aSport = String(a?.sport ?? "")
-      const bSport = String(b?.sport ?? "")
-      const sportCompare = aSport.localeCompare(bSport)
-      if (sportCompare !== 0) return sportCompare
-      // Name comparison (fallback to slug if needed)
-      const aName = String(a?.name ?? a?.slug ?? "")
-      const bName = String(b?.name ?? b?.slug ?? "")
-      return aName.localeCompare(bName)
-    })
-  }, [leaguesData?.leagues, nfhsSettings?.enabled])
-
-  // Group leagues by sport, grouping all NFHS as "High School Sports" and sorting by display name
-  const leaguesBySport = useMemo(() => {
-    const grouped: Record<string, CachedLeague[]> = {}
-    for (const league of sortedLeagues) {
-      const groupKey = league.provider === "nfhs" && nfhsSettings?.enabled
-        ? "High School Sports"
-        : String(league?.sport ?? "Other")
-
-      if (!grouped[groupKey]) grouped[groupKey] = []
-      grouped[groupKey].push(league)
-    }
-
-    Object.values(grouped).forEach((leagues) => {
-      leagues.sort((a, b) => {
-        const aName = String(getLeagueDisplayName(a) ?? a?.name ?? a?.slug ?? "")
-        const bName = String(getLeagueDisplayName(b) ?? b?.name ?? b?.slug ?? "")
-        return aName.localeCompare(bName)
-      })
-    })
-
-    return grouped
-  }, [sortedLeagues, nfhsSettings?.enabled])
   const handleCopyUrl = async () => {
     try {
       if (navigator.clipboard && window.isSecureContext) {
