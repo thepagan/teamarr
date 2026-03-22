@@ -151,7 +151,7 @@ class EmbyClient:
 
     def trigger_guide_refresh(
         self,
-        timeout: int = 120,
+        timeout: int = 300,
         poll_interval: int = 5,
         on_progress: Callable[[float], None] | None = None,
         cancellation_check: Callable[[], bool] | None = None,

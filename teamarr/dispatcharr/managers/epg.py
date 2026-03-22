@@ -127,7 +127,7 @@ class EPGManager:
     def wait_for_refresh(
         self,
         epg_id: int,
-        timeout: int = 60,
+        timeout: int = 300,
         poll_interval: int = 2,
         cancellation_check: Callable[[], bool] | None = None,
     ) -> RefreshResult:

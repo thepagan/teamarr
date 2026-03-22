@@ -386,10 +386,9 @@ def run_full_generation(
                 else dispatcharr_client
             )
             epg_manager = EPGManager(raw_client)
-            # Increased timeout from 60s to 120s for large EPGs
             refresh_result = epg_manager.wait_for_refresh(
                 dispatcharr_settings.epg_id,
-                timeout=120,
+                timeout=300,
                 cancellation_check=is_cancellation_requested,
             )
             result.epg_refresh = {
@@ -428,7 +427,7 @@ def run_full_generation(
                     )
 
                 emby_result = client.trigger_guide_refresh(
-                    timeout=120,
+                    timeout=300,
                     on_progress=on_emby_progress,
                     cancellation_check=is_cancellation_requested,
                 )
@@ -588,7 +587,7 @@ def _refresh_m3u_accounts(db_factory: Callable[[], Any], dispatcharr_client: Any
     m3u_manager = M3UManager(raw_client)
     batch_result = m3u_manager.refresh_multiple(
         list(account_ids),
-        timeout=120,
+        timeout=300,
         skip_if_recent_minutes=30,
     )
 

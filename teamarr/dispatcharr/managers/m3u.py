@@ -337,7 +337,7 @@ class M3UManager:
     def wait_for_refresh(
         self,
         account_id: int,
-        timeout: int = 120,
+        timeout: int = 300,
         poll_interval: int = 2,
         skip_if_recent_minutes: int = 60,
     ) -> RefreshResult:
@@ -419,7 +419,7 @@ class M3UManager:
     def refresh_multiple(
         self,
         account_ids: list[int],
-        timeout: int = 120,
+        timeout: int = 300,
         skip_if_recent_minutes: int = 60,
         max_workers: int = 5,
     ) -> BatchRefreshResult:
