@@ -157,74 +157,36 @@ def init_db(db_path: Path | str | None = None) -> None:
                 logger.info("[MIGRATE] Skipping V2 schema initialization for V1 database")
                 return
 
-            # Pre-migration: rename league_id_alias -> league_id before schema.sql runs
-            # (schema.sql references league_id column in INSERT OR REPLACE)
+            # ================================================================
+            # Structural pre-migrations (renames, table rebuilds)
+            # These can't be handled by reconciliation — they require
+            # copying data or changing constraints, not just adding columns.
+            # ================================================================
             _rename_league_id_column_if_needed(conn)
-
-            # Pre-migration: add league_alias column before schema.sql runs
-            # (schema.sql INSERT OR REPLACE references league_alias column)
-            _add_league_alias_column_if_needed(conn)
-
-            # Pre-migration: add gracenote_category column before schema.sql runs
-            # (schema.sql INSERT OR REPLACE references gracenote_category column)
-            _add_gracenote_category_column_if_needed(conn)
-
-            # Pre-migration: add logo_url_dark column before schema.sql runs
-            # (schema.sql INSERT OR REPLACE references logo_url_dark column)
-            _add_logo_url_dark_column_if_needed(conn)
-
-            # Pre-migration: add series_slug_pattern column before schema.sql runs
-            # (schema.sql UPDATE statements reference series_slug_pattern column)
-            _add_series_slug_pattern_column_if_needed(conn)
-
-            # Pre-migration: add fallback_provider and fallback_league_id columns
-            # (schema.sql INSERT OR REPLACE references these columns)
-            _add_fallback_columns_if_needed(conn)
-
-            # Pre-migration: add tsdb_tier column before schema.sql runs
-            # (schema.sql INSERT OR REPLACE references tsdb_tier column)
-            _add_tsdb_tier_column_if_needed(conn)
-
-            # Pre-migration: rename exception keywords columns before schema.sql runs
-            # (schema.sql INSERT OR IGNORE references label and match_terms columns)
             _migrate_exception_keywords_columns(conn)
-
-            # Pre-migration: ensure tsdb_api_key column exists before startup queries
-            # (get_display_settings selects this column; missing for some upgrade paths)
-            _add_column_if_not_exists(conn, "settings", "tsdb_api_key", "TEXT")
-
-            # Pre-migration: recreate settings table for v62 lifecycle timing overhaul
-            # (SQLite CHECK constraints require table recreation to update)
             _migrate_settings_for_v65(conn)
 
-            # Pre-migration: add feed_team_id column before schema.sql runs
-            # (schema.sql unique index idx_mc_unique_event_v2 references this column)
-            _add_column_if_not_exists(conn, "managed_channels", "feed_team_id", "TEXT")
+            # ================================================================
+            # Schema reconciliation — ensures ALL columns match schema.sql.
+            # Replaces all individual _add_*_column_if_needed functions.
+            # Adding a new column is now: just add it to schema.sql.
+            # ================================================================
+            from teamarr.database.reconciliation import reconcile_schema
 
-            # Pre-migration: add feed_hint column to epg_matched_streams for audit
-            _add_column_if_not_exists(conn, "epg_matched_streams", "feed_hint", "TEXT")
-
-            # Pre-migration: add emby_api_key column for API key auth
-            _add_column_if_not_exists(conn, "settings", "emby_api_key", "TEXT")
-
-            # Pre-migration: add per-group subscription override columns (#178)
-            # These were added in v60 migration, but a bug in v65 pre-migration
-            # caused all migrations to be skipped for some upgrade paths.
-            # Belt-and-suspenders: ensure columns exist regardless of migration state.
-            _add_column_if_not_exists(
-                conn, "event_epg_groups", "subscription_leagues", "JSON"
-            )
-            _add_column_if_not_exists(
-                conn, "event_epg_groups", "subscription_soccer_mode", "TEXT"
-            )
-            _add_column_if_not_exists(
-                conn, "event_epg_groups",
-                "subscription_soccer_followed_teams", "JSON",
-            )
+            result = reconcile_schema(conn, schema_sql)
+            if result.columns_added > 0:
+                logger.info(
+                    "[RECONCILE] Added %d missing columns across %d tables",
+                    result.columns_added,
+                    len(result.columns_by_table),
+                )
+            if result.errors:
+                for err in result.errors:
+                    logger.warning("[RECONCILE] %s", err)
 
             # Apply schema (creates tables if missing, INSERT OR REPLACE updates seed data)
             conn.executescript(schema_sql)
-            # Run remaining migrations for existing databases
+            # Run data migrations for existing databases
             _run_migrations(conn)
             # Seed TSDB cache if empty or incomplete
             _seed_tsdb_cache_if_needed(conn)
@@ -417,128 +379,6 @@ def _rename_league_id_column_if_needed(conn: sqlite3.Connection) -> None:
     if "league_id_alias" in columns and "league_id" not in columns:
         conn.execute("ALTER TABLE leagues RENAME COLUMN league_id_alias TO league_id")
         logger.info("[MIGRATE] Renamed leagues.league_id_alias -> league_id")
-
-
-def _add_league_alias_column_if_needed(conn: sqlite3.Connection) -> None:
-    """Add league_alias column if it doesn't exist.
-
-    This MUST run before schema.sql because schema.sql INSERT OR REPLACE
-    statements reference the league_alias column.
-    """
-    # Check if leagues table exists
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='leagues'")
-    if not cursor.fetchone():
-        return  # Fresh database, schema.sql will create table with correct column
-
-    # Check if column exists
-    cursor = conn.execute("PRAGMA table_info(leagues)")
-    columns = {row["name"] for row in cursor.fetchall()}
-
-    if "league_alias" not in columns:
-        conn.execute("ALTER TABLE leagues ADD COLUMN league_alias TEXT")
-        logger.info("[MIGRATE] Added leagues.league_alias column")
-
-
-def _add_gracenote_category_column_if_needed(conn: sqlite3.Connection) -> None:
-    """Add gracenote_category column if it doesn't exist.
-
-    This MUST run before schema.sql because schema.sql INSERT OR REPLACE
-    statements reference the gracenote_category column.
-    """
-    # Check if leagues table exists
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='leagues'")
-    if not cursor.fetchone():
-        return  # Fresh database, schema.sql will create table with correct column
-
-    # Check if column exists
-    cursor = conn.execute("PRAGMA table_info(leagues)")
-    columns = {row["name"] for row in cursor.fetchall()}
-
-    if "gracenote_category" not in columns:
-        conn.execute("ALTER TABLE leagues ADD COLUMN gracenote_category TEXT")
-        logger.info("[MIGRATE] Added leagues.gracenote_category column")
-
-
-def _add_logo_url_dark_column_if_needed(conn: sqlite3.Connection) -> None:
-    """Add logo_url_dark column if it doesn't exist.
-
-    This MUST run before schema.sql because schema.sql INSERT OR REPLACE
-    statements reference the logo_url_dark column.
-    """
-    # Check if leagues table exists
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='leagues'")
-    if not cursor.fetchone():
-        return  # Fresh database, schema.sql will create table with correct column
-
-    # Check if column exists
-    cursor = conn.execute("PRAGMA table_info(leagues)")
-    columns = {row["name"] for row in cursor.fetchall()}
-
-    if "logo_url_dark" not in columns:
-        conn.execute("ALTER TABLE leagues ADD COLUMN logo_url_dark TEXT")
-        logger.info("[MIGRATE] Added leagues.logo_url_dark column")
-
-
-def _add_series_slug_pattern_column_if_needed(conn: sqlite3.Connection) -> None:
-    """Add series_slug_pattern column if it doesn't exist.
-
-    This is needed for Cricbuzz auto-discovery of current season series IDs.
-    MUST run before schema.sql because UPDATE statements reference this column.
-    """
-    # Check if leagues table exists
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='leagues'")
-    if not cursor.fetchone():
-        return  # Fresh database, schema.sql will create table with correct column
-
-    # Check if column exists
-    cursor = conn.execute("PRAGMA table_info(leagues)")
-    columns = {row["name"] for row in cursor.fetchall()}
-
-    if "series_slug_pattern" not in columns:
-        conn.execute("ALTER TABLE leagues ADD COLUMN series_slug_pattern TEXT")
-        logger.info("[MIGRATE] Added leagues.series_slug_pattern column")
-
-
-def _add_fallback_columns_if_needed(conn: sqlite3.Connection) -> None:
-    """Add fallback_provider and fallback_league_id columns if they don't exist.
-
-    These columns enable provider fallback for leagues where the primary provider
-    may have limited availability (e.g., TSDB premium vs free tier for cricket).
-    MUST run before schema.sql because INSERT OR REPLACE references these columns.
-    """
-    # Check if leagues table exists
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='leagues'")
-    if not cursor.fetchone():
-        return  # Fresh database, schema.sql will create table with correct columns
-
-    # Check which columns exist
-    cursor = conn.execute("PRAGMA table_info(leagues)")
-    columns = {row["name"] for row in cursor.fetchall()}
-
-    if "fallback_provider" not in columns:
-        conn.execute("ALTER TABLE leagues ADD COLUMN fallback_provider TEXT")
-        logger.info("[MIGRATE] Added leagues.fallback_provider column")
-
-    if "fallback_league_id" not in columns:
-        conn.execute("ALTER TABLE leagues ADD COLUMN fallback_league_id TEXT")
-        logger.info("[MIGRATE] Added leagues.fallback_league_id column")
-
-
-def _add_tsdb_tier_column_if_needed(conn: sqlite3.Connection) -> None:
-    """Add tsdb_tier column if it doesn't exist.
-
-    MUST run before schema.sql because INSERT OR REPLACE references this column.
-    """
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='leagues'")
-    if not cursor.fetchone():
-        return  # Fresh database, schema.sql will create table with correct column
-
-    cursor = conn.execute("PRAGMA table_info(leagues)")
-    columns = {row["name"] for row in cursor.fetchall()}
-
-    if "tsdb_tier" not in columns:
-        conn.execute("ALTER TABLE leagues ADD COLUMN tsdb_tier TEXT")
-        logger.info("[MIGRATE] Added leagues.tsdb_tier column")
 
 
 def _migrate_exception_keywords_columns(conn: sqlite3.Connection) -> None:
