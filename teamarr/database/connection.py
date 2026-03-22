@@ -7,6 +7,7 @@ PostgreSQL backend.
 import json
 import logging
 import os
+import re
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
