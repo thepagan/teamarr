@@ -135,6 +135,8 @@ def init_db(db_path: Path | str | None = None) -> None:
         with get_db(db_path) as conn:
             conn.executescript(schema_sql)
             _normalize_postgres_schema(conn)
+            _run_migrations(conn)
+            _seed_tsdb_cache_if_needed(conn)
             conn.execute("SELECT id FROM settings LIMIT 1")
             _maybe_auto_import_sqlite_into_postgres(conn, path)
 
