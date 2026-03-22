@@ -361,7 +361,7 @@ CREATE TABLE IF NOT EXISTS settings (
     nfhs_state_codes JSON DEFAULT '[]',             -- Two-letter state codes to import (e.g., ["KY","IN"])
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 73
+    schema_version INTEGER DEFAULT 74
 );
 
 -- Insert default settings

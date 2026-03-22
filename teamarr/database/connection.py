@@ -1817,6 +1817,16 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 73 (Emby API key)")
         current_version = 73
 
+    if current_version < 74:
+        # ==========================================================================
+        # v74: Feed hint audit column for matched streams
+        # ==========================================================================
+        _add_column_if_not_exists(conn, "epg_matched_streams", "feed_hint", "TEXT")
+
+        conn.execute("UPDATE settings SET schema_version = 74 WHERE id = 1")
+        logger.info("[MIGRATE] Schema upgraded to version 74 (feed hint audit)")
+        current_version = 74
+
 def _dedup_cross_group_channels(conn: sqlite3.Connection) -> None:
     """Merge duplicate channels that exist for the same event across groups.
 
