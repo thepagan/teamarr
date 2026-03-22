@@ -1807,6 +1807,16 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 72 (NFHS settings)")
         current_version = 72
 
+    if current_version < 73:
+        # ==========================================================================
+        # v73: Emby API key authentication
+        # ==========================================================================
+        _add_column_if_not_exists(conn, "settings", "emby_api_key", "TEXT")
+
+        conn.execute("UPDATE settings SET schema_version = 73 WHERE id = 1")
+        logger.info("[MIGRATE] Schema upgraded to version 73 (Emby API key)")
+        current_version = 73
+
 def _dedup_cross_group_channels(conn: sqlite3.Connection) -> None:
     """Merge duplicate channels that exist for the same event across groups.
 
