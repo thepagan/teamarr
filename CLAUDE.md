@@ -202,7 +202,8 @@ When making changes, update relevant documentation:
 |-------------|--------|
 | New template variable | Add to `teamarr/templates/variables/` docstring |
 | New API endpoint | Update route docstring |
-| Schema change | Bump version in `schema.sql` comment |
+| New column | Add to `CREATE TABLE` in `schema.sql` (reconciliation handles upgrades) |
+| Data migration | Add versioned block in `_run_migrations()`, bump `schema_version` DEFAULT |
 | New provider | Update Architecture section in this file |
 | Config/settings change | Update README.md if user-facing |
 | New feature | Consider adding to README Features section |
@@ -216,7 +217,8 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Version | `pyproject.toml` line 7 |
 | Dependencies | `pyproject.toml` |
 | League configs | `teamarr/database/schema.sql` |
-| Schema version | `teamarr/database/schema.sql` (v72) |
+| Schema version | `teamarr/database/schema.sql` (v74) |
+| Schema reconciliation | `teamarr/database/reconciliation.py` |
 | Provider registration | `teamarr/providers/__init__.py` |
 
 ## Architecture
@@ -313,6 +315,16 @@ When asked to **"sync status"** or **"update status"**:
 ## Adding a New League
 
 Add to `INSERT OR REPLACE INTO leagues` in `teamarr/database/schema.sql`. Restart to apply.
+
+## Database Schema Changes
+
+**Adding a new column:** Just add it to the `CREATE TABLE` in `schema.sql`. Schema reconciliation (`teamarr/database/reconciliation.py`) automatically detects and adds missing columns on startup by comparing the real database against an in-memory reference built from `schema.sql`. No migration block needed.
+
+**Data migration (transforming existing data):** Add a versioned `if current_version < N:` block in `_run_migrations()` in `connection.py`. Bump the `schema_version DEFAULT` in `schema.sql`. Column additions in mixed blocks should use `_add_column_if_not_exists` as a safety net for tests that call `_run_migrations` directly.
+
+**Table rebuild (CHECK constraint changes):** Add a pre-migration function in `init_db()` that backs up the table, drops it, and lets `executescript` recreate it. Add a restore block in `_run_migrations` keyed on the backup table's existence. See `_migrate_settings_for_v65` as the pattern.
+
+**Startup order:** `init_db` → verify integrity → structural pre-migrations → reconcile schema → executescript → data migrations → seed cache.
 
 ## Common Commands
 
