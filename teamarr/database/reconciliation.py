@@ -62,7 +62,7 @@ def reconcile_schema(
             row[0]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name NOT LIKE '_%'"
+                "WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\'"
             ).fetchall()
         }
 
@@ -71,7 +71,7 @@ def reconcile_schema(
             row[0]
             for row in ref.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name NOT LIKE '_%'"
+                "WHERE type='table' AND name NOT LIKE '\\_%' ESCAPE '\\'"
             ).fetchall()
         }
 
