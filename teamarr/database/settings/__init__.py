@@ -10,6 +10,7 @@ from .read import (
     get_channel_numbering_settings,
     get_dispatcharr_settings,
     get_display_settings,
+    get_emby_settings,
     get_epg_settings,
     get_feed_separation_settings,
     get_lifecycle_settings,
@@ -27,6 +28,7 @@ from .types import (
     DispatcharrSettings,
     DisplaySettings,
     DurationSettings,
+    EmbySettings,
     EPGSettings,
     FeedSeparationSettings,
     LifecycleSettings,
@@ -45,6 +47,7 @@ from .update import (
     update_dispatcharr_settings,
     update_display_settings,
     update_duration_settings,
+    update_emby_settings,
     update_epg_settings,
     update_feed_separation_settings,
     update_lifecycle_settings,
@@ -58,6 +61,7 @@ from .update import (
 __all__ = [
     # Types
     "DispatcharrSettings",
+    "EmbySettings",
     "LifecycleSettings",
     "ReconciliationSettings",
     "SchedulerSettings",
@@ -77,6 +81,7 @@ __all__ = [
     # Read operations
     "get_all_settings",
     "get_dispatcharr_settings",
+    "get_emby_settings",
     "get_scheduler_settings",
     "get_lifecycle_settings",
     "get_epg_settings",
@@ -90,6 +95,7 @@ __all__ = [
     "get_feed_separation_settings",
     # Update operations
     "update_dispatcharr_settings",
+    "update_emby_settings",
     "update_scheduler_settings",
     "update_lifecycle_settings",
     "update_epg_settings",

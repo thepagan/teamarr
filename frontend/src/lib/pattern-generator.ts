@@ -11,7 +11,7 @@
 
 export interface TextSelection {
   text: string
-  field: "team1" | "team2" | "date" | "time" | "league"
+  field: "team1" | "team2" | "date" | "month" | "day" | "time" | "league"
 }
 
 // ---------------------------------------------------------------------------
@@ -40,8 +40,8 @@ function generalizeForField(
   switch (field) {
     case "team1":
     case "team2":
-      // Team names: word characters, spaces, dots, hyphens, apostrophes
-      return "([\\w][\\w .'-]+[\\w.])"
+      // Team names: letters, spaces, dots, hyphens, apostrophes (no digits — avoids grabbing dates)
+      return "([A-Za-z][A-Za-z .'-]+[A-Za-z.])"
 
     case "date":
       // Date: digits, slashes, dashes, spaces, month names
@@ -54,16 +54,36 @@ function generalizeForField(
       // Generic date-like
       return "([\\d/\\-.]+)"
 
+    case "month":
+      // Month: name (Jan, January) or number (01, 1)
+      if (/^[A-Za-z]+$/.test(text)) {
+        return "([A-Za-z]+)"
+      }
+      return "(\\d{1,2})"
+
+    case "day":
+      // Day: 1-31 with optional ordinal suffix (1st, 2nd, 3rd)
+      if (/\d{1,2}(?:st|nd|rd|th)/i.test(text)) {
+        return "(\\d{1,2}(?:st|nd|rd|th)?)"
+      }
+      return "(\\d{1,2})"
+
     case "time":
-      // Time: HH:MM with optional seconds, AM/PM, and timezone
-      // Common TZ abbreviations: ET, PT, CT, MT, EST, PST, GMT, UTC, etc.
+      // Time: match what the user actually selected — don't add optional trailing groups
+      // that could greedily consume nearby text (e.g., team names via case-insensitive [A-Z])
+      if (/\d{1,2}:\d{2}:\d{2}\s*[A-Za-z]{2,4}$/.test(text)) {
+        return "(\\d{1,2}:\\d{2}:\\d{2}\\s*[A-Z]{2,4})"
+      }
       if (/\d{1,2}:\d{2}:\d{2}/.test(text)) {
-        return "(\\d{1,2}:\\d{2}:\\d{2}(?:\\s*[A-Z]{2,4})?)"
+        return "(\\d{1,2}:\\d{2}:\\d{2})"
+      }
+      if (/\d{1,2}:\d{2}\s*[AaPp][Mm]\s*[A-Za-z]{2,4}$/.test(text)) {
+        return "(\\d{1,2}:\\d{2}\\s*[AaPp][Mm]\\s*[A-Z]{2,4})"
       }
       if (/\d{1,2}:\d{2}\s*[AaPp][Mm]/.test(text)) {
-        return "(\\d{1,2}:\\d{2}\\s*[AaPp][Mm](?:\\s*[A-Z]{2,4})?)"
+        return "(\\d{1,2}:\\d{2}\\s*[AaPp][Mm])"
       }
-      return "(\\d{1,2}:\\d{2}(?::\\d{2})?\\s*(?:[AaPp][Mm])?(?:\\s*[A-Z]{2,4})?)"
+      return "(\\d{1,2}:\\d{2})"
 
     case "league":
       // League codes tend to be short uppercase or known names
@@ -113,6 +133,13 @@ export function generatePattern(
     if (separatorMatch) {
       anchorBefore = escapeRegex(separatorMatch[0])
     }
+    // For date-related fields, also anchor on date separators (/, ., -)
+    if (!anchorBefore && (field === "month" || field === "day" || field === "date")) {
+      const dateSepMatch = before.match(/[/.\-]\s*$/)
+      if (dateSepMatch) {
+        anchorBefore = escapeRegex(dateSepMatch[0])
+      }
+    }
   }
 
   // Find a stable anchor after the selection
@@ -124,6 +151,13 @@ export function generatePattern(
     )
     if (separatorMatch) {
       anchorAfter = escapeRegex(separatorMatch[0])
+    }
+    // For date-related fields, also anchor on date separators
+    if (!anchorAfter && (field === "month" || field === "day" || field === "date")) {
+      const dateSepMatch = after.match(/^\s*[/.\-]/)
+      if (dateSepMatch) {
+        anchorAfter = escapeRegex(dateSepMatch[0])
+      }
     }
   }
 
@@ -158,12 +192,24 @@ export function generateTeamsPattern(
   // Find what separates team1 and team2
   const between = streamName.slice(idx1 + team1Text.length, idx2)
   const sepMatch = between.match(/^\s*(vs\.?|v\.?|@|at|-|–|—)\s*$/i)
-  const separator = sepMatch
-    ? "\\s*" + escapeRegex(sepMatch[1]) + "\\s*"
-    : "\\s+(?:vs\\.?|v\\.?|@|at)\\s+"
+  let separator: string
+  if (sepMatch) {
+    separator = "\\s*" + escapeRegex(sepMatch[1]) + "\\s*"
+  } else if (between.trim().length > 0) {
+    // Non-standard separator (e.g., time between teams: "Fulham 15:00 Burnley")
+    const trimmed = between.trim()
+    if (/^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?(?:\s*[A-Z]{2,4})?$/.test(trimmed)) {
+      // Time-like separator — use a generic time pattern so it works across streams
+      separator = "\\s+\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[AaPp][Mm])?\\s+"
+    } else {
+      separator = "\\s+" + escapeRegex(trimmed) + "\\s+"
+    }
+  } else {
+    separator = "\\s+(?:vs\\.?|v\\.?|@|at)\\s+"
+  }
 
-  const team1Group = "(?P<team1>[\\w][\\w .'-]+[\\w.])"
-  const team2Group = "(?P<team2>[\\w][\\w .'-]+[\\w.])"
+  const team1Group = "(?P<team1>[A-Za-z][A-Za-z .'-]+[A-Za-z.])"
+  const team2Group = "(?P<team2>[A-Za-z][A-Za-z .'-]+[A-Za-z.])"
 
   return team1Group + separator + team2Group
 }

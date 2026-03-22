@@ -39,6 +39,10 @@ export interface EventGroup {
   custom_regex_teams_enabled: boolean
   custom_regex_date: string | null
   custom_regex_date_enabled: boolean
+  custom_regex_month: string | null
+  custom_regex_month_enabled: boolean
+  custom_regex_day: string | null
+  custom_regex_day_enabled: boolean
   custom_regex_time: string | null
   custom_regex_time_enabled: boolean
   custom_regex_league: string | null
@@ -104,6 +108,10 @@ export interface EventGroupCreate {
   custom_regex_teams_enabled?: boolean
   custom_regex_date?: string | null
   custom_regex_date_enabled?: boolean
+  custom_regex_month?: string | null
+  custom_regex_month_enabled?: boolean
+  custom_regex_day?: string | null
+  custom_regex_day_enabled?: boolean
   custom_regex_time?: string | null
   custom_regex_time_enabled?: boolean
   custom_regex_league?: string | null
@@ -137,6 +145,8 @@ export interface EventGroupUpdate extends Partial<EventGroupCreate> {
   clear_stream_exclude_regex?: boolean
   clear_custom_regex_teams?: boolean
   clear_custom_regex_date?: boolean
+  clear_custom_regex_month?: boolean
+  clear_custom_regex_day?: boolean
   clear_custom_regex_time?: boolean
   clear_custom_regex_league?: boolean
   clear_custom_regex_fighters?: boolean

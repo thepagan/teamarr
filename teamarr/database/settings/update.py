@@ -758,6 +758,57 @@ def update_feed_separation_settings(
     return False
 
 
+def update_emby_settings(
+    conn: Connection,
+    enabled: bool | None = None,
+    url: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> bool:
+    """Update Emby integration settings.
+
+    Only updates fields that are explicitly provided.
+
+    Args:
+        conn: Database connection
+        enabled: Enable/disable Emby integration
+        url: Emby server URL
+        username: Emby username
+        password: Emby password
+
+    Returns:
+        True if updated
+    """
+    updates = []
+    values = []
+
+    if enabled is not None:
+        updates.append("emby_enabled = ?")
+        values.append(int(enabled))
+    if url is not None:
+        updates.append("emby_url = ?")
+        values.append(url.rstrip("/") if url else url)
+    if username is not None:
+        updates.append("emby_username = ?")
+        values.append(username)
+    if password is not None:
+        updates.append("emby_password = ?")
+        values.append(password)
+
+    if not updates:
+        return False
+
+    query = f"UPDATE settings SET {', '.join(updates)} WHERE id = 1"
+    cursor = conn.execute(query, values)
+    if cursor.rowcount > 0:
+        logger.info(
+            "[UPDATED] Emby settings: %s",
+            [u.split(" = ")[0] for u in updates],
+        )
+        return True
+    return False
+
+
 def update_backup_settings(
     conn: Connection,
     enabled: bool | None = None,

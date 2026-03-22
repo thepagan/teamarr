@@ -181,6 +181,10 @@ class StreamMatcher:
         custom_regex_teams_enabled: bool = False,
         custom_regex_date: str | None = None,
         custom_regex_date_enabled: bool = False,
+        custom_regex_month: str | None = None,
+        custom_regex_month_enabled: bool = False,
+        custom_regex_day: str | None = None,
+        custom_regex_day_enabled: bool = False,
         custom_regex_time: str | None = None,
         custom_regex_time_enabled: bool = False,
         custom_regex_league: str | None = None,
@@ -252,6 +256,8 @@ class StreamMatcher:
         has_custom_regex = (
             (custom_regex_teams_enabled and custom_regex_teams)
             or (custom_regex_date_enabled and custom_regex_date)
+            or (custom_regex_month_enabled and custom_regex_month)
+            or (custom_regex_day_enabled and custom_regex_day)
             or (custom_regex_time_enabled and custom_regex_time)
             or (custom_regex_league_enabled and custom_regex_league)
         )
@@ -261,6 +267,10 @@ class StreamMatcher:
                 teams_enabled=custom_regex_teams_enabled,
                 date_pattern=custom_regex_date,
                 date_enabled=custom_regex_date_enabled,
+                month_pattern=custom_regex_month,
+                month_enabled=custom_regex_month_enabled,
+                day_pattern=custom_regex_day,
+                day_enabled=custom_regex_day_enabled,
                 time_pattern=custom_regex_time,
                 time_enabled=custom_regex_time_enabled,
                 league_pattern=custom_regex_league,

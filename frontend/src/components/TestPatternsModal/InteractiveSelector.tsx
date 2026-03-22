@@ -37,6 +37,8 @@ const OPTIONS: FieldOption[] = [
   { field: "team1", label: "Team 1", icon: <Users className="h-3.5 w-3.5" />, color: "text-blue-400" },
   { field: "team2", label: "Team 2", icon: <Users className="h-3.5 w-3.5" />, color: "text-cyan-400" },
   { field: "date", label: "Date", icon: <Calendar className="h-3.5 w-3.5" />, color: "text-yellow-400" },
+  { field: "month", label: "Month", icon: <Calendar className="h-3.5 w-3.5" />, color: "text-yellow-400/70" },
+  { field: "day", label: "Day", icon: <Calendar className="h-3.5 w-3.5" />, color: "text-yellow-400/70" },
   { field: "time", label: "Time", icon: <Clock className="h-3.5 w-3.5" />, color: "text-orange-400" },
   { field: "league", label: "League", icon: <Trophy className="h-3.5 w-3.5" />, color: "text-purple-400" },
 ]
@@ -97,6 +99,8 @@ export function InteractiveSelector({
       if (pattern) {
         const fieldMap: Record<string, { patternKey: keyof PatternState; enabledKey: keyof PatternState }> = {
           date: { patternKey: "custom_regex_date", enabledKey: "custom_regex_date_enabled" },
+          month: { patternKey: "custom_regex_month", enabledKey: "custom_regex_month_enabled" },
+          day: { patternKey: "custom_regex_day", enabledKey: "custom_regex_day_enabled" },
           time: { patternKey: "custom_regex_time", enabledKey: "custom_regex_time_enabled" },
           league: { patternKey: "custom_regex_league", enabledKey: "custom_regex_league_enabled" },
           team1: { patternKey: "custom_regex_teams", enabledKey: "custom_regex_teams_enabled" },

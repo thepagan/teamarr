@@ -41,6 +41,10 @@ export interface PatternState {
   custom_regex_teams_enabled: boolean
   custom_regex_date: string | null
   custom_regex_date_enabled: boolean
+  custom_regex_month: string | null
+  custom_regex_month_enabled: boolean
+  custom_regex_day: string | null
+  custom_regex_day_enabled: boolean
   custom_regex_time: string | null
   custom_regex_time_enabled: boolean
   custom_regex_league: string | null
@@ -63,6 +67,10 @@ export const EMPTY_PATTERNS: PatternState = {
   custom_regex_teams_enabled: false,
   custom_regex_date: null,
   custom_regex_date_enabled: false,
+  custom_regex_month: null,
+  custom_regex_month_enabled: false,
+  custom_regex_day: null,
+  custom_regex_day_enabled: false,
   custom_regex_time: null,
   custom_regex_time_enabled: false,
   custom_regex_league: null,

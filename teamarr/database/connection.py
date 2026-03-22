@@ -1758,27 +1758,45 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 69 (feed team channel discrimination)")
         current_version = 69
 
-    # ==========================================================================
-    # v70: NFHS High School Sports settings
-    # ==========================================================================
     if current_version < 70:
+        # ==========================================================================
+        # v70: Separate month/day date extraction for event groups
+        # ==========================================================================
+        _add_column_if_not_exists(conn, "event_epg_groups", "custom_regex_month", "TEXT")
         _add_column_if_not_exists(
-            conn,
-            "settings",
-            "nfhs_enabled",
-            "BOOLEAN DEFAULT 0",
+            conn, "event_epg_groups", "custom_regex_month_enabled", "BOOLEAN DEFAULT 0"
         )
-
+        _add_column_if_not_exists(conn, "event_epg_groups", "custom_regex_day", "TEXT")
         _add_column_if_not_exists(
-            conn,
-            "settings",
-            "nfhs_state_codes",
-            "JSON DEFAULT '[]'",
+            conn, "event_epg_groups", "custom_regex_day_enabled", "BOOLEAN DEFAULT 0"
         )
 
         conn.execute("UPDATE settings SET schema_version = 70 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 70 (NFHS settings)")
+        logger.info("[MIGRATE] Schema upgraded to version 70 (separate month/day date extraction)")
         current_version = 70
+
+    if current_version < 71:
+        # ==========================================================================
+        # v71: Emby integration settings
+        # ==========================================================================
+        _add_column_if_not_exists(conn, "settings", "emby_enabled", "BOOLEAN DEFAULT 0")
+        _add_column_if_not_exists(conn, "settings", "emby_url", "TEXT")
+        _add_column_if_not_exists(conn, "settings", "emby_username", "TEXT")
+        _add_column_if_not_exists(conn, "settings", "emby_password", "TEXT")
+        conn.execute("UPDATE settings SET schema_version = 71 WHERE id = 1")
+        logger.info("[MIGRATE] Schema upgraded to version 71 (Emby integration)")
+        current_version = 71
+
+    if current_version < 72:
+        # ==========================================================================
+        # v72: NFHS High School Sports settings
+        # ==========================================================================
+        _add_column_if_not_exists(conn, "settings", "nfhs_enabled", "BOOLEAN DEFAULT 0")
+        _add_column_if_not_exists(conn, "settings", "nfhs_state_codes", "JSON DEFAULT '[]'")
+
+        conn.execute("UPDATE settings SET schema_version = 72 WHERE id = 1")
+        logger.info("[MIGRATE] Schema upgraded to version 72 (NFHS settings)")
+        current_version = 72
 
 def _dedup_cross_group_channels(conn: sqlite3.Connection) -> None:
     """Merge duplicate channels that exist for the same event across groups.

@@ -72,6 +72,10 @@ class CustomRegexConfig:
     teams_enabled: bool = False
     date_pattern: str | None = None
     date_enabled: bool = False
+    month_pattern: str | None = None
+    month_enabled: bool = False
+    day_pattern: str | None = None
+    day_enabled: bool = False
     time_pattern: str | None = None
     time_enabled: bool = False
     league_pattern: str | None = None
@@ -86,6 +90,8 @@ class CustomRegexConfig:
     # Compiled patterns (cached)
     _compiled_teams: Pattern | None = None
     _compiled_date: Pattern | None = None
+    _compiled_month: Pattern | None = None
+    _compiled_day: Pattern | None = None
     _compiled_time: Pattern | None = None
     _compiled_league: Pattern | None = None
     _compiled_fighters: Pattern | None = None
@@ -118,6 +124,34 @@ class CustomRegexConfig:
                 return None
 
         return self._compiled_date
+
+    def get_month_pattern(self) -> Pattern | None:
+        """Get compiled month regex pattern, compiling on first access."""
+        if not self.month_enabled or not self.month_pattern:
+            return None
+
+        if self._compiled_month is None:
+            try:
+                self._compiled_month = re.compile(self.month_pattern, re.IGNORECASE)
+            except re.error as e:
+                logger.warning("[CLASSIFY] Invalid custom month regex pattern: %s", e)
+                return None
+
+        return self._compiled_month
+
+    def get_day_pattern(self) -> Pattern | None:
+        """Get compiled day regex pattern, compiling on first access."""
+        if not self.day_enabled or not self.day_pattern:
+            return None
+
+        if self._compiled_day is None:
+            try:
+                self._compiled_day = re.compile(self.day_pattern, re.IGNORECASE)
+            except re.error as e:
+                logger.warning("[CLASSIFY] Invalid custom day regex pattern: %s", e)
+                return None
+
+        return self._compiled_day
 
     def get_time_pattern(self) -> Pattern | None:
         """Get compiled time regex pattern, compiling on first access."""
@@ -305,6 +339,7 @@ def extract_date_with_custom_regex(
     - Named group: (?P<date>...) - returns raw string to parse
     - Named groups: (?P<month>...) (?P<day>...) (?P<year>...) - combines
     - Single capture group - returns raw string to parse
+    - Separate month/day patterns - each extracts independently, then combines
 
     Args:
         text: Stream name (original, not normalized)
@@ -315,47 +350,82 @@ def extract_date_with_custom_regex(
     """
     from datetime import datetime
 
+    # Strategy 1: Single date pattern (full date or month+day named groups within it)
     pattern = config.get_date_pattern()
-    if not pattern:
-        return None
-
-    match = pattern.search(text)
-    if not match:
-        return None
-
-    try:
-        # Try named group 'date' first (full date string)
-        try:
-            date_str = match.group("date")
-            if date_str:
-                return _parse_date_string(date_str.strip())
-        except (IndexError, re.error):
-            pass
-
-        # Try individual named groups (month, day, year)
-        try:
-            month_str = match.group("month")
-            day_str = match.group("day")
-            if month_str and day_str:
-                month = _parse_month(month_str.strip())
-                day = int(day_str.strip())
+    if pattern:
+        match = pattern.search(text)
+        if match:
+            try:
+                # Try named group 'date' first (full date string)
                 try:
-                    year = int(match.group("year").strip())
-                    if year < 100:
-                        year += 2000 if year < 50 else 1900
+                    date_str = match.group("date")
+                    if date_str:
+                        return _parse_date_string(date_str.strip())
+                except (IndexError, re.error):
+                    pass
+
+                # Try individual named groups (month, day, year)
+                try:
+                    month_str = match.group("month")
+                    day_str = match.group("day")
+                    if month_str and day_str:
+                        month = _parse_month(month_str.strip())
+                        day = int(day_str.strip())
+                        try:
+                            year = int(match.group("year").strip())
+                            if year < 100:
+                                year += 2000 if year < 50 else 1900
+                        except (IndexError, re.error, ValueError, AttributeError):
+                            year = datetime.now().year
+                        return date(year, month, day)
                 except (IndexError, re.error, ValueError, AttributeError):
+                    pass
+
+                # Try first capture group as raw date string
+                groups = match.groups()
+                if groups and groups[0]:
+                    return _parse_date_string(groups[0].strip())
+
+            except (ValueError, TypeError) as e:
+                logger.debug("[CLASSIFY] Failed to parse custom date: %s", e)
+
+    # Strategy 2: Separate month + day patterns
+    month_pattern = config.get_month_pattern()
+    day_pattern = config.get_day_pattern()
+    if month_pattern and day_pattern:
+        month_match = month_pattern.search(text)
+        day_match = day_pattern.search(text)
+        if month_match and day_match:
+            try:
+                # Extract month: try named group, then first capture group
+                month_str = None
+                try:
+                    month_str = month_match.group("month")
+                except (IndexError, re.error):
+                    pass
+                if not month_str and month_match.groups():
+                    month_str = month_match.groups()[0]
+                if not month_str:
+                    month_str = month_match.group(0)
+
+                # Extract day: try named group, then first capture group
+                day_str = None
+                try:
+                    day_str = day_match.group("day")
+                except (IndexError, re.error):
+                    pass
+                if not day_str and day_match.groups():
+                    day_str = day_match.groups()[0]
+                if not day_str:
+                    day_str = day_match.group(0)
+
+                if month_str and day_str:
+                    month = _parse_month(month_str.strip())
+                    day = int(day_str.strip())
                     year = datetime.now().year
-                return date(year, month, day)
-        except (IndexError, re.error, ValueError, AttributeError):
-            pass
-
-        # Try first capture group as raw date string
-        groups = match.groups()
-        if groups and groups[0]:
-            return _parse_date_string(groups[0].strip())
-
-    except (ValueError, TypeError) as e:
-        logger.debug("[CLASSIFY] Failed to parse custom date: %s", e)
+                    return date(year, month, day)
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.debug("[CLASSIFY] Failed to parse separate month/day: %s", e)
 
     return None
 

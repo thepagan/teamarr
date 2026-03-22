@@ -18,6 +18,8 @@ const FIELD_COLORS: Record<string, { bg: string; text: string; label: string }> 
   team1:  { bg: "bg-blue-500/20",    text: "text-blue-300",    label: "Team 1" },
   team2:  { bg: "bg-cyan-500/20",    text: "text-cyan-300",    label: "Team 2" },
   date:   { bg: "bg-yellow-500/20",  text: "text-yellow-300",  label: "Date" },
+  month:  { bg: "bg-yellow-500/15",  text: "text-yellow-200",  label: "Month" },
+  day:    { bg: "bg-yellow-500/15",  text: "text-yellow-200",  label: "Day" },
   time:   { bg: "bg-orange-500/20",  text: "text-orange-300",  label: "Time" },
   league: { bg: "bg-purple-500/20",  text: "text-purple-300",  label: "League" },
 }

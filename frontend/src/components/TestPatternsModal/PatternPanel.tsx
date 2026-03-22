@@ -68,7 +68,7 @@ const FILTER_FIELDS: FieldConfig[] = [
   },
 ]
 
-// Team vs Team extraction fields
+// Team vs Team extraction fields (excluding date — rendered separately with sub-fields)
 const TEAM_VS_TEAM_FIELDS: FieldConfig[] = [
   {
     patternKey: "custom_regex_teams",
@@ -78,14 +78,9 @@ const TEAM_VS_TEAM_FIELDS: FieldConfig[] = [
     icon: <Users className="h-3.5 w-3.5" />,
     color: "text-blue-400",
   },
-  {
-    patternKey: "custom_regex_date",
-    enabledKey: "custom_regex_date_enabled",
-    label: "Date Extraction",
-    placeholder: '(?P<date>\\d{4}-\\d{2}-\\d{2})',
-    icon: <Calendar className="h-3.5 w-3.5" />,
-    color: "text-yellow-400",
-  },
+]
+
+const AFTER_DATE_TEAM_FIELDS: FieldConfig[] = [
   {
     patternKey: "custom_regex_time",
     enabledKey: "custom_regex_time_enabled",
@@ -104,7 +99,7 @@ const TEAM_VS_TEAM_FIELDS: FieldConfig[] = [
   },
 ]
 
-// Combat / Event Card extraction fields
+// Combat / Event Card extraction fields (excluding date — rendered separately)
 const EVENT_CARD_FIELDS: FieldConfig[] = [
   {
     patternKey: "custom_regex_fighters",
@@ -122,14 +117,9 @@ const EVENT_CARD_FIELDS: FieldConfig[] = [
     icon: <Tag className="h-3.5 w-3.5" />,
     color: "text-cyan-400",
   },
-  {
-    patternKey: "custom_regex_date",
-    enabledKey: "custom_regex_date_enabled",
-    label: "Date Extraction",
-    placeholder: '(?P<date>\\d{4}-\\d{2}-\\d{2})',
-    icon: <Calendar className="h-3.5 w-3.5" />,
-    color: "text-yellow-400",
-  },
+]
+
+const AFTER_DATE_EVENT_FIELDS: FieldConfig[] = [
   {
     patternKey: "custom_regex_time",
     enabledKey: "custom_regex_time_enabled",
@@ -139,6 +129,34 @@ const EVENT_CARD_FIELDS: FieldConfig[] = [
     color: "text-orange-400",
   },
 ]
+
+// Date sub-field configs
+const DATE_FIELD: FieldConfig = {
+  patternKey: "custom_regex_date",
+  enabledKey: "custom_regex_date_enabled",
+  label: "Date Extraction",
+  placeholder: '(?P<date>\\d{4}-\\d{2}-\\d{2})',
+  icon: <Calendar className="h-3.5 w-3.5" />,
+  color: "text-yellow-400",
+}
+
+const MONTH_FIELD: FieldConfig = {
+  patternKey: "custom_regex_month",
+  enabledKey: "custom_regex_month_enabled",
+  label: "Month",
+  placeholder: '(?P<month>\\w+)',
+  icon: <Calendar className="h-3 w-3" />,
+  color: "text-yellow-400/70",
+}
+
+const DAY_FIELD: FieldConfig = {
+  patternKey: "custom_regex_day",
+  enabledKey: "custom_regex_day_enabled",
+  label: "Day",
+  placeholder: '(?P<day>\\d{1,2})',
+  icon: <Calendar className="h-3 w-3" />,
+  color: "text-yellow-400/70",
+}
 
 // ---------------------------------------------------------------------------
 // Field Renderer
@@ -187,6 +205,130 @@ function renderField(
   )
 }
 
+/**
+ * Renders the Date extraction field with Month and Day sub-options.
+ * Sub-options are always visible but indented to show they're alternatives.
+ */
+function renderDateSection(
+  patterns: PatternState,
+  handleToggle: (key: keyof PatternState) => void,
+  handleChange: (key: keyof PatternState, value: string) => void
+) {
+  const datePattern = (patterns.custom_regex_date as string) || ""
+  const dateEnabled = patterns.custom_regex_date_enabled as boolean
+  const dateValidation = datePattern ? validateRegex(datePattern) : null
+
+  const monthPattern = (patterns.custom_regex_month as string) || ""
+  const monthEnabled = patterns.custom_regex_month_enabled as boolean
+  const monthValidation = monthPattern ? validateRegex(monthPattern) : null
+
+  const dayPattern = (patterns.custom_regex_day as string) || ""
+  const dayEnabled = patterns.custom_regex_day_enabled as boolean
+  const dayValidation = dayPattern ? validateRegex(dayPattern) : null
+
+  return (
+    <div key="date-section" className="flex flex-col gap-1">
+      {/* Main date field */}
+      <div className="flex items-center gap-2">
+        <Checkbox
+          checked={dateEnabled}
+          onCheckedChange={() => handleToggle("custom_regex_date_enabled")}
+        />
+        <span className={cn("flex items-center gap-1 text-xs font-medium", DATE_FIELD.color)}>
+          {DATE_FIELD.icon}
+          {DATE_FIELD.label}
+        </span>
+        {dateValidation && !dateValidation.valid && (
+          <span className="text-xs text-destructive ml-auto truncate max-w-[200px]">
+            {dateValidation.error}
+          </span>
+        )}
+        {dateValidation?.valid && dateEnabled && (
+          <span className="text-xs text-success ml-auto">Valid</span>
+        )}
+      </div>
+      <Input
+        value={datePattern}
+        onChange={(e) => handleChange("custom_regex_date", e.target.value)}
+        placeholder={DATE_FIELD.placeholder}
+        className={cn(
+          "text-xs font-mono h-7",
+          !dateEnabled && "opacity-50"
+        )}
+      />
+
+      {/* Month/Day sub-options — indented */}
+      <div className="ml-5 pl-2 border-l border-border/50 space-y-1 mt-1">
+        <div className="text-[10px] text-muted-foreground uppercase tracking-wide">
+          Or extract separately
+        </div>
+
+        {/* Month */}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <Checkbox
+              checked={monthEnabled}
+              onCheckedChange={() => handleToggle("custom_regex_month_enabled")}
+            />
+            <span className={cn("flex items-center gap-1 text-xs font-medium", MONTH_FIELD.color)}>
+              {MONTH_FIELD.icon}
+              {MONTH_FIELD.label}
+            </span>
+            {monthValidation && !monthValidation.valid && (
+              <span className="text-xs text-destructive ml-auto truncate max-w-[150px]">
+                {monthValidation.error}
+              </span>
+            )}
+            {monthValidation?.valid && monthEnabled && (
+              <span className="text-xs text-success ml-auto">Valid</span>
+            )}
+          </div>
+          <Input
+            value={monthPattern}
+            onChange={(e) => handleChange("custom_regex_month", e.target.value)}
+            placeholder={MONTH_FIELD.placeholder}
+            className={cn(
+              "text-xs font-mono h-7",
+              !monthEnabled && "opacity-50"
+            )}
+          />
+        </div>
+
+        {/* Day */}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <Checkbox
+              checked={dayEnabled}
+              onCheckedChange={() => handleToggle("custom_regex_day_enabled")}
+            />
+            <span className={cn("flex items-center gap-1 text-xs font-medium", DAY_FIELD.color)}>
+              {DAY_FIELD.icon}
+              {DAY_FIELD.label}
+            </span>
+            {dayValidation && !dayValidation.valid && (
+              <span className="text-xs text-destructive ml-auto truncate max-w-[150px]">
+                {dayValidation.error}
+              </span>
+            )}
+            {dayValidation?.valid && dayEnabled && (
+              <span className="text-xs text-success ml-auto">Valid</span>
+            )}
+          </div>
+          <Input
+            value={dayPattern}
+            onChange={(e) => handleChange("custom_regex_day", e.target.value)}
+            placeholder={DAY_FIELD.placeholder}
+            className={cn(
+              "text-xs font-mono h-7",
+              !dayEnabled && "opacity-50"
+            )}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -209,7 +351,8 @@ export function PatternPanel({ patterns, onChange }: PatternPanelProps) {
   )
 
   // Get the extraction fields for the current event type
-  const extractionFields = eventType === "team_vs_team" ? TEAM_VS_TEAM_FIELDS : EVENT_CARD_FIELDS
+  const beforeDateFields = eventType === "team_vs_team" ? TEAM_VS_TEAM_FIELDS : EVENT_CARD_FIELDS
+  const afterDateFields = eventType === "team_vs_team" ? AFTER_DATE_TEAM_FIELDS : AFTER_DATE_EVENT_FIELDS
 
   return (
     <div className="flex flex-col gap-2 p-3">
@@ -271,9 +414,13 @@ export function PatternPanel({ patterns, onChange }: PatternPanelProps) {
           </button>
         </div>
 
-        {/* Extraction fields for selected event type */}
+        {/* Extraction fields: before date → date section → after date */}
         <div className="space-y-2">
-          {extractionFields.map((field) =>
+          {beforeDateFields.map((field) =>
+            renderField(field, patterns, handleToggle, handleChange)
+          )}
+          {renderDateSection(patterns, handleToggle, handleChange)}
+          {afterDateFields.map((field) =>
             renderField(field, patterns, handleToggle, handleChange)
           )}
         </div>

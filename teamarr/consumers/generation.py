@@ -58,6 +58,7 @@ class GenerationResult:
     cleanup: dict = field(default_factory=dict)
     logo_cleanup: dict = field(default_factory=dict)
     channel_conflicts: dict = field(default_factory=dict)
+    emby_refresh: dict = field(default_factory=dict)
 
     # For stats run tracking
     run_id: int | None = None
@@ -401,6 +402,49 @@ def run_full_generation(
             result.epg_association = lifecycle_service.associate_epg_with_channels(
                 dispatcharr_settings.epg_id
             )
+
+        # Step 5b: Emby Live TV guide refresh
+        check_cancelled()
+        try:
+            from teamarr.database.settings import get_emby_settings
+
+            with db_factory() as conn:
+                emby_settings = get_emby_settings(conn)
+
+            if emby_settings.enabled and emby_settings.url:
+                update_progress("emby", 97, "Refreshing Emby guide...")
+                from teamarr.emby.client import EmbyClient
+
+                client = EmbyClient(
+                    base_url=emby_settings.url,
+                    username=emby_settings.username or "",
+                    password=emby_settings.password or "",
+                )
+
+                def on_emby_progress(pct):
+                    update_progress(
+                        "emby", 97, f"Refreshing Emby guide... {pct:.0f}%"
+                    )
+
+                emby_result = client.trigger_guide_refresh(
+                    timeout=120,
+                    on_progress=on_emby_progress,
+                    cancellation_check=is_cancellation_requested,
+                )
+                result.emby_refresh = emby_result
+                if emby_result.get("success"):
+                    logger.info(
+                        "[EMBY] Guide refresh completed in %.1fs",
+                        emby_result.get("duration", 0),
+                    )
+                else:
+                    logger.warning(
+                        "[EMBY] Guide refresh failed: %s",
+                        emby_result.get("message"),
+                    )
+        except Exception as e:
+            logger.warning("[EMBY] Guide refresh failed (non-blocking): %s", e)
+            result.emby_refresh = {"success": False, "error": str(e)}
 
         # Step 6: Process scheduled deletions (98-99%)
         check_cancelled()

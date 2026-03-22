@@ -76,6 +76,10 @@ class GroupCreate(BaseModel):
     custom_regex_teams_enabled: bool = False
     custom_regex_date: str | None = None
     custom_regex_date_enabled: bool = False
+    custom_regex_month: str | None = None
+    custom_regex_month_enabled: bool = False
+    custom_regex_day: str | None = None
+    custom_regex_day_enabled: bool = False
     custom_regex_time: str | None = None
     custom_regex_time_enabled: bool = False
     custom_regex_league: str | None = None
@@ -126,6 +130,10 @@ class GroupUpdate(BaseModel):
     custom_regex_teams_enabled: bool | None = None
     custom_regex_date: str | None = None
     custom_regex_date_enabled: bool | None = None
+    custom_regex_month: str | None = None
+    custom_regex_month_enabled: bool | None = None
+    custom_regex_day: str | None = None
+    custom_regex_day_enabled: bool | None = None
     custom_regex_time: str | None = None
     custom_regex_time_enabled: bool | None = None
     custom_regex_league: str | None = None
@@ -160,6 +168,8 @@ class GroupUpdate(BaseModel):
     clear_stream_exclude_regex: bool = False
     clear_custom_regex_teams: bool = False
     clear_custom_regex_date: bool = False
+    clear_custom_regex_month: bool = False
+    clear_custom_regex_day: bool = False
     clear_custom_regex_time: bool = False
     clear_custom_regex_league: bool = False
     clear_custom_regex_fighters: bool = False
@@ -202,6 +212,10 @@ class GroupResponse(BaseModel):
     custom_regex_teams_enabled: bool = False
     custom_regex_date: str | None = None
     custom_regex_date_enabled: bool = False
+    custom_regex_month: str | None = None
+    custom_regex_month_enabled: bool = False
+    custom_regex_day: str | None = None
+    custom_regex_day_enabled: bool = False
     custom_regex_time: str | None = None
     custom_regex_time_enabled: bool = False
     custom_regex_league: str | None = None
@@ -538,6 +552,10 @@ def list_groups(
                 custom_regex_teams_enabled=g.custom_regex_teams_enabled,
                 custom_regex_date=g.custom_regex_date,
                 custom_regex_date_enabled=g.custom_regex_date_enabled,
+                custom_regex_month=g.custom_regex_month,
+                custom_regex_month_enabled=g.custom_regex_month_enabled,
+                custom_regex_day=g.custom_regex_day,
+                custom_regex_day_enabled=g.custom_regex_day_enabled,
                 custom_regex_time=g.custom_regex_time,
                 custom_regex_time_enabled=g.custom_regex_time_enabled,
                 custom_regex_league=g.custom_regex_league,
@@ -636,6 +654,10 @@ def create_group(request: GroupCreate):
             custom_regex_teams_enabled=request.custom_regex_teams_enabled,
             custom_regex_date=request.custom_regex_date,
             custom_regex_date_enabled=request.custom_regex_date_enabled,
+            custom_regex_month=request.custom_regex_month,
+            custom_regex_month_enabled=request.custom_regex_month_enabled,
+            custom_regex_day=request.custom_regex_day,
+            custom_regex_day_enabled=request.custom_regex_day_enabled,
             custom_regex_time=request.custom_regex_time,
             custom_regex_time_enabled=request.custom_regex_time_enabled,
             custom_regex_league=request.custom_regex_league,
@@ -695,6 +717,10 @@ def create_group(request: GroupCreate):
         custom_regex_teams_enabled=group.custom_regex_teams_enabled,
         custom_regex_date=group.custom_regex_date,
         custom_regex_date_enabled=group.custom_regex_date_enabled,
+        custom_regex_month=group.custom_regex_month,
+        custom_regex_month_enabled=group.custom_regex_month_enabled,
+        custom_regex_day=group.custom_regex_day,
+        custom_regex_day_enabled=group.custom_regex_day_enabled,
         custom_regex_time=group.custom_regex_time,
         custom_regex_time_enabled=group.custom_regex_time_enabled,
         custom_regex_league=group.custom_regex_league,
@@ -1035,6 +1061,10 @@ def get_group_by_id(group_id: int):
         custom_regex_teams_enabled=group.custom_regex_teams_enabled,
         custom_regex_date=group.custom_regex_date,
         custom_regex_date_enabled=group.custom_regex_date_enabled,
+        custom_regex_month=group.custom_regex_month,
+        custom_regex_month_enabled=group.custom_regex_month_enabled,
+        custom_regex_day=group.custom_regex_day,
+        custom_regex_day_enabled=group.custom_regex_day_enabled,
         custom_regex_time=group.custom_regex_time,
         custom_regex_time_enabled=group.custom_regex_time_enabled,
         custom_regex_league=group.custom_regex_league,
@@ -1148,6 +1178,10 @@ def update_group_by_id(group_id: int, request: GroupUpdate):
                 custom_regex_teams_enabled=request.custom_regex_teams_enabled,
                 custom_regex_date=request.custom_regex_date,
                 custom_regex_date_enabled=request.custom_regex_date_enabled,
+                custom_regex_month=request.custom_regex_month,
+                custom_regex_month_enabled=request.custom_regex_month_enabled,
+                custom_regex_day=request.custom_regex_day,
+                custom_regex_day_enabled=request.custom_regex_day_enabled,
                 custom_regex_time=request.custom_regex_time,
                 custom_regex_time_enabled=request.custom_regex_time_enabled,
                 custom_regex_league=request.custom_regex_league,
@@ -1178,6 +1212,8 @@ def update_group_by_id(group_id: int, request: GroupUpdate):
                 clear_stream_exclude_regex=request.clear_stream_exclude_regex,
                 clear_custom_regex_teams=request.clear_custom_regex_teams,
                 clear_custom_regex_date=request.clear_custom_regex_date,
+                clear_custom_regex_month=request.clear_custom_regex_month,
+                clear_custom_regex_day=request.clear_custom_regex_day,
                 clear_custom_regex_time=request.clear_custom_regex_time,
                 clear_custom_regex_league=request.clear_custom_regex_league,
                 clear_custom_regex_fighters=request.clear_custom_regex_fighters,
@@ -1241,6 +1277,10 @@ def update_group_by_id(group_id: int, request: GroupUpdate):
         custom_regex_teams_enabled=group.custom_regex_teams_enabled,
         custom_regex_date=group.custom_regex_date,
         custom_regex_date_enabled=group.custom_regex_date_enabled,
+        custom_regex_month=group.custom_regex_month,
+        custom_regex_month_enabled=group.custom_regex_month_enabled,
+        custom_regex_day=group.custom_regex_day,
+        custom_regex_day_enabled=group.custom_regex_day_enabled,
         custom_regex_time=group.custom_regex_time,
         custom_regex_time_enabled=group.custom_regex_time_enabled,
         custom_regex_league=group.custom_regex_league,

@@ -260,6 +260,16 @@ class FeedSeparationSettings:
 
 
 @dataclass
+class EmbySettings:
+    """Emby integration settings for Live TV guide refresh."""
+
+    enabled: bool = False
+    url: str | None = None
+    username: str | None = None
+    password: str | None = None
+
+
+@dataclass
 class AllSettings:
     """Complete application settings."""
 
@@ -279,5 +289,6 @@ class AllSettings:
     update_check: UpdateCheckSettings = field(default_factory=UpdateCheckSettings)
     backup: BackupSettings = field(default_factory=BackupSettings)
     feed_separation: FeedSeparationSettings = field(default_factory=FeedSeparationSettings)
+    emby: EmbySettings = field(default_factory=EmbySettings)
     epg_generation_counter: int = 0
     schema_version: int = 52

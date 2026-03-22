@@ -45,6 +45,18 @@ export function StreamList({ streams, patterns, onTextSelect }: StreamListProps)
               group: r.group || "date",
             }))
           : []),
+        ...(patterns.custom_regex_month_enabled && patterns.custom_regex_month
+          ? getMatchRanges(patterns.custom_regex_month, name).slice(0, 1).map((r) => ({
+              ...r,
+              group: r.group || "month",
+            }))
+          : []),
+        ...(patterns.custom_regex_day_enabled && patterns.custom_regex_day
+          ? getMatchRanges(patterns.custom_regex_day, name).slice(0, 1).map((r) => ({
+              ...r,
+              group: r.group || "day",
+            }))
+          : []),
         ...(patterns.custom_regex_time_enabled && patterns.custom_regex_time
           ? getMatchRanges(patterns.custom_regex_time, name).map((r) => ({
               ...r,

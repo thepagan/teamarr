@@ -1,12 +1,10 @@
 import { useState, useMemo, useRef, useCallback } from "react"
 import { toast } from "sonner"
-import { useQuery } from "@tanstack/react-query"
 import {
   Play,
   Download,
   Loader2,
   CheckCircle,
-  XCircle,
   Ban,
   Link,
   Copy,
@@ -20,24 +18,8 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
-import { Select } from "@/components/ui/select"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from "@/components/ui/dialog"
 import { RunHistoryTable } from "@/components/RunHistoryTable"
+import { EventMatcherModal, useEventMatcher } from "@/components/EventMatcherModal"
 import { useGenerationProgress } from "@/contexts/GenerationContext"
 import { useDateFormat } from "@/hooks/useDateFormat"
 import {
@@ -46,10 +28,9 @@ import {
   useEPGAnalysis,
   useEPGContent,
 } from "@/hooks/useEPG"
+import { useQuery } from "@tanstack/react-query"
 import {
   getTeamXmltvUrl,
-  searchEvents,
-  correctStreamMatch,
 } from "@/api/epg"
 import { getLeagues } from "@/api/teams"
 import { getNFHSSettings } from "@/api/settings"
@@ -84,7 +65,7 @@ export function EPG() {
   const { data: runsData, isLoading: runsLoading, refetch: refetchRuns } = useRecentRuns(10, "full_epg")
   const { data: analysis, isLoading: analysisLoading, refetch: refetchAnalysis } = useEPGAnalysis()
   const { data: epgContent, isLoading: contentLoading } = useEPGContent(0) // 0 = no limit
-  const { formatDateTime, formatRelativeTime } = useDateFormat()
+  const { formatRelativeTime } = useDateFormat()
 
   const [isDownloading, setIsDownloading] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -94,21 +75,8 @@ export function EPG() {
   const [showLineNumbers, setShowLineNumbers] = useState(true)
   const previewRef = useRef<HTMLPreElement>(null)
 
-  // Event matcher modal state
-  const [eventMatcherOpen, setEventMatcherOpen] = useState(false)
-
-  // Event matcher state
-  const [matcherStream, setMatcherStream] = useState<CorrectableStream | null>(null)
-  const [matcherLeague, setMatcherLeague] = useState("")
-  const [matcherTargetDate, setMatcherTargetDate] = useState(() => {
-    // Default to today in YYYY-MM-DD format
-    const today = new Date()
-    return today.toISOString().split("T")[0]
-  })
-  const [matcherEvents, setMatcherEvents] = useState<EventSearchResult[]>([])
-  const [matcherLoading, setMatcherLoading] = useState(false)
-  const [matcherSubmitting, setMatcherSubmitting] = useState(false)
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null)
+  // Event matcher (shared component)
+  const matcher = useEventMatcher()
 
   // Gap highlighting state
   const [highlightedGap, setHighlightedGap] = useState<{
@@ -125,14 +93,14 @@ export function EPG() {
   const { data: leaguesData, isLoading: leaguesLoading } = useQuery({
     queryKey: ["cache", "leagues"],
     queryFn: () => getLeagues(false),
-    enabled: eventMatcherOpen,
+    enabled: matcher.open,
     staleTime: 5 * 60 * 1000,
   })
 
   const { data: nfhsSettings } = useQuery({
     queryKey: ["settings", "nfhs"],
     queryFn: getNFHSSettings,
-    enabled: eventMatcherOpen,
+    enabled: matcher.open,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -178,7 +146,6 @@ export function EPG() {
 
     return grouped
   }, [sortedLeagues, nfhsSettings?.enabled])
-
   const handleCopyUrl = async () => {
     try {
       if (navigator.clipboard && window.isSecureContext) {
@@ -223,92 +190,6 @@ export function EPG() {
       toast.error("Failed to open XMLTV URL")
     } finally {
       setIsDownloading(false)
-    }
-  }
-
-  // Open event matcher for correcting a stream (works with both failed and matched)
-  const handleOpenEventMatcher = (stream: FailedMatch | MatchedStream) => {
-    // Convert to CorrectableStream
-    const correctable: CorrectableStream = {
-      group_id: stream.group_id,
-      stream_id: stream.stream_id,
-      stream_name: stream.stream_name,
-      group_name: stream.group_name,
-      league_hint: "detected_league" in stream ? stream.detected_league : stream.league,
-      current_event_id: "event_id" in stream ? stream.event_id : null,
-    }
-    setMatcherStream(correctable)
-    setMatcherLeague(correctable.league_hint ?? "")
-    setMatcherEvents([])
-    setSelectedEventId(null)
-    setEventMatcherOpen(true)
-  }
-
-  // Mark a stream as "no event" (skip it in future matching)
-  const handleMarkAsNoEvent = async () => {
-    if (!matcherStream) return
-    if (matcherStream.stream_id === null) {
-      toast.error("Cannot correct: stream_id is missing")
-      return
-    }
-
-    setMatcherSubmitting(true)
-    try {
-      await correctStreamMatch({
-        group_id: matcherStream.group_id,
-        stream_id: matcherStream.stream_id,
-        stream_name: matcherStream.stream_name,
-        correct_event_id: null,
-        correct_league: null,
-      })
-      toast.success("Stream marked as 'no event'", {
-        description: "Changes will apply on next EPG generation",
-      })
-      setEventMatcherOpen(false)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to mark as no event")
-    } finally {
-      setMatcherSubmitting(false)
-    }
-  }
-
-  const handleSearchEvents = async () => {
-    if (!matcherLeague) return
-    setMatcherLoading(true)
-    try {
-      const result = await searchEvents(matcherLeague, undefined, matcherTargetDate || undefined, 50)
-      setMatcherEvents(result.events)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to search events")
-    } finally {
-      setMatcherLoading(false)
-    }
-  }
-
-  const handleApplyCorrection = async () => {
-    if (!matcherStream || !selectedEventId || !matcherLeague) return
-    if (matcherStream.stream_id === null) {
-      toast.error("Cannot correct: stream_id is missing")
-      return
-    }
-
-    setMatcherSubmitting(true)
-    try {
-      await correctStreamMatch({
-        group_id: matcherStream.group_id,
-        stream_id: matcherStream.stream_id,
-        stream_name: matcherStream.stream_name,
-        correct_event_id: selectedEventId,
-        correct_league: matcherLeague,
-      })
-      toast.success("Stream matched to event", {
-        description: "Changes will apply on next EPG generation",
-      })
-      setEventMatcherOpen(false)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to apply correction")
-    } finally {
-      setMatcherSubmitting(false)
     }
   }
 
@@ -733,7 +614,7 @@ export function EPG() {
           ) : (
             <RunHistoryTable
               runs={runsData?.runs ?? []}
-              onFixStream={handleOpenEventMatcher}
+              onFixStream={matcher.handleOpen}
             />
           )}
         </CardContent>
@@ -789,180 +670,23 @@ export function EPG() {
       </Card>
 
       {/* Event Matcher Modal */}
-      <Dialog open={eventMatcherOpen} onOpenChange={setEventMatcherOpen}>
-        <DialogContent className="max-w-xl h-[80vh] flex flex-col" onClose={() => setEventMatcherOpen(false)}>
-          <DialogHeader>
-            <DialogTitle>
-              {matcherStream?.current_event_id ? "Correct Stream Match" : "Match Stream to Event"}
-            </DialogTitle>
-            <DialogDescription>
-              {matcherStream?.current_event_id
-                ? "This stream is currently matched incorrectly. Select the correct event or skip it."
-                : "Select the correct event for this stream, or skip it if it shouldn't match."}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4 py-4 flex-1 overflow-hidden flex flex-col">
-            {/* Stream Info */}
-            {matcherStream && (
-              <div className="bg-muted p-3 rounded-md">
-                <p className="text-xs text-muted-foreground mb-1">Stream Name</p>
-                <p className="font-medium text-sm truncate" title={matcherStream.stream_name}>
-                  {matcherStream.stream_name}
-                </p>
-                <div className="flex items-center gap-4 mt-1">
-                  {matcherStream.group_name && (
-                    <p className="text-xs text-muted-foreground">
-                      Group: {matcherStream.group_name}
-                    </p>
-                  )}
-                  {matcherStream.current_event_id && (
-                    <Badge variant="warning" className="text-xs">
-                      Currently matched (incorrect)
-                    </Badge>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* League and Date Selection */}
-            <div className="flex gap-2">
-              {leaguesLoading ? (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading leagues...
-                </div>
-              ) : (
-                <>
-                  <Select
-                    className="flex-1"
-                    value={matcherLeague}
-                    onChange={(e) => setMatcherLeague(e.target.value)}
-                  >
-                    <option value="">Select a league...</option>
-                    {Object.entries(leaguesBySport).map(([sport, leagues]) => (
-                      <optgroup key={sport} label={sport}>
-                        {leagues.map((league) => (
-                          <option key={league.slug} value={league.slug}>
-                            {getLeagueDisplayName(league)}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </Select>
-                  <Input
-                    type="date"
-                    value={matcherTargetDate}
-                    onChange={(e) => setMatcherTargetDate(e.target.value)}
-                    className="w-40"
-                    title="Target date for event search"
-                  />
-                  <Button
-                    onClick={handleSearchEvents}
-                    disabled={!matcherLeague || matcherLoading}
-                  >
-                    {matcherLoading ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Search className="h-4 w-4" />
-                    )}
-                    Search
-                  </Button>
-                </>
-              )}
-            </div>
-
-            {/* Events List */}
-            <div className="flex-1 overflow-auto border rounded-md">
-              {matcherEvents.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm">
-                  {matcherLoading ? "Searching..." : "Select a league and click Search"}
-                </div>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-[40%]">Matchup</TableHead>
-                      <TableHead className="w-[25%]">Time</TableHead>
-                      <TableHead className="w-[20%]">Status</TableHead>
-                      <TableHead className="w-[15%]">Select</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {matcherEvents.map((event) => (
-                      <TableRow
-                        key={event.event_id}
-                        className={selectedEventId === event.event_id ? "bg-muted" : ""}
-                      >
-                        <TableCell className="font-medium">
-                          {event.away_team && event.home_team ? (
-                            <span>
-                              {event.away_team} @ {event.home_team}
-                            </span>
-                          ) : (
-                            event.event_name
-                          )}
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">
-                          {formatDateTime(event.start_time)}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={event.status === "in" ? "default" : "secondary"}>
-                            {event.status || "scheduled"}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <Button
-                            variant={selectedEventId === event.event_id ? "default" : "outline"}
-                            size="sm"
-                            onClick={() => setSelectedEventId(event.event_id)}
-                          >
-                            {selectedEventId === event.event_id ? <Check className="h-4 w-4" /> : "Select"}
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </div>
-          </div>
-
-          <DialogFooter className="flex justify-between sm:justify-between mt-4">
-            <Button
-              variant="destructive"
-              onClick={handleMarkAsNoEvent}
-              disabled={matcherSubmitting}
-              title="Mark this stream to be skipped (no event match)"
-            >
-              {matcherSubmitting ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <XCircle className="h-4 w-4 mr-2" />
-              )}
-              Skip Stream
-            </Button>
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={() => setEventMatcherOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleApplyCorrection}
-                disabled={!selectedEventId || matcherSubmitting}
-              >
-                {matcherSubmitting ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Applying...
-                  </>
-                ) : (
-                  "Apply Match"
-                )}
-              </Button>
-            </div>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <EventMatcherModal
+        open={matcher.open}
+        onOpenChange={matcher.setOpen}
+        stream={matcher.stream}
+        league={matcher.league}
+        onLeagueChange={matcher.setLeague}
+        targetDate={matcher.targetDate}
+        onTargetDateChange={matcher.setTargetDate}
+        events={matcher.events}
+        loading={matcher.loading}
+        submitting={matcher.submitting}
+        selectedEventId={matcher.selectedEventId}
+        onSelectEvent={matcher.setSelectedEventId}
+        onSearch={matcher.handleSearch}
+        onCorrect={matcher.handleCorrect}
+        onSkip={matcher.handleSkip}
+      />
     </div>
   )
 }

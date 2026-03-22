@@ -48,6 +48,10 @@ class EventEPGGroup:
     custom_regex_teams_enabled: bool = False
     custom_regex_date: str | None = None
     custom_regex_date_enabled: bool = False
+    custom_regex_month: str | None = None
+    custom_regex_month_enabled: bool = False
+    custom_regex_day: str | None = None
+    custom_regex_day_enabled: bool = False
     custom_regex_time: str | None = None
     custom_regex_time_enabled: bool = False
     custom_regex_league: str | None = None
@@ -148,6 +152,16 @@ def _row_to_group(row) -> EventEPGGroup:
         custom_regex_date=row["custom_regex_date"] if "custom_regex_date" in row.keys() else None,
         custom_regex_date_enabled=bool(row["custom_regex_date_enabled"])
         if "custom_regex_date_enabled" in row.keys()
+        else False,
+        custom_regex_month=(
+            row["custom_regex_month"] if "custom_regex_month" in row.keys() else None
+        ),
+        custom_regex_month_enabled=bool(row["custom_regex_month_enabled"])
+        if "custom_regex_month_enabled" in row.keys()
+        else False,
+        custom_regex_day=row["custom_regex_day"] if "custom_regex_day" in row.keys() else None,
+        custom_regex_day_enabled=bool(row["custom_regex_day_enabled"])
+        if "custom_regex_day_enabled" in row.keys()
         else False,
         custom_regex_time=row["custom_regex_time"] if "custom_regex_time" in row.keys() else None,
         custom_regex_time_enabled=bool(row["custom_regex_time_enabled"])
@@ -371,6 +385,10 @@ def create_group(
     custom_regex_teams_enabled: bool = False,
     custom_regex_date: str | None = None,
     custom_regex_date_enabled: bool = False,
+    custom_regex_month: str | None = None,
+    custom_regex_month_enabled: bool = False,
+    custom_regex_day: str | None = None,
+    custom_regex_day_enabled: bool = False,
     custom_regex_time: str | None = None,
     custom_regex_time_enabled: bool = False,
     custom_regex_league: str | None = None,
@@ -434,6 +452,8 @@ def create_group(
             stream_exclude_regex, stream_exclude_regex_enabled,
             custom_regex_teams, custom_regex_teams_enabled,
             custom_regex_date, custom_regex_date_enabled,
+            custom_regex_month, custom_regex_month_enabled,
+            custom_regex_day, custom_regex_day_enabled,
             custom_regex_time, custom_regex_time_enabled,
             custom_regex_league, custom_regex_league_enabled,
             custom_regex_fighters, custom_regex_fighters_enabled,
@@ -442,7 +462,7 @@ def create_group(
             include_teams, exclude_teams, team_filter_mode,
             channel_sort_order, overlap_handling, enabled,
             subscription_leagues, subscription_soccer_mode, subscription_soccer_followed_teams
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",  # noqa: E501
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",  # noqa: E501
         (
             name,
             display_name,
@@ -468,6 +488,10 @@ def create_group(
             int(custom_regex_teams_enabled),
             custom_regex_date,
             int(custom_regex_date_enabled),
+            custom_regex_month,
+            int(custom_regex_month_enabled),
+            custom_regex_day,
+            int(custom_regex_day_enabled),
             custom_regex_time,
             int(custom_regex_time_enabled),
             custom_regex_league,
@@ -526,6 +550,10 @@ def update_group(
     custom_regex_teams_enabled: bool | None = None,
     custom_regex_date: str | None = None,
     custom_regex_date_enabled: bool | None = None,
+    custom_regex_month: str | None = None,
+    custom_regex_month_enabled: bool | None = None,
+    custom_regex_day: str | None = None,
+    custom_regex_day_enabled: bool | None = None,
     custom_regex_time: str | None = None,
     custom_regex_time_enabled: bool | None = None,
     custom_regex_league: str | None = None,
@@ -557,6 +585,8 @@ def update_group(
     clear_stream_exclude_regex: bool = False,
     clear_custom_regex_teams: bool = False,
     clear_custom_regex_date: bool = False,
+    clear_custom_regex_month: bool = False,
+    clear_custom_regex_day: bool = False,
     clear_custom_regex_time: bool = False,
     clear_custom_regex_league: bool = False,
     clear_custom_regex_fighters: bool = False,
@@ -709,6 +739,26 @@ def update_group(
     if custom_regex_date_enabled is not None:
         updates.append("custom_regex_date_enabled = ?")
         values.append(int(custom_regex_date_enabled))
+
+    if custom_regex_month is not None:
+        updates.append("custom_regex_month = ?")
+        values.append(custom_regex_month)
+    elif clear_custom_regex_month:
+        updates.append("custom_regex_month = NULL")
+
+    if custom_regex_month_enabled is not None:
+        updates.append("custom_regex_month_enabled = ?")
+        values.append(int(custom_regex_month_enabled))
+
+    if custom_regex_day is not None:
+        updates.append("custom_regex_day = ?")
+        values.append(custom_regex_day)
+    elif clear_custom_regex_day:
+        updates.append("custom_regex_day = NULL")
+
+    if custom_regex_day_enabled is not None:
+        updates.append("custom_regex_day_enabled = ?")
+        values.append(int(custom_regex_day_enabled))
 
     if custom_regex_time is not None:
         updates.append("custom_regex_time = ?")

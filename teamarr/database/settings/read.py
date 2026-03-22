@@ -14,6 +14,7 @@ from .types import (
     DispatcharrSettings,
     DisplaySettings,
     DurationSettings,
+    EmbySettings,
     EPGSettings,
     FeedSeparationSettings,
     LifecycleSettings,
@@ -193,6 +194,7 @@ def get_all_settings(conn: Connection) -> AllSettings:
         update_check=_build_update_check_settings(row),
         backup=_build_backup_settings(row),
         feed_separation=_build_feed_separation_settings(row),
+        emby=_build_emby_settings(row),
         epg_generation_counter=row["epg_generation_counter"] or 0,
         schema_version=row["schema_version"] or 2,
     )
@@ -744,3 +746,48 @@ def get_backup_settings(conn: Connection) -> BackupSettings:
         return BackupSettings()
 
     return _build_backup_settings(row)
+
+
+# Single source of truth for Emby settings defaults
+_EMBY_DEFAULTS = EmbySettings()
+
+
+def _build_emby_settings(row) -> EmbySettings:
+    """Build EmbySettings from DB row, using dataclass defaults for NULL."""
+    d = _EMBY_DEFAULTS
+    return EmbySettings(
+        enabled=bool(row["emby_enabled"])
+        if "emby_enabled" in row.keys()
+        and row["emby_enabled"] is not None
+        else d.enabled,
+        url=row["emby_url"]
+        if "emby_url" in row.keys()
+        else d.url,
+        username=row["emby_username"]
+        if "emby_username" in row.keys()
+        else d.username,
+        password=row["emby_password"]
+        if "emby_password" in row.keys()
+        else d.password,
+    )
+
+
+def get_emby_settings(conn: Connection) -> EmbySettings:
+    """Get Emby integration settings.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        EmbySettings object with Emby configuration
+    """
+    cursor = conn.execute(
+        """SELECT emby_enabled, emby_url, emby_username, emby_password
+           FROM settings WHERE id = 1"""
+    )
+    row = cursor.fetchone()
+
+    if not row:
+        return EmbySettings()
+
+    return _build_emby_settings(row)

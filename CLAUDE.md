@@ -216,8 +216,7 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Version | `pyproject.toml` line 7 |
 | Dependencies | `pyproject.toml` |
 | League configs | `teamarr/database/schema.sql` |
-<<<<<<< HEAD
-| Schema version | `teamarr/database/schema.sql` (v70) |
+| Schema version | `teamarr/database/schema.sql` (v72) |
 | Provider registration | `teamarr/providers/__init__.py` |
 
 ## Architecture

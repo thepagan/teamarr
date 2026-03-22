@@ -859,6 +859,8 @@ export function EventGroups() {
                             {/* Regex badge */}
                             {(group.custom_regex_teams_enabled ||
                               group.custom_regex_date_enabled ||
+                              group.custom_regex_month_enabled ||
+                              group.custom_regex_day_enabled ||
                               group.custom_regex_time_enabled ||
                               group.stream_include_regex_enabled ||
                               group.stream_exclude_regex_enabled) && (
@@ -868,6 +870,8 @@ export function EventGroups() {
                                 title={`Custom regex: ${[
                                   group.custom_regex_teams_enabled && "teams",
                                   group.custom_regex_date_enabled && "date",
+                                  group.custom_regex_month_enabled && "month",
+                                  group.custom_regex_day_enabled && "day",
                                   group.custom_regex_time_enabled && "time",
                                   group.stream_include_regex_enabled && "include",
                                   group.stream_exclude_regex_enabled && "exclude",

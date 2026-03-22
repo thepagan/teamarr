@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom"
 import { api } from "@/api/client"
 import { Button } from "@/components/ui/button"
 import { RunHistoryTable } from "@/components/RunHistoryTable"
+import { EventMatcherModal, useEventMatcher } from "@/components/EventMatcherModal"
 import { Quadrant, StatTile } from "@/components/ui/rich-tooltip"
 import { useGenerationProgress } from "@/contexts/GenerationContext"
 import { useRecentRuns } from "@/hooks/useEPG"
@@ -100,6 +101,9 @@ export function Dashboard() {
 
   // Fetch EPG history (shared hook with EPG page)
   const { data: runsData, refetch: refetchRuns } = useRecentRuns(10, "full_epg")
+
+  // Event matcher (manual stream correction)
+  const matcher = useEventMatcher()
 
   // Generation progress (non-blocking toast)
   const { startGeneration, isGenerating } = useGenerationProgress()
@@ -314,7 +318,7 @@ export function Dashboard() {
         <div>
           <h2 className="text-lg font-semibold mb-3">EPG Generation History</h2>
           <div className="border rounded-lg overflow-hidden">
-            <RunHistoryTable runs={runs} />
+            <RunHistoryTable runs={runs} onFixStream={matcher.handleOpen} />
           </div>
         </div>
       )}
@@ -403,6 +407,24 @@ export function Dashboard() {
         </div>
       )}
 
+      {/* Event Matcher Modal */}
+      <EventMatcherModal
+        open={matcher.open}
+        onOpenChange={matcher.setOpen}
+        stream={matcher.stream}
+        league={matcher.league}
+        onLeagueChange={matcher.setLeague}
+        targetDate={matcher.targetDate}
+        onTargetDateChange={matcher.setTargetDate}
+        events={matcher.events}
+        loading={matcher.loading}
+        submitting={matcher.submitting}
+        selectedEventId={matcher.selectedEventId}
+        onSelectEvent={matcher.setSelectedEventId}
+        onSearch={matcher.handleSearch}
+        onCorrect={matcher.handleCorrect}
+        onSkip={matcher.handleSkip}
+      />
     </div>
   )
 }

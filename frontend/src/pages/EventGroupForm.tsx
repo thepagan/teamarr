@@ -106,6 +106,10 @@ export function EventGroupForm() {
     custom_regex_teams_enabled: formData.custom_regex_teams_enabled ?? false,
     custom_regex_date: formData.custom_regex_date ?? null,
     custom_regex_date_enabled: formData.custom_regex_date_enabled ?? false,
+    custom_regex_month: formData.custom_regex_month ?? null,
+    custom_regex_month_enabled: formData.custom_regex_month_enabled ?? false,
+    custom_regex_day: formData.custom_regex_day ?? null,
+    custom_regex_day_enabled: formData.custom_regex_day_enabled ?? false,
     custom_regex_time: formData.custom_regex_time ?? null,
     custom_regex_time_enabled: formData.custom_regex_time_enabled ?? false,
     custom_regex_league: formData.custom_regex_league ?? null,
@@ -576,6 +580,51 @@ export function EventGroupForm() {
                         <p className="text-xs text-muted-foreground">
                           Use named group: (?P&lt;date&gt;...)
                         </p>
+
+                        {/* Month/Day sub-options */}
+                        <div className="ml-6 pl-3 border-l border-border/50 space-y-2">
+                          <p className="text-xs text-muted-foreground">Or extract month and day separately:</p>
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <Checkbox
+                                checked={formData.custom_regex_month_enabled || false}
+                                onCheckedChange={() =>
+                                  setFormData({ ...formData, custom_regex_month_enabled: !formData.custom_regex_month_enabled })
+                                }
+                              />
+                              <span className="text-sm font-normal">Month</span>
+                            </label>
+                            <Input
+                              value={formData.custom_regex_month || ""}
+                              onChange={(e) =>
+                                setFormData({ ...formData, custom_regex_month: e.target.value || null })
+                              }
+                              placeholder="(?P<month>\w+)"
+                              disabled={!formData.custom_regex_month_enabled}
+                              className={cn("font-mono text-sm", !formData.custom_regex_month_enabled && "opacity-50")}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <Checkbox
+                                checked={formData.custom_regex_day_enabled || false}
+                                onCheckedChange={() =>
+                                  setFormData({ ...formData, custom_regex_day_enabled: !formData.custom_regex_day_enabled })
+                                }
+                              />
+                              <span className="text-sm font-normal">Day</span>
+                            </label>
+                            <Input
+                              value={formData.custom_regex_day || ""}
+                              onChange={(e) =>
+                                setFormData({ ...formData, custom_regex_day: e.target.value || null })
+                              }
+                              placeholder="(?P<day>\d{1,2})"
+                              disabled={!formData.custom_regex_day_enabled}
+                              className={cn("font-mono text-sm", !formData.custom_regex_day_enabled && "opacity-50")}
+                            />
+                          </div>
+                        </div>
                       </div>
 
                       {/* Time Pattern */}
@@ -710,6 +759,51 @@ export function EventGroupForm() {
                         <p className="text-xs text-muted-foreground">
                           Use named group: (?P&lt;date&gt;...)
                         </p>
+
+                        {/* Month/Day sub-options */}
+                        <div className="ml-6 pl-3 border-l border-border/50 space-y-2">
+                          <p className="text-xs text-muted-foreground">Or extract month and day separately:</p>
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <Checkbox
+                                checked={formData.custom_regex_month_enabled || false}
+                                onCheckedChange={() =>
+                                  setFormData({ ...formData, custom_regex_month_enabled: !formData.custom_regex_month_enabled })
+                                }
+                              />
+                              <span className="text-sm font-normal">Month</span>
+                            </label>
+                            <Input
+                              value={formData.custom_regex_month || ""}
+                              onChange={(e) =>
+                                setFormData({ ...formData, custom_regex_month: e.target.value || null })
+                              }
+                              placeholder="(?P<month>\w+)"
+                              disabled={!formData.custom_regex_month_enabled}
+                              className={cn("font-mono text-sm", !formData.custom_regex_month_enabled && "opacity-50")}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <Checkbox
+                                checked={formData.custom_regex_day_enabled || false}
+                                onCheckedChange={() =>
+                                  setFormData({ ...formData, custom_regex_day_enabled: !formData.custom_regex_day_enabled })
+                                }
+                              />
+                              <span className="text-sm font-normal">Day</span>
+                            </label>
+                            <Input
+                              value={formData.custom_regex_day || ""}
+                              onChange={(e) =>
+                                setFormData({ ...formData, custom_regex_day: e.target.value || null })
+                              }
+                              placeholder="(?P<day>\d{1,2})"
+                              disabled={!formData.custom_regex_day_enabled}
+                              className={cn("font-mono text-sm", !formData.custom_regex_day_enabled && "opacity-50")}
+                            />
+                          </div>
+                        </div>
                       </div>
 
                       {/* Time Pattern (shared) */}

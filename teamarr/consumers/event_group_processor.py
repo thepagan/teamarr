@@ -1469,6 +1469,10 @@ class EventGroupProcessor:
             custom_regex_teams_enabled=group.custom_regex_teams_enabled,
             custom_regex_date=group.custom_regex_date,
             custom_regex_date_enabled=group.custom_regex_date_enabled,
+            custom_regex_month=group.custom_regex_month,
+            custom_regex_month_enabled=group.custom_regex_month_enabled,
+            custom_regex_day=group.custom_regex_day,
+            custom_regex_day_enabled=group.custom_regex_day_enabled,
             custom_regex_time=group.custom_regex_time,
             custom_regex_time_enabled=group.custom_regex_time_enabled,
             custom_regex_league=group.custom_regex_league,
@@ -1586,15 +1590,20 @@ class EventGroupProcessor:
     def _detect_team_in_stream_name(
         stream_name_lower: str, home_team, away_team
     ):
-        """Detect team identity in stream name by checking name/short_name/abbreviation.
+        """Detect team-specific feed by looking for feed indicator patterns.
 
-        Checks home_team first, then away_team. Returns the matched Team or None.
-        Uses word boundary-like matching to avoid false positives.
+        Only matches when a team name appears in a feed-specific context:
+        - In parentheses: "Game Title (Penguins)" or "(Penguins Feed)"
+        - With feed keyword: "Penguins Feed", "Penguins Broadcast"
+        - After pipe/dash at end: "Game | Penguins", "Game - Penguins"
+        - With home/away: "Penguins Home", "Home Penguins"
+
+        Does NOT match team names that just appear in a matchup title like
+        "Penguins vs Jets" — that's a shared feed, not team-specific.
         """
         import re
 
         for team in (home_team, away_team):
-            # Check full name, short_name, and abbreviation (3+ chars to avoid false positives)
             candidates = [team.name]
             if team.short_name and team.short_name != team.name:
                 candidates.append(team.short_name)
@@ -1602,8 +1611,19 @@ class EventGroupProcessor:
                 candidates.append(team.abbreviation)
 
             for candidate in candidates:
-                pattern = re.compile(rf"\b{re.escape(candidate.lower())}\b")
-                if pattern.search(stream_name_lower):
+                esc = re.escape(candidate.lower())
+                # Team in parentheses: "(Penguins)" or "(Penguins Feed)"
+                if re.search(rf"\(\s*{esc}(?:\s+feed)?\s*\)", stream_name_lower):
+                    return team
+                # Feed/broadcast keyword: "Penguins Feed", "Feed: Penguins"
+                if re.search(rf"\b{esc}\s+(?:feed|broadcast)\b", stream_name_lower):
+                    return team
+                if re.search(rf"\b(?:feed|broadcast)[:\s]+{esc}\b", stream_name_lower):
+                    return team
+                # Home/away adjacent: "Penguins Home", "Home Penguins"
+                if re.search(rf"\b{esc}\s+(?:home|away)\b", stream_name_lower):
+                    return team
+                if re.search(rf"\b(?:home|away)\s+{esc}\b", stream_name_lower):
                     return team
 
         return None

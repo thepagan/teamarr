@@ -69,6 +69,9 @@ import {
   useDeleteLeagueConfig,
   useNFHSSettings,
   useUpdateNFHSSettings,
+  useEmbySettings,
+  useUpdateEmbySettings,
+  useTestEmbyConnection,
 } from "@/hooks/useSettings"
 import { SortPriorityManager } from "@/components/SortPriorityManager"
 import { StreamOrderingManager } from "@/components/StreamOrderingManager"
@@ -99,6 +102,7 @@ import type {
   ChannelNumberingSettings,
   UpdateCheckSettings,
   FeedSeparationSettings,
+  EmbySettings,
   SubscriptionLeagueConfig,
   TSDBKeyValidationResult,
 } from "@/api/settings"
@@ -842,7 +846,7 @@ function LeagueConfigRow({
   )
 }
 
-type SettingsTab = "general" | "teams" | "events" | "channels" | "epg" | "integrations" | "advanced"
+type SettingsTab = "general" | "teams" | "events" | "channels" | "epg" | "dispatcharr" | "emby" | "advanced"
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "General" },
@@ -850,7 +854,8 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "events", label: "Event Groups" },
   { id: "epg", label: "EPG" },
   { id: "channels", label: "Channels" },
-  { id: "integrations", label: "Dispatcharr" },
+  { id: "dispatcharr", label: "Dispatcharr" },
+  { id: "emby", label: "Emby" },
   { id: "advanced", label: "System" },
 ]
 
@@ -911,6 +916,11 @@ export function Settings() {
   const { data: feedSeparationData } = useFeedSeparationSettings()
   const updateFeedSeparation = useUpdateFeedSeparationSettings()
 
+  // Emby settings
+  const { data: embyData } = useEmbySettings()
+  const updateEmby = useUpdateEmbySettings()
+  const testEmby = useTestEmbyConnection()
+
   // Per-league subscription config
   const { data: leagueConfigsData } = useLeagueConfigs()
   const upsertLeagueConfigMutation = useUpsertLeagueConfig()
@@ -966,6 +976,13 @@ export function Settings() {
     detect_team_names: true,
     label_style: "team_name",
   })
+  const [emby, setEmby] = useState<Partial<EmbySettings>>({
+    enabled: false,
+    url: null,
+    username: null,
+    password: null,
+  })
+  const [embyTestResult, setEmbyTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [newKeyword, setNewKeyword] = useState({ label: "", match_terms: "", behavior: "consolidate" })
   const [editingKeyword, setEditingKeyword] = useState<{ id: number; label: string; match_terms: string } | null>(null)
   const [nfhs, setNFHS] = useState<NFHSSettings | null>(null)
@@ -1078,6 +1095,18 @@ export function Settings() {
       setNFHS(nfhsData)
     }
   }, [nfhsData])
+
+  // Sync emby state when data loads
+  useEffect(() => {
+    if (embyData) {
+      setEmby({
+        enabled: embyData.enabled,
+        url: embyData.url,
+        username: embyData.username,
+        password: "", // Don't show masked password
+      })
+    }
+  }, [embyData])
   // Sync channel range inputs from lifecycle on initial load only
   const channelRangeInitializedRef = useRef(false)
   useEffect(() => {
@@ -1145,6 +1174,50 @@ export function Settings() {
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Connection test failed")
+    }
+  }
+
+  const handleSaveEmby = async () => {
+    try {
+      const data: Partial<EmbySettings> = {
+        enabled: emby.enabled,
+        url: emby.url,
+        username: emby.username,
+      }
+      if (emby.password) {
+        data.password = emby.password
+      }
+      await updateEmby.mutateAsync(data)
+      toast.success("Emby settings saved")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save")
+    }
+  }
+
+  const handleTestEmby = async () => {
+    try {
+      setEmbyTestResult(null)
+      const result = await testEmby.mutateAsync({
+        url: emby.url || undefined,
+        username: emby.username || undefined,
+        password: emby.password || undefined,
+      })
+      if (result.success) {
+        setEmbyTestResult({
+          success: true,
+          message: `Connected to ${result.server_name || "Emby"} (v${result.server_version || "unknown"})`,
+        })
+      } else {
+        setEmbyTestResult({
+          success: false,
+          message: result.error || "Connection failed",
+        })
+      }
+    } catch (err) {
+      setEmbyTestResult({
+        success: false,
+        message: err instanceof Error ? err.message : "Connection test failed",
+      })
     }
   }
 
@@ -2894,8 +2967,8 @@ export function Settings() {
       </>
       )}
 
-      {/* Dispatcharr Integration Tab */}
-      {activeTab === "integrations" && (
+      {/* Dispatcharr Tab */}
+      {activeTab === "dispatcharr" && (
       <>
       <div className="mb-4">
         <h2 className="text-lg font-semibold">Dispatcharr Integration</h2>
@@ -3221,6 +3294,97 @@ export function Settings() {
 
           <Button onClick={handleSaveDispatcharr} disabled={updateDispatcharr.isPending}>
             {updateDispatcharr.isPending ? (
+              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4 mr-1" />
+            )}
+            Save
+          </Button>
+        </CardContent>
+      </Card>
+
+      </>
+      )}
+
+      {/* Emby Tab */}
+      {activeTab === "emby" && (
+      <>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Emby</CardTitle>
+              <CardDescription>Auto-refresh Live TV guide after EPG generation</CardDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button onClick={handleTestEmby} variant="outline" size="sm" disabled={testEmby.isPending}>
+                {testEmby.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <TestTube className="h-4 w-4 mr-1" />
+                )}
+                Test
+              </Button>
+              {embyTestResult && (
+                embyTestResult.success ? (
+                  <Badge variant="success" className="gap-1">
+                    <CheckCircle className="h-3 w-3" /> {embyTestResult.message}
+                  </Badge>
+                ) : (
+                  <Badge variant="destructive" className="gap-1">
+                    <XCircle className="h-3 w-3" /> {embyTestResult.message}
+                  </Badge>
+                )
+              )}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Enable */}
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={emby.enabled ?? false}
+              onCheckedChange={(checked) => setEmby({ ...emby, enabled: checked })}
+            />
+            <Label>Enable Emby Integration</Label>
+          </div>
+
+          {/* URL */}
+          <div className="space-y-2">
+            <Label htmlFor="emby-url">URL</Label>
+            <Input
+              id="emby-url"
+              value={emby.url ?? ""}
+              onChange={(e) => setEmby({ ...emby, url: e.target.value })}
+              placeholder="http://emby:8096"
+            />
+          </div>
+
+          {/* Credentials */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="emby-username">Username</Label>
+              <Input
+                id="emby-username"
+                value={emby.username ?? ""}
+                onChange={(e) => setEmby({ ...emby, username: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="emby-password">Password</Label>
+              <Input
+                id="emby-password"
+                type="password"
+                value={emby.password ?? ""}
+                onChange={(e) => setEmby({ ...emby, password: e.target.value })}
+                placeholder="Leave blank to keep current"
+              />
+            </div>
+          </div>
+
+          {/* Save button */}
+          <Button onClick={handleSaveEmby} disabled={updateEmby.isPending}>
+            {updateEmby.isPending ? (
               <Loader2 className="h-4 w-4 mr-1 animate-spin" />
             ) : (
               <Save className="h-4 w-4 mr-1" />

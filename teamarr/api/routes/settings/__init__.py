@@ -15,6 +15,7 @@ from teamarr.database import get_db
 from .channel_numbering import router as channel_numbering_router
 from .dispatcharr import router as dispatcharr_router
 from .display import router as display_router
+from .emby import router as emby_router
 from .epg import router as epg_router
 from .feed_separation import router as feed_separation_router
 from .nfhs import router as nfhs_router
@@ -25,6 +26,7 @@ from .models import (
     DispatcharrSettingsModel,
     DisplaySettingsModel,
     DurationSettingsModel,
+    EmbySettingsModel,
     EPGSettingsModel,
     FeedSeparationSettingsModel,
     LifecycleSettingsModel,
@@ -45,6 +47,7 @@ router = APIRouter()
 
 # Include sub-routers
 router.include_router(dispatcharr_router)
+router.include_router(emby_router)
 router.include_router(lifecycle_router)
 router.include_router(epg_router)
 router.include_router(display_router)
@@ -165,6 +168,12 @@ def get_settings():
             detect_team_names=settings.feed_separation.detect_team_names,
             label_style=settings.feed_separation.label_style,
         ),
+        emby=EmbySettingsModel(
+            enabled=settings.emby.enabled,
+            url=settings.emby.url,
+            username=settings.emby.username,
+            password=settings.emby.password,
+        ),
         epg_generation_counter=settings.epg_generation_counter,
         schema_version=settings.schema_version,
         # UI timezone info (read-only)
@@ -181,7 +190,9 @@ __all__ = [
     "DispatcharrSettingsModel",
     "DisplaySettingsModel",
     "DurationSettingsModel",
+    "EmbySettingsModel",
     "EPGSettingsModel",
+    "FeedSeparationSettingsModel",
     "LifecycleSettingsModel",
     "NFHSSettingsModel",
     "ReconciliationSettingsModel",
@@ -190,5 +201,4 @@ __all__ = [
     "StreamOrderingSettingsModel",
     "TeamFilterSettingsModel",
     "UpdateCheckSettingsModel",
-    "FeedSeparationSettingsModel",
 ]

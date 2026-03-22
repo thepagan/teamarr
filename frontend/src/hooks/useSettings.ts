@@ -39,6 +39,9 @@ import {
   deleteLeagueConfig,
   getNFHSSettings,
   updateNFHSSettings,
+  getEmbySettings,
+  updateEmbySettings,
+  testEmbyConnection,
 } from "@/api/settings"
 import type {
   DispatcharrSettings,
@@ -54,6 +57,7 @@ import type {
   UpdateCheckSettingsUpdate,
   FeedSeparationSettingsUpdate,
   NFHSSettingsUpdate,
+  EmbySettings,
 } from "@/api/settings"
 
 export function useSettings() {
@@ -434,5 +438,32 @@ export function useUpdateNFHSSettings() {
       queryClient.invalidateQueries({ queryKey: ["settings"] })
       queryClient.invalidateQueries({ queryKey: ["settings", "nfhs"] })
     },
+  })
+}
+
+// Emby Settings Hooks
+export function useEmbySettings() {
+  return useQuery({
+    queryKey: ["settings", "emby"],
+    queryFn: getEmbySettings,
+  })
+}
+
+export function useUpdateEmbySettings() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Partial<EmbySettings>) =>
+      updateEmbySettings(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+    },
+  })
+}
+
+export function useTestEmbyConnection() {
+  return useMutation({
+    mutationFn: (data?: { url?: string; username?: string; password?: string }) =>
+      testEmbyConnection(data),
   })
 }
