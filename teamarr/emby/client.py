@@ -1,6 +1,6 @@
 """Emby server client for Live TV guide refresh.
 
-Lightweight HTTP client using requests to authenticate with Emby
+Lightweight HTTP client using httpx to authenticate with Emby
 and trigger a Live TV guide refresh after EPG generation.
 """
 
@@ -8,7 +8,7 @@ import logging
 import time
 from collections.abc import Callable
 
-import requests
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class EmbyClient:
         payload = {"Username": self.username, "Pw": self.password}
 
         try:
-            resp = requests.post(
+            resp = httpx.post(
                 url,
                 json=payload,
                 headers=self._auth_headers(),
@@ -75,7 +75,7 @@ class EmbyClient:
                 return True
             logger.warning("[EMBY] Auth response missing AccessToken")
             return False
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.warning("[EMBY] Authentication failed: %s", e)
             self._access_token = None
             self._user_id = None
@@ -89,18 +89,18 @@ class EmbyClient:
         """
         # First try to get server info (public endpoint)
         try:
-            resp = requests.get(
+            resp = httpx.get(
                 f"{self.base_url}/emby/System/Info/Public",
                 timeout=self.timeout,
             )
             resp.raise_for_status()
             info = resp.json()
-        except requests.ConnectionError:
+        except httpx.ConnectError:
             return {
                 "success": False,
                 "error": f"Cannot connect to {self.base_url}",
             }
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             return {"success": False, "error": str(e)}
 
         server_name = info.get("ServerName", "Unknown")
@@ -151,14 +151,14 @@ class EmbyClient:
 
         # Find the RefreshGuide task
         try:
-            resp = requests.get(
+            resp = httpx.get(
                 f"{self.base_url}/emby/ScheduledTasks",
                 headers=headers,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
             tasks = resp.json()
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             return {
                 "success": False,
                 "message": f"Failed to list scheduled tasks: {e}",
@@ -182,14 +182,14 @@ class EmbyClient:
 
         # Trigger the task
         try:
-            resp = requests.post(
+            resp = httpx.post(
                 f"{self.base_url}/emby/ScheduledTasks/Running/{task_id}",
                 headers=headers,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
             logger.info("[EMBY] Triggered guide refresh (task %s)", task_id)
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             return {
                 "success": False,
                 "message": f"Failed to trigger guide refresh: {e}",
@@ -216,14 +216,14 @@ class EmbyClient:
             time.sleep(poll_interval)
 
             try:
-                resp = requests.get(
+                resp = httpx.get(
                     f"{self.base_url}/emby/ScheduledTasks/{task_id}",
                     headers=headers,
                     timeout=self.timeout,
                 )
                 resp.raise_for_status()
                 task_info = resp.json()
-            except requests.RequestException as e:
+            except httpx.HTTPError as e:
                 logger.warning("[EMBY] Poll failed: %s", e)
                 continue
 
