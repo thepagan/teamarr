@@ -173,6 +173,7 @@ def get_settings():
             url=settings.emby.url,
             username=settings.emby.username,
             password=settings.emby.password,
+            api_key=settings.emby.api_key,
         ),
         epg_generation_counter=settings.epg_generation_counter,
         schema_version=settings.schema_version,

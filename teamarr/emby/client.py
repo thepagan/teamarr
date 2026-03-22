@@ -25,15 +25,17 @@ class EmbyClient:
     def __init__(
         self,
         base_url: str,
-        username: str,
-        password: str,
+        username: str = "",
+        password: str = "",
         timeout: int = 30,
+        api_key: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.username = username
         self.password = password
         self.timeout = timeout
-        self._access_token: str | None = None
+        self.api_key = api_key
+        self._access_token: str | None = api_key  # Pre-set if API key provided
         self._user_id: str | None = None
 
     def _auth_headers(self) -> dict[str, str]:
@@ -52,9 +54,30 @@ class EmbyClient:
     def authenticate(self) -> bool:
         """Authenticate with Emby server.
 
+        When an API key is configured, skips username/password auth and
+        uses the key directly as the access token.
+
         Returns:
             True if authentication succeeded
         """
+        # API key auth: already pre-set in __init__, just validate it works
+        if self.api_key:
+            self._access_token = self.api_key
+            try:
+                resp = httpx.get(
+                    f"{self.base_url}/emby/ScheduledTasks",
+                    headers=self._token_headers(),
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                logger.debug("[EMBY] Authenticated via API key")
+                return True
+            except httpx.HTTPError as e:
+                logger.warning("[EMBY] API key authentication failed: %s", e)
+                self._access_token = None
+                return False
+
+        # Username/password auth
         url = f"{self.base_url}/emby/Users/AuthenticateByName"
         payload = {"Username": self.username, "Pw": self.password}
 
@@ -108,11 +131,16 @@ class EmbyClient:
 
         # Now test authentication
         if not self.authenticate():
+            error_msg = (
+                "Authentication failed — check API key"
+                if self.api_key
+                else "Authentication failed — check username/password"
+            )
             return {
                 "success": False,
                 "server_name": server_name,
                 "server_version": server_version,
-                "error": "Authentication failed — check username/password",
+                "error": error_msg,
             }
 
         return {

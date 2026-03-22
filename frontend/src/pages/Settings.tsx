@@ -981,6 +981,7 @@ export function Settings() {
     url: null,
     username: null,
     password: null,
+    api_key: null,
   })
   const [embyTestResult, setEmbyTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [newKeyword, setNewKeyword] = useState({ label: "", match_terms: "", behavior: "consolidate" })
@@ -1104,6 +1105,7 @@ export function Settings() {
         url: embyData.url,
         username: embyData.username,
         password: "", // Don't show masked password
+        api_key: "", // Don't show masked API key
       })
     }
   }, [embyData])
@@ -1187,6 +1189,9 @@ export function Settings() {
       if (emby.password) {
         data.password = emby.password
       }
+      if (emby.api_key) {
+        data.api_key = emby.api_key
+      }
       await updateEmby.mutateAsync(data)
       toast.success("Emby settings saved")
     } catch (err) {
@@ -1201,6 +1206,7 @@ export function Settings() {
         url: emby.url || undefined,
         username: emby.username || undefined,
         password: emby.password || undefined,
+        api_key: emby.api_key || undefined,
       })
       if (result.success) {
         setEmbyTestResult({
@@ -3360,7 +3366,22 @@ export function Settings() {
             />
           </div>
 
-          {/* Credentials */}
+          {/* API Key (preferred) */}
+          <div className="space-y-2">
+            <Label htmlFor="emby-api-key">API Key</Label>
+            <Input
+              id="emby-api-key"
+              type="password"
+              value={emby.api_key ?? ""}
+              onChange={(e) => setEmby({ ...emby, api_key: e.target.value })}
+              placeholder="Leave blank to keep current"
+            />
+            <p className="text-xs text-muted-foreground">
+              Recommended. Generate in Emby Dashboard &rarr; API Keys. If set, username/password are ignored.
+            </p>
+          </div>
+
+          {/* Username/Password (fallback) */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="emby-username">Username</Label>
@@ -3368,6 +3389,7 @@ export function Settings() {
                 id="emby-username"
                 value={emby.username ?? ""}
                 onChange={(e) => setEmby({ ...emby, username: e.target.value })}
+                disabled={!!emby.api_key}
               />
             </div>
             <div className="space-y-2">
@@ -3378,6 +3400,7 @@ export function Settings() {
                 value={emby.password ?? ""}
                 onChange={(e) => setEmby({ ...emby, password: e.target.value })}
                 placeholder="Leave blank to keep current"
+                disabled={!!emby.api_key}
               />
             </div>
           </div>

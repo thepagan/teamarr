@@ -419,6 +419,7 @@ def run_full_generation(
                     base_url=emby_settings.url,
                     username=emby_settings.username or "",
                     password=emby_settings.password or "",
+                    api_key=emby_settings.api_key,
                 )
 
                 def on_emby_progress(pct):

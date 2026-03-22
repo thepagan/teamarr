@@ -201,6 +201,9 @@ def init_db(db_path: Path | str | None = None) -> None:
             # Pre-migration: add feed_hint column to epg_matched_streams for audit
             _add_column_if_not_exists(conn, "epg_matched_streams", "feed_hint", "TEXT")
 
+            # Pre-migration: add emby_api_key column for API key auth
+            _add_column_if_not_exists(conn, "settings", "emby_api_key", "TEXT")
+
             # Apply schema (creates tables if missing, INSERT OR REPLACE updates seed data)
             conn.executescript(schema_sql)
             # Run remaining migrations for existing databases

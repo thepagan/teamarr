@@ -221,6 +221,7 @@ export interface EmbySettings {
   url: string | null
   username: string | null
   password: string | null
+  api_key: string | null
 }
 
 export interface EmbyTestResponse {
@@ -529,6 +530,6 @@ export async function updateEmbySettings(data: Partial<EmbySettings>): Promise<E
   return api.put("/settings/emby", data)
 }
 
-export async function testEmbyConnection(data?: { url?: string; username?: string; password?: string }): Promise<EmbyTestResponse> {
+export async function testEmbyConnection(data?: { url?: string; username?: string; password?: string; api_key?: string }): Promise<EmbyTestResponse> {
   return api.post("/emby/test", data || {})
 }

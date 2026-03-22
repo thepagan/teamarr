@@ -431,10 +431,16 @@ class EmbySettingsModel(BaseModel):
     url: str | None = None
     username: str | None = None
     password: str | None = None
+    api_key: str | None = None
 
     @field_serializer("password")
     @classmethod
     def _mask_password(cls, v: str | None) -> str | None:
+        return MASKED_SECRET if v else None
+
+    @field_serializer("api_key")
+    @classmethod
+    def _mask_api_key(cls, v: str | None) -> str | None:
         return MASKED_SECRET if v else None
 
 
@@ -445,6 +451,7 @@ class EmbySettingsUpdate(BaseModel):
     url: str | None = None
     username: str | None = None
     password: str | None = None
+    api_key: str | None = None
 
 
 class EmbyConnectionTestRequest(BaseModel):
@@ -455,6 +462,7 @@ class EmbyConnectionTestRequest(BaseModel):
     )
     username: str | None = Field(None, description="Override username")
     password: str | None = Field(None, description="Override password")
+    api_key: str | None = Field(None, description="Override API key")
 
 
 class EmbyConnectionTestResponse(BaseModel):

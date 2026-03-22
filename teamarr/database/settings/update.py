@@ -764,6 +764,7 @@ def update_emby_settings(
     url: str | None = None,
     username: str | None = None,
     password: str | None = None,
+    api_key: str | None = None,
 ) -> bool:
     """Update Emby integration settings.
 
@@ -775,6 +776,7 @@ def update_emby_settings(
         url: Emby server URL
         username: Emby username
         password: Emby password
+        api_key: Emby API key (alternative to username/password)
 
     Returns:
         True if updated
@@ -794,6 +796,9 @@ def update_emby_settings(
     if password is not None:
         updates.append("emby_password = ?")
         values.append(password)
+    if api_key is not None:
+        updates.append("emby_api_key = ?")
+        values.append(api_key)
 
     if not updates:
         return False

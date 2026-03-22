@@ -463,7 +463,7 @@ export function useUpdateEmbySettings() {
 
 export function useTestEmbyConnection() {
   return useMutation({
-    mutationFn: (data?: { url?: string; username?: string; password?: string }) =>
+    mutationFn: (data?: { url?: string; username?: string; password?: string; api_key?: string }) =>
       testEmbyConnection(data),
   })
 }

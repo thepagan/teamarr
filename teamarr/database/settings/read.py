@@ -769,6 +769,9 @@ def _build_emby_settings(row) -> EmbySettings:
         password=row["emby_password"]
         if "emby_password" in row.keys()
         else d.password,
+        api_key=row["emby_api_key"]
+        if "emby_api_key" in row.keys()
+        else d.api_key,
     )
 
 
@@ -782,7 +785,8 @@ def get_emby_settings(conn: Connection) -> EmbySettings:
         EmbySettings object with Emby configuration
     """
     cursor = conn.execute(
-        """SELECT emby_enabled, emby_url, emby_username, emby_password
+        """SELECT emby_enabled, emby_url, emby_username, emby_password,
+                  emby_api_key
            FROM settings WHERE id = 1"""
     )
     row = cursor.fetchone()

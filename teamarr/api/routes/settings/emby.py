@@ -28,6 +28,7 @@ def get_emby_settings():
         url=settings.url,
         username=settings.username,
         password=settings.password,
+        api_key=settings.api_key,
     )
 
 
@@ -46,6 +47,7 @@ def update_emby_settings(update: EmbySettingsUpdate):
             url=update.url,
             username=update.username,
             password=unmask_or_skip(update.password),
+            api_key=unmask_or_skip(update.api_key),
         )
 
     with get_db() as conn:
@@ -56,6 +58,7 @@ def update_emby_settings(update: EmbySettingsUpdate):
         url=settings.url,
         username=settings.username,
         password=settings.password,
+        api_key=settings.api_key,
     )
 
 
@@ -81,6 +84,9 @@ def test_emby_connection(
     password = (
         request.password if request and request.password else saved.password
     ) or ""
+    api_key = (
+        request.api_key if request and request.api_key else saved.api_key
+    )
 
     if not url:
         return EmbyConnectionTestResponse(
@@ -92,6 +98,7 @@ def test_emby_connection(
         base_url=url,
         username=username,
         password=password,
+        api_key=api_key,
     )
     result = client.test_connection()
 
