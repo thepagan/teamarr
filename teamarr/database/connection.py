@@ -613,92 +613,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
 
     # v44: Update Check Settings
     # Adds settings for update notifications (GitHub releases/commits)
-    if current_version < 44:
-        _add_column_if_not_exists(conn, "settings", "update_check_enabled", "BOOLEAN DEFAULT 1")
-        _add_column_if_not_exists(conn, "settings", "update_notify_stable", "BOOLEAN DEFAULT 1")
-        _add_column_if_not_exists(conn, "settings", "update_notify_dev", "BOOLEAN DEFAULT 1")
-        _add_column_if_not_exists(
-            conn, "settings", "update_github_owner", "TEXT DEFAULT 'Pharaoh-Labs'"
-        )
-        _add_column_if_not_exists(conn, "settings", "update_github_repo", "TEXT DEFAULT 'teamarr'")
-        _add_column_if_not_exists(conn, "settings", "update_dev_branch", "TEXT DEFAULT 'dev'")
-        _add_column_if_not_exists(
-            conn, "settings", "update_auto_detect_branch", "BOOLEAN DEFAULT 1"
-        )
-        conn.execute("UPDATE settings SET schema_version = 44 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 44 (update check settings)")
-        current_version = 44
-
-    # ==========================================================================
-    # v45: Logo Cleanup Setting
-    # ==========================================================================
-    # Adds cleanup_unused_logos setting to call Dispatcharr's bulk cleanup API
-    # after EPG generation instead of per-channel logo deletion
-    if current_version < 45:
-        _add_column_if_not_exists(
-            conn, "settings", "cleanup_unused_logos", "BOOLEAN DEFAULT 0"
-        )
-        conn.execute("UPDATE settings SET schema_version = 45 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 45 (logo cleanup setting)")
-        current_version = 45
-
-    # ==========================================================================
-    # v46: Stream Profile Support
-    # ==========================================================================
-    # Adds stream_profile_id to settings (global default) and event_epg_groups (per-group override)
-    if current_version < 46:
-        _add_column_if_not_exists(
-            conn, "settings", "default_stream_profile_id", "INTEGER"
-        )
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "stream_profile_id", "INTEGER"
-        )
-        conn.execute("UPDATE settings SET schema_version = 46 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 46 (stream profile support)")
-        current_version = 46
-
-    # ==========================================================================
-    # v47: Stream Timezone Support
-    # ==========================================================================
-    # Adds stream_timezone to event_epg_groups for interpreting dates/times in stream names
-    # when providers use a different timezone than the user's local timezone
-    if current_version < 47:
-        _add_column_if_not_exists(conn, "event_epg_groups", "stream_timezone", "TEXT")
-        conn.execute("UPDATE settings SET schema_version = 47 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 47 (stream timezone support)")
-        current_version = 47
-
-    # ==========================================================================
-    # v48: Scheduled Channel Reset
-    # ==========================================================================
-    # Adds channel_reset_enabled and channel_reset_cron to settings for scheduling
-    # periodic channel purges (helps users with Jellyfin logo caching issues)
-    if current_version < 48:
-        _add_column_if_not_exists(conn, "settings", "channel_reset_enabled", "BOOLEAN DEFAULT 0")
-        _add_column_if_not_exists(conn, "settings", "channel_reset_cron", "TEXT")
-        conn.execute("UPDATE settings SET schema_version = 48 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 48 (scheduled channel reset)")
-        current_version = 48
-
-    # ==========================================================================
-    # v49: Combat Sports Custom Regex Columns
-    # ==========================================================================
-    # Adds custom regex columns for EVENT_CARD type events (UFC, Boxing, MMA)
-    # - custom_regex_fighters: Extract fighter names from stream titles
-    # - custom_regex_event_name: Extract event name from stream titles
-    # - custom_regex_config: JSON structure for organized event-type regex patterns
+    # v44-v49: Column additions (update check, logo cleanup, stream profile/timezone,
+    # channel reset, combat sports regex) — handled by schema reconciliation
     if current_version < 49:
-        _add_column_if_not_exists(conn, "event_epg_groups", "custom_regex_fighters", "TEXT")
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "custom_regex_fighters_enabled", "BOOLEAN DEFAULT 0"
-        )
-        _add_column_if_not_exists(conn, "event_epg_groups", "custom_regex_event_name", "TEXT")
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "custom_regex_event_name_enabled", "BOOLEAN DEFAULT 0"
-        )
-        _add_column_if_not_exists(conn, "event_epg_groups", "custom_regex_config", "JSON")
         conn.execute("UPDATE settings SET schema_version = 49 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 49 (combat sports custom regex)")
         current_version = 49
 
     # ==========================================================================
@@ -770,26 +688,15 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 50 (soccer selection modes)")
         current_version = 50
 
-    # v51: Add soccer_followed_teams for 'teams' mode
-    # Stores [{provider, team_id, name}] for teams the user wants to follow
-    # Leagues are auto-discovered from team_cache at processing time
+    # v51: soccer_followed_teams (kept: needed by v58 data migration)
     if current_version < 51:
         _add_column_if_not_exists(conn, "event_epg_groups", "soccer_followed_teams", "TEXT")
         conn.execute("UPDATE settings SET schema_version = 51 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 51 (soccer followed teams)")
         current_version = 51
 
-    # v52: Bypass team filter for playoffs (issue #70)
-    # Global default in settings, per-group override in event_epg_groups
+    # v52: Playoff bypass columns — handled by schema reconciliation
     if current_version < 52:
-        _add_column_if_not_exists(
-            conn, "settings", "default_bypass_filter_for_playoffs", "BOOLEAN DEFAULT 0"
-        )
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "bypass_filter_for_playoffs", "BOOLEAN"
-        )
         conn.execute("UPDATE settings SET schema_version = 52 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 52 (playoff filter bypass)")
         current_version = 52
 
     # v53: Bump api_timeout default from 10 to 30
@@ -803,56 +710,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 53 (api timeout/retry defaults)")
         current_version = 53
 
-    # v54: Add scheduled backup settings columns
-    # Automatic database backups with rotation and protection
-    if current_version < 54:
-        _add_column_if_not_exists(
-            conn, "settings", "scheduled_backup_enabled", "BOOLEAN DEFAULT 0"
-        )
-        _add_column_if_not_exists(
-            conn, "settings", "scheduled_backup_cron", "TEXT DEFAULT '0 3 * * *'"
-        )
-        _add_column_if_not_exists(
-            conn, "settings", "scheduled_backup_max_count", "INTEGER DEFAULT 7"
-        )
-        _add_column_if_not_exists(
-            conn, "settings", "scheduled_backup_path", "TEXT DEFAULT './data/backups'"
-        )
-        conn.execute("UPDATE settings SET schema_version = 54 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 54 (scheduled backup settings)")
-        current_version = 54
-
-    # v55: Gold Zone (Olympics Special Feature)
-    # Consolidates "Gold Zone" streams into a single channel with external EPG
-    if current_version < 55:
-        _add_column_if_not_exists(conn, "settings", "gold_zone_enabled", "BOOLEAN DEFAULT 0")
-        _add_column_if_not_exists(conn, "settings", "gold_zone_channel_number", "INTEGER")
-        conn.execute("UPDATE settings SET schema_version = 55 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 55 (gold zone)")
-        current_version = 55
-
-    if current_version < 56:
-        _add_column_if_not_exists(conn, "settings", "gold_zone_channel_group_id", "INTEGER")
-        _add_column_if_not_exists(conn, "settings", "gold_zone_channel_profile_ids", "TEXT")
-        _add_column_if_not_exists(conn, "settings", "gold_zone_stream_profile_id", "INTEGER")
-        conn.execute("UPDATE settings SET schema_version = 56 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 56 (gold zone profiles)")
-        current_version = 56
-
-    # v57: Re-apply v52 columns for databases affected by PR #142 merge
-    # PR #142 (backup feature) was branched before v52 existed. When merged,
-    # it deleted the v52 migration but still advanced schema_version past 52,
-    # so the restored v52 migration was skipped on affected databases.
-    # This idempotently adds the columns that v52 should have created.
+    # v54-v57: Column additions (scheduled backup, gold zone, playoff bypass re-apply)
+    # — handled by schema reconciliation
     if current_version < 57:
-        _add_column_if_not_exists(
-            conn, "settings", "default_bypass_filter_for_playoffs", "BOOLEAN DEFAULT 0"
-        )
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "bypass_filter_for_playoffs", "BOOLEAN"
-        )
         conn.execute("UPDATE settings SET schema_version = 57 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 57 (re-apply v52 playoff bypass columns)")
         current_version = 57
 
     # ==========================================================================
@@ -1067,7 +928,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # 4. Set global_consolidation_mode from default_duplicate_event_handling
     # 5. Force channel_sorting_scope='global', channel_sort_by='sport_league_time'
     if current_version < 59:
-        # 1. Add new columns
+        # Column additions (also handled by reconciliation, kept for standalone migration)
         _add_column_if_not_exists(
             conn, "settings", "global_channel_mode",
             "TEXT DEFAULT 'auto' CHECK(global_channel_mode IN ('auto', 'manual'))"
@@ -1077,7 +938,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         )
         _add_column_if_not_exists(
             conn, "settings", "global_consolidation_mode",
-            "TEXT DEFAULT 'consolidate'"  # CHECK added in schema.sql
+            "TEXT DEFAULT 'consolidate'"
         )
 
         # 2. Determine global channel mode from existing groups
@@ -1166,19 +1027,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 59 (channel numbering overhaul)")
         current_version = 59
 
-    # v60: Per-group subscription overrides (NULL = inherit global)
+    # v60: Per-group subscription overrides — columns handled by schema reconciliation
     if current_version < 60:
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "subscription_leagues", "JSON"
-        )
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "subscription_soccer_mode", "TEXT"
-        )
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "subscription_soccer_followed_teams", "JSON"
-        )
         conn.execute("UPDATE settings SET schema_version = 60 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 60 (per-group subscription overrides)")
         current_version = 60
 
     if current_version < 61:
@@ -1197,7 +1048,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 61 (subscription league config)")
         current_version = 61
 
-    # v62: Global default channel group settings + relax CHECK constraint on league config
+    # v62: Global default channel group + relax CHECK on subscription_league_config
     if current_version < 62:
         _add_column_if_not_exists(
             conn, "settings", "default_channel_group_id", "INTEGER"
@@ -1602,22 +1453,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 67 (remove Cricbuzz provider)")
         current_version = 67
 
-    # ==========================================================================
-    # v68: Feed Separation settings (HOME/AWAY stream detection)
-    # ==========================================================================
+    # v68: Feed separation columns — handled by schema reconciliation
     if current_version < 68:
-        new_cols = {
-            "feed_separation_enabled": "BOOLEAN DEFAULT 0",
-            "feed_home_terms": "JSON DEFAULT '[\"HOME\"]'",
-            "feed_away_terms": "JSON DEFAULT '[\"AWAY\"]'",
-            "feed_detect_team_names": "BOOLEAN DEFAULT 1",
-            "feed_label_style": "TEXT DEFAULT 'team_name'",
-        }
-        for col, defn in new_cols.items():
-            _add_column_if_not_exists(conn, "settings", col, defn)
-
         conn.execute("UPDATE settings SET schema_version = 68 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 68 (feed separation settings)")
         current_version = 68
 
     # v69: Feed team channel discrimination
@@ -1649,64 +1487,24 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         logger.info("[MIGRATE] Schema upgraded to version 69 (feed team channel discrimination)")
         current_version = 69
 
-    if current_version < 70:
-        # ==========================================================================
-        # v70: Separate month/day date extraction for event groups
-        # ==========================================================================
-        _add_column_if_not_exists(conn, "event_epg_groups", "custom_regex_month", "TEXT")
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "custom_regex_month_enabled", "BOOLEAN DEFAULT 0"
-        )
-        _add_column_if_not_exists(conn, "event_epg_groups", "custom_regex_day", "TEXT")
-        _add_column_if_not_exists(
-            conn, "event_epg_groups", "custom_regex_day_enabled", "BOOLEAN DEFAULT 0"
-        )
-
-        conn.execute("UPDATE settings SET schema_version = 70 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 70 (separate month/day date extraction)")
-        current_version = 70
-
+    # v70-v71: Column additions (month/day regex, Emby integration)
+    # — handled by schema reconciliation
     if current_version < 71:
-        # ==========================================================================
-        # v71: Emby integration settings
-        # ==========================================================================
-        _add_column_if_not_exists(conn, "settings", "emby_enabled", "BOOLEAN DEFAULT 0")
-        _add_column_if_not_exists(conn, "settings", "emby_url", "TEXT")
-        _add_column_if_not_exists(conn, "settings", "emby_username", "TEXT")
-        _add_column_if_not_exists(conn, "settings", "emby_password", "TEXT")
         conn.execute("UPDATE settings SET schema_version = 71 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 71 (Emby integration)")
         current_version = 71
 
+    # v72-v74: Column additions (NFHS settings, Emby API key, feed hint audit)
+    # — handled by schema reconciliation
     if current_version < 72:
-        # ==========================================================================
-        # v72: NFHS High School Sports settings
-        # ==========================================================================
-        _add_column_if_not_exists(conn, "settings", "nfhs_enabled", "BOOLEAN DEFAULT 0")
-        _add_column_if_not_exists(conn, "settings", "nfhs_state_codes", "JSON DEFAULT '[]'")
-
         conn.execute("UPDATE settings SET schema_version = 72 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 72 (NFHS settings)")
         current_version = 72
 
     if current_version < 73:
-        # ==========================================================================
-        # v73: Emby API key authentication
-        # ==========================================================================
-        _add_column_if_not_exists(conn, "settings", "emby_api_key", "TEXT")
-
         conn.execute("UPDATE settings SET schema_version = 73 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 73 (Emby API key)")
         current_version = 73
 
     if current_version < 74:
-        # ==========================================================================
-        # v74: Feed hint audit column for matched streams
-        # ==========================================================================
-        _add_column_if_not_exists(conn, "epg_matched_streams", "feed_hint", "TEXT")
-
         conn.execute("UPDATE settings SET schema_version = 74 WHERE id = 1")
-        logger.info("[MIGRATE] Schema upgraded to version 74 (feed hint audit)")
         current_version = 74
 
 def _dedup_cross_group_channels(conn: sqlite3.Connection) -> None:

@@ -424,20 +424,21 @@ class TestFeedSeparationSettings:
     def db(self):
         import sqlite3
 
-        from teamarr.database.connection import _run_migrations
-
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.executescript("""
             CREATE TABLE settings (
                 id INTEGER PRIMARY KEY,
-                schema_version INTEGER DEFAULT 67
+                schema_version INTEGER DEFAULT 71,
+                feed_separation_enabled BOOLEAN DEFAULT 0,
+                feed_home_terms JSON DEFAULT '["HOME"]',
+                feed_away_terms JSON DEFAULT '["AWAY"]',
+                feed_detect_team_names BOOLEAN DEFAULT 1,
+                feed_label_style TEXT DEFAULT 'team_name'
             );
-            INSERT INTO settings (id, schema_version) VALUES (1, 67);
+            INSERT INTO settings (id) VALUES (1);
         """)
         conn.commit()
-        # Run migrations to add feed separation columns
-        _run_migrations(conn)
         yield conn
         conn.close()
 
