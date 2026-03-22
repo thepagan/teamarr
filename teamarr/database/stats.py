@@ -792,6 +792,8 @@ class MatchedStream:
     match_method: str | None = None  # cache, user_corrected, alias, pattern, fuzzy, keyword
     confidence: float | None = None  # Match confidence 0.0-1.0
     origin_match_method: str | None = None  # For cache hits: original method (fuzzy, alias, etc.)
+    # Feed separation (Phase 1 detection result)
+    feed_hint: str | None = None  # "home", "away", or None
 
 
 @dataclass
@@ -826,8 +828,8 @@ def save_matched_streams(conn: Connection, streams: list[MatchedStream]) -> int:
             run_id, group_id, group_name, stream_id, stream_name,
             event_id, event_name, event_date, detected_league,
             home_team, away_team, from_cache, excluded, exclusion_reason,
-            match_method, confidence, origin_match_method
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            match_method, confidence, origin_match_method, feed_hint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -848,6 +850,7 @@ def save_matched_streams(conn: Connection, streams: list[MatchedStream]) -> int:
                 s.match_method,
                 s.confidence,
                 s.origin_match_method,
+                s.feed_hint,
             )
             for s in streams
         ],

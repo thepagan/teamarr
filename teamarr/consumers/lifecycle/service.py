@@ -1229,8 +1229,8 @@ class ChannelLifecycleService:
         "(Keyword)" to maintain backward compatibility.
 
         When feed_team is provided, auto-appends a feed label based on
-        feed_label_style: 'team_name' → "(Orioles)", 'short_name' →
-        "(BAL)", 'home_away' → "(Home)" or "(Away)".
+        feed_label_style: 'team_name' → "(Orioles Feed)", 'short_name' →
+        "(BAL Feed)", 'home_away' → "(Home Feed)" or "(Away Feed)".
 
         Also prepends "Postponed: " to the channel name if the event is
         postponed and the prepend_postponed_label setting is enabled.
@@ -1349,7 +1349,7 @@ class ChannelLifecycleService:
             style: 'team_name', 'short_name', or 'home_away'
 
         Returns:
-            Label string (e.g., "Orioles", "BAL", "Home")
+            Label string (e.g., "Orioles Feed", "BAL Feed", "Home Feed")
         """
         if style == "home_away":
             is_home = (
@@ -1357,11 +1357,14 @@ class ChannelLifecycleService:
                 and event.home_team
                 and event.home_team.id == feed_team.id
             )
-            return "Home" if is_home else "Away"
+            return "Home Feed" if is_home else "Away Feed"
         elif style == "short_name":
-            return feed_team.short_name or feed_team.name
+            abbrev = getattr(feed_team, "abbreviation", None)
+            name = abbrev or feed_team.short_name or feed_team.name
+            return f"{name} Feed"
         else:  # team_name (default)
-            return feed_team.name
+            name = feed_team.short_name or feed_team.name
+            return f"{name} Feed"
 
     def _resolve_logo_url(
         self,

@@ -198,6 +198,9 @@ def init_db(db_path: Path | str | None = None) -> None:
             # (schema.sql unique index idx_mc_unique_event_v2 references this column)
             _add_column_if_not_exists(conn, "managed_channels", "feed_team_id", "TEXT")
 
+            # Pre-migration: add feed_hint column to epg_matched_streams for audit
+            _add_column_if_not_exists(conn, "epg_matched_streams", "feed_hint", "TEXT")
+
             # Apply schema (creates tables if missing, INSERT OR REPLACE updates seed data)
             conn.executescript(schema_sql)
             # Run remaining migrations for existing databases

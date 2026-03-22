@@ -1638,6 +1638,9 @@ CREATE TABLE IF NOT EXISTS epg_matched_streams (
     confidence REAL,    -- Match confidence score 0.0-1.0
     origin_match_method TEXT,  -- For cache hits: original method used (e.g., 'fuzzy')
 
+    -- Feed separation (Phase 1 detection result)
+    feed_hint TEXT,  -- 'home', 'away', or NULL (from HOME/AWAY token detection)
+
     FOREIGN KEY (run_id) REFERENCES processing_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (group_id) REFERENCES event_epg_groups(id) ON DELETE CASCADE
 );

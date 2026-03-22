@@ -262,7 +262,7 @@ class TestBuildFeedLabel:
         label = ChannelLifecycleService._build_feed_label(
             home_team, event, "team_name"
         )
-        assert label == "Baltimore Orioles"
+        assert label == "Orioles Feed"
 
     def test_short_name_style(self, home_team, event):
         from teamarr.consumers.lifecycle.service import ChannelLifecycleService
@@ -270,7 +270,7 @@ class TestBuildFeedLabel:
         label = ChannelLifecycleService._build_feed_label(
             home_team, event, "short_name"
         )
-        assert label == "Orioles"
+        assert label == "BAL Feed"
 
     def test_home_away_style_home(self, home_team, event):
         from teamarr.consumers.lifecycle.service import ChannelLifecycleService
@@ -278,7 +278,7 @@ class TestBuildFeedLabel:
         label = ChannelLifecycleService._build_feed_label(
             home_team, event, "home_away"
         )
-        assert label == "Home"
+        assert label == "Home Feed"
 
     def test_home_away_style_away(self, event):
         from teamarr.consumers.lifecycle.service import ChannelLifecycleService
@@ -286,7 +286,7 @@ class TestBuildFeedLabel:
         label = ChannelLifecycleService._build_feed_label(
             event.away_team, event, "home_away"
         )
-        assert label == "Away"
+        assert label == "Away Feed"
 
 
 # ===========================================================================
