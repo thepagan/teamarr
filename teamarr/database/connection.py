@@ -1956,6 +1956,19 @@ def _add_column_if_not_exists(
         # Table doesn't exist yet — schema.sql will create it with all columns
         return
     if column not in columns:
+        if _is_postgres_url(get_database_url()):
+            column_def = re.sub(
+                r"\bBOOLEAN\s+DEFAULT\s+0\b",
+                "BOOLEAN DEFAULT FALSE",
+                column_def,
+                flags=re.IGNORECASE,
+            )
+            column_def = re.sub(
+                r"\bBOOLEAN\s+DEFAULT\s+1\b",
+                "BOOLEAN DEFAULT TRUE",
+                column_def,
+                flags=re.IGNORECASE,
+            )
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
 
 
