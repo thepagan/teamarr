@@ -207,6 +207,21 @@ def init_db(db_path: Path | str | None = None) -> None:
             # Pre-migration: add emby_api_key column for API key auth
             _add_column_if_not_exists(conn, "settings", "emby_api_key", "TEXT")
 
+            # Pre-migration: add per-group subscription override columns (#178)
+            # These were added in v60 migration, but a bug in v65 pre-migration
+            # caused all migrations to be skipped for some upgrade paths.
+            # Belt-and-suspenders: ensure columns exist regardless of migration state.
+            _add_column_if_not_exists(
+                conn, "event_epg_groups", "subscription_leagues", "JSON"
+            )
+            _add_column_if_not_exists(
+                conn, "event_epg_groups", "subscription_soccer_mode", "TEXT"
+            )
+            _add_column_if_not_exists(
+                conn, "event_epg_groups",
+                "subscription_soccer_followed_teams", "JSON",
+            )
+
             # Apply schema (creates tables if missing, INSERT OR REPLACE updates seed data)
             conn.executescript(schema_sql)
             # Run remaining migrations for existing databases
@@ -700,6 +715,33 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     - 48: Added channel_reset_enabled and channel_reset_cron to settings
     - 49: Added combat sports custom regex columns (fighters, event_name, config)
     """
+    # Fix for issue #178: v65 pre-migration drops+recreates the settings table,
+    # causing schema_version to be DEFAULT (latest) instead of the original value.
+    # This makes all migrations appear already applied, permanently skipping column
+    # additions (like subscription_leagues on event_epg_groups). If the backup table
+    # exists, restore the original schema_version so migrations run correctly.
+    try:
+        has_v65_backup = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='_settings_v65_backup'"
+        ).fetchone()[0]
+        if has_v65_backup:
+            backup_row = conn.execute(
+                "SELECT schema_version FROM _settings_v65_backup WHERE id = 1"
+            ).fetchone()
+            if backup_row and backup_row[0] is not None:
+                original_version = backup_row[0]
+                conn.execute(
+                    "UPDATE settings SET schema_version = ? WHERE id = 1",
+                    (original_version,),
+                )
+                logger.info(
+                    "[MIGRATE] Corrected schema_version from v65 backup: %d",
+                    original_version,
+                )
+    except Exception as e:
+        logger.warning("[MIGRATE] Could not check v65 backup: %s", e)
+
     # Get current schema version
     try:
         row = conn.execute("SELECT schema_version FROM settings WHERE id = 1").fetchone()
