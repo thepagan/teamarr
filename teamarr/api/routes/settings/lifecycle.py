@@ -162,6 +162,12 @@ def update_scheduler_settings(update: SchedulerSettingsUpdate):
         if update.enabled:
             start_lifecycle_scheduler(get_db)
 
+    # Restart channel reset sub-scheduler if its settings changed
+    if update.channel_reset_enabled is not None or update.channel_reset_cron is not None:
+        from teamarr.consumers.scheduler import restart_scheduler_sub_task
+
+        restart_scheduler_sub_task("channel_reset")
+
     with get_db() as conn:
         settings = get_scheduler_settings(conn)
 

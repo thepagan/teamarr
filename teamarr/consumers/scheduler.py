@@ -21,6 +21,90 @@ from croniter import croniter
 logger = logging.getLogger(__name__)
 
 
+class SubTaskScheduler:
+    """Lightweight scheduler that runs a single task on its own cron.
+
+    Runs independently of the main EPG scheduler so tasks like backup
+    and channel reset fire at exactly the right time regardless of
+    EPG schedule alignment.
+    """
+
+    def __init__(self, name: str, task_fn: Any, cron_expression: str):
+        self._name = name
+        self._task_fn = task_fn
+        self._cron = cron_expression
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._running = False
+        self._next_run: datetime | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._running and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def cron_expression(self) -> str:
+        return self._cron
+
+    @property
+    def next_run(self) -> datetime | None:
+        return self._next_run
+
+    def start(self) -> bool:
+        if self.is_running:
+            return False
+        try:
+            croniter(self._cron)
+        except (KeyError, ValueError) as e:
+            logger.error("[CRON:%s] Invalid expression '%s': %s", self._name, self._cron, e)
+            return False
+        self._stop_event.clear()
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name=f"cron-{self._name}",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("[CRON:%s] Started: %s", self._name, self._cron)
+        return True
+
+    def stop(self, timeout: float = 10.0) -> bool:
+        if not self.is_running:
+            return True
+        logger.debug("[CRON:%s] Stopping...", self._name)
+        self._stop_event.set()
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=timeout)
+            if self._thread.is_alive():
+                logger.warning("[CRON:%s] Thread did not stop in time", self._name)
+                return False
+        return True
+
+    def _run_loop(self) -> None:
+        while not self._stop_event.is_set():
+            cron = croniter(self._cron, datetime.now())
+            self._next_run = cron.get_next(datetime)
+            wait_seconds = (self._next_run - datetime.now()).total_seconds()
+            logger.debug(
+                "[CRON:%s] Next run: %s (%.0fs)",
+                self._name,
+                self._next_run.strftime("%Y-%m-%d %H:%M:%S"),
+                wait_seconds,
+            )
+            while wait_seconds > 0 and not self._stop_event.is_set():
+                time.sleep(min(1.0, wait_seconds))
+                wait_seconds = (self._next_run - datetime.now()).total_seconds()
+            if self._stop_event.is_set():
+                return
+            try:
+                logger.info("[CRON:%s] Running scheduled task", self._name)
+                self._task_fn()
+            except Exception as e:
+                logger.exception("[CRON:%s] Task failed: %s", self._name, e)
+
+
 class CronScheduler:
     """Background scheduler using cron expressions.
 
@@ -69,6 +153,7 @@ class CronScheduler:
         self._running = False
         self._last_run: datetime | None = None
         self._next_run: datetime | None = None
+        self._sub_schedulers: dict[str, SubTaskScheduler] = {}
 
     @property
     def is_running(self) -> bool:
@@ -116,6 +201,10 @@ class CronScheduler:
         )
         self._thread.start()
         logger.info("[CRON] Scheduler started: %s", self._cron_expression)
+
+        # Start independent sub-schedulers for backup and channel reset
+        self._start_sub_schedulers()
+
         return True
 
     def stop(self, timeout: float = 30.0) -> bool:
@@ -130,6 +219,11 @@ class CronScheduler:
         if not self.is_running:
             return True
 
+        # Stop sub-schedulers first
+        for _name, sub in self._sub_schedulers.items():
+            sub.stop(timeout=5.0)
+        self._sub_schedulers.clear()
+
         logger.debug("[CRON] Stopping scheduler...")
         self._stop_event.set()
         self._running = False
@@ -143,13 +237,71 @@ class CronScheduler:
         logger.info("[CRON] Scheduler stopped")
         return True
 
+    def _start_sub_schedulers(self) -> None:
+        """Start independent sub-schedulers for backup and channel reset."""
+        from teamarr.database.settings import get_backup_settings, get_scheduler_settings
+
+        with self._db_factory() as conn:
+            backup_settings = get_backup_settings(conn)
+            scheduler_settings = get_scheduler_settings(conn)
+
+        if backup_settings.enabled:
+            sub = SubTaskScheduler("backup", self._task_backup, backup_settings.cron)
+            if sub.start():
+                self._sub_schedulers["backup"] = sub
+
+        if scheduler_settings.channel_reset_enabled and scheduler_settings.channel_reset_cron:
+            sub = SubTaskScheduler(
+                "channel-reset", self._task_channel_reset, scheduler_settings.channel_reset_cron
+            )
+            if sub.start():
+                self._sub_schedulers["channel_reset"] = sub
+
+    def restart_sub_task(self, task_name: str) -> None:
+        """Restart a sub-scheduler after settings change."""
+        # Stop existing if running
+        if task_name in self._sub_schedulers:
+            self._sub_schedulers[task_name].stop(timeout=5.0)
+            del self._sub_schedulers[task_name]
+
+        if task_name == "backup":
+            from teamarr.database.settings import get_backup_settings
+
+            with self._db_factory() as conn:
+                settings = get_backup_settings(conn)
+            if settings.enabled:
+                sub = SubTaskScheduler("backup", self._task_backup, settings.cron)
+                if sub.start():
+                    self._sub_schedulers["backup"] = sub
+        elif task_name == "channel_reset":
+            from teamarr.database.settings import get_scheduler_settings
+
+            with self._db_factory() as conn:
+                settings = get_scheduler_settings(conn)
+            if settings.channel_reset_enabled and settings.channel_reset_cron:
+                sub = SubTaskScheduler(
+                    "channel-reset", self._task_channel_reset, settings.channel_reset_cron
+                )
+                if sub.start():
+                    self._sub_schedulers["channel_reset"] = sub
+
     def run_once(self) -> dict:
         """Run all scheduled tasks once (for testing/manual trigger).
 
         Returns:
             Dict with task results
         """
-        return self._run_tasks()
+        results = self._run_tasks()
+        # Also run sub-tasks synchronously for manual trigger
+        try:
+            results["backup"] = self._task_backup()
+        except Exception as e:
+            results["backup"] = {"error": str(e)}
+        try:
+            results["channel_reset"] = self._task_channel_reset()
+        except Exception as e:
+            results["channel_reset"] = {"error": str(e)}
+        return results
 
     def _run_loop(self) -> None:
         """Main scheduler loop - runs in background thread."""
@@ -190,14 +342,10 @@ class CronScheduler:
                 logger.exception("[CRON] Error in scheduled run: %s", e)
 
     def _run_tasks(self) -> dict:
-        """Run all scheduled tasks.
+        """Run EPG-related scheduled tasks.
 
-        Tasks:
-        - Scheduled channel reset (if enabled and cron matches)
-        - Daily cache refresh (team/league data from ESPN/TSDB)
-        - EPG generation (teams, groups, XMLTV)
-        - Dispatcharr integration
-        - Channel lifecycle (deletions, reconciliation, cleanup)
+        Backup and channel reset run on their own independent sub-schedulers
+        and are NOT part of the EPG tick. They are only called here via run_once().
 
         Returns:
             Dict with task results
@@ -205,25 +353,9 @@ class CronScheduler:
         self._last_run = datetime.now()
         results = {
             "started_at": self._last_run.isoformat(),
-            "backup": {},
-            "channel_reset": {},
             "cache_refresh": {},
             "epg_generation": {},
         }
-
-        # Scheduled backup (runs on its own cron, checked each tick)
-        try:
-            results["backup"] = self._task_backup()
-        except Exception as e:
-            logger.warning("[CRON] Backup task failed: %s", e)
-            results["backup"] = {"error": str(e)}
-
-        # Scheduled channel reset (runs before EPG generation if due)
-        try:
-            results["channel_reset"] = self._task_channel_reset()
-        except Exception as e:
-            logger.warning("[CRON] Channel reset task failed: %s", e)
-            results["channel_reset"] = {"error": str(e)}
 
         # Daily cache refresh (only refreshes if > 1 day old)
         try:
@@ -243,11 +375,10 @@ class CronScheduler:
         return results
 
     def _task_channel_reset(self) -> dict:
-        """Reset all Teamarr channels if scheduled.
+        """Reset all Teamarr channels.
 
-        Checks if channel reset is enabled and if the reset cron schedule
-        has fired since the last scheduler run. If so, purges all Teamarr
-        channels from Dispatcharr.
+        Called by its own sub-scheduler at the configured cron time.
+        Purges all Teamarr channels from Dispatcharr.
 
         This helps users with Jellyfin logo caching issues - by scheduling
         reset right before Jellyfin's guide refresh, channel logos get
@@ -267,25 +398,6 @@ class CronScheduler:
         if not settings.channel_reset_cron:
             return {"skipped": True, "reason": "No reset cron expression configured"}
 
-        # Check if reset cron has fired since last scheduler run
-        # We use a 1-hour window to catch the reset even if scheduler timing drifts
-        try:
-            reset_cron = croniter(settings.channel_reset_cron, datetime.now())
-            last_reset_time = reset_cron.get_prev(datetime)
-
-            # If last reset time was within the last hour, run the reset
-            time_since_reset = (datetime.now() - last_reset_time).total_seconds()
-            if time_since_reset > 3600:  # More than 1 hour ago
-                return {
-                    "skipped": True,
-                    "reason": "Reset not due yet",
-                    "last_scheduled": last_reset_time.isoformat(),
-                }
-        except (KeyError, ValueError) as e:
-            logger.warning("[CRON] Invalid channel reset cron: %s", e)
-            return {"skipped": True, "reason": f"Invalid cron: {e}"}
-
-        # Perform the reset
         logger.info("[CRON] Running scheduled channel reset")
 
         from teamarr.dispatcharr import ChannelManager, get_dispatcharr_client
@@ -330,10 +442,9 @@ class CronScheduler:
         }
 
     def _task_backup(self) -> dict:
-        """Run scheduled backup if enabled and due.
+        """Run scheduled backup.
 
-        Checks its own cron expression (separate from the main EPG cron).
-        Uses the same 1-hour window approach as channel reset.
+        Called by its own sub-scheduler at the configured cron time.
 
         Returns:
             Dict with backup status
@@ -346,23 +457,6 @@ class CronScheduler:
         if not settings.enabled:
             return {"skipped": True, "reason": "Scheduled backups not enabled"}
 
-        # Check if backup cron has fired since last scheduler run
-        try:
-            backup_cron = croniter(settings.cron, datetime.now())
-            last_backup_time = backup_cron.get_prev(datetime)
-
-            time_since_backup = (datetime.now() - last_backup_time).total_seconds()
-            if time_since_backup > 3600:  # More than 1 hour ago
-                return {
-                    "skipped": True,
-                    "reason": "Backup not due yet",
-                    "last_scheduled": last_backup_time.isoformat(),
-                }
-        except (KeyError, ValueError) as e:
-            logger.warning("[CRON] Invalid backup cron: %s", e)
-            return {"skipped": True, "reason": f"Invalid cron: {e}"}
-
-        # Perform the backup
         logger.info("[CRON] Running scheduled backup")
 
         from teamarr.services.backup_service import create_backup_service
@@ -603,11 +697,36 @@ def get_scheduler_status() -> dict:
     if not _scheduler:
         return {"running": False}
 
-    return {
+    status = {
         "running": _scheduler.is_running,
         "cron_expression": _scheduler.cron_expression,
         "last_run": _scheduler.last_run.isoformat() if _scheduler.last_run else None,
         "next_run": _scheduler.next_run.isoformat() if _scheduler.next_run else None,
+        "sub_tasks": {},
     }
+
+    for name, sub in _scheduler._sub_schedulers.items():
+        status["sub_tasks"][name] = {
+            "running": sub.is_running,
+            "cron_expression": sub.cron_expression,
+            "next_run": sub.next_run.isoformat() if sub.next_run else None,
+        }
+
+    return status
+
+
+def restart_scheduler_sub_task(task_name: str) -> bool:
+    """Restart a sub-scheduler task (e.g., after settings change).
+
+    Args:
+        task_name: "backup" or "channel_reset"
+
+    Returns:
+        True if restarted, False if scheduler not running
+    """
+    if not _scheduler or not _scheduler.is_running:
+        return False
+    _scheduler.restart_sub_task(task_name)
+    return True
 
 

@@ -370,6 +370,11 @@ async def update_backup_settings(update: BackupSettingsUpdate):
             path=update.path,
         )
 
+    # Restart backup sub-scheduler with new settings
+    from teamarr.consumers.scheduler import restart_scheduler_sub_task
+
+    restart_scheduler_sub_task("backup")
+
     # Return updated settings
     with get_db() as conn:
         settings = get_backup_settings(conn)
