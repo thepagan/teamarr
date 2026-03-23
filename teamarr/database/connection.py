@@ -131,11 +131,24 @@ def init_db(db_path: Path | str | None = None) -> None:
     database_url = get_database_url()
 
     if _is_postgres_url(database_url):
-        schema_sql = build_postgres_schema(SCHEMA_PATH.read_text())
+        sqlite_schema_sql = SCHEMA_PATH.read_text()
+        schema_sql = build_postgres_schema(sqlite_schema_sql)
 
         with get_db(db_path) as conn:
             conn.executescript(schema_sql)
             _normalize_postgres_schema(conn)
+            from teamarr.database.reconciliation import reconcile_schema
+
+            result = reconcile_schema(conn, sqlite_schema_sql)
+            if result.columns_added > 0:
+                logger.info(
+                    "[RECONCILE] Added %d missing columns across %d tables",
+                    result.columns_added,
+                    len(result.columns_by_table),
+                )
+            if result.errors:
+                for err in result.errors:
+                    logger.warning("[RECONCILE] %s", err)
             _run_migrations(conn)
             _seed_tsdb_cache_if_needed(conn)
             conn.execute("SELECT id FROM settings LIMIT 1")

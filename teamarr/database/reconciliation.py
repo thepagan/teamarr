@@ -14,6 +14,16 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+try:
+    import psycopg2
+except Exception:  # pragma: no cover - optional dependency
+    psycopg2 = None
+
+DB_OPERATIONAL_EXCEPTIONS = (
+    sqlite3.OperationalError,
+    *((psycopg2.Error,) if psycopg2 else ()),
+)
+
 # Tables to skip during reconciliation (internal/temporary)
 _SKIP_TABLES = frozenset({"sqlite_sequence"})
 
@@ -133,7 +143,7 @@ def _reconcile_table(
             logger.info(
                 "[RECONCILE] Added %s.%s (%s)", table, col_name, col_def
             )
-        except sqlite3.OperationalError as e:
+        except DB_OPERATIONAL_EXCEPTIONS as e:
             msg = f"Failed to add {table}.{col_name}: {e}"
             result.errors.append(msg)
             logger.warning("[RECONCILE] %s", msg)
