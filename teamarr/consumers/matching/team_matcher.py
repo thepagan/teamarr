@@ -64,6 +64,22 @@ _TOKEN_STOPWORDS = frozenset(
     }
 )
 
+_GENERIC_LOCATION_TOKENS = frozenset(
+    {
+        "east",
+        "los",
+        "new",
+        "north",
+        "saint",
+        "san",
+        "south",
+        "state",
+        "st",
+        "west",
+        "york",
+    }
+)
+
 
 def _sport_hint_matches(sport_hint: str | list[str], event_sport: str) -> bool:
     """Check if a sport hint matches an event's sport.
@@ -86,6 +102,11 @@ def _meaningful_tokens(value: str | None) -> frozenset[str]:
         for token in normalize_text(value).split()
         if len(token) >= 3 and token not in _TOKEN_STOPWORDS and not token.isdigit()
     )
+
+
+def _distinctive_tokens(value: str | None) -> frozenset[str]:
+    """Extract tokens that are less likely to be generic city/state overlap."""
+    return frozenset(token for token in _meaningful_tokens(value) if token not in _GENERIC_LOCATION_TOKENS)
 
 
 # Type alias for user-defined aliases: (alias_text, league) -> team_name
@@ -1356,6 +1377,29 @@ class TeamMatcher:
 
             # Use dedicated threshold for both-teams matching (lower because min() is strict)
             if best_score >= BOTH_TEAMS_THRESHOLD:
+                if option1_score >= option2_score:
+                    assignment_is_distinct = self._assignment_has_distinct_overlap(
+                        team1,
+                        prepared.home_normalized,
+                        prepared.home_tokens,
+                        team2,
+                        prepared.away_normalized,
+                        prepared.away_tokens,
+                    )
+                else:
+                    assignment_is_distinct = self._assignment_has_distinct_overlap(
+                        team1,
+                        prepared.away_normalized,
+                        prepared.away_tokens,
+                        team2,
+                        prepared.home_normalized,
+                        prepared.home_tokens,
+                    )
+
+                if not assignment_is_distinct:
+                    self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
+                    return None
+
                 result = (MatchMethod.FUZZY, best_score)
                 self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
                 return result
@@ -1379,6 +1423,43 @@ class TeamMatcher:
 
         self._record_profile_time("fuzzy_scoring", perf_counter() - fuzzy_start)
         return None
+
+    def _assignment_has_distinct_overlap(
+        self,
+        stream_team1: str,
+        event_team1_normalized: str,
+        event_team1_tokens: frozenset[str],
+        stream_team2: str,
+        event_team2_normalized: str,
+        event_team2_tokens: frozenset[str],
+    ) -> bool:
+        """Reject fuzzy matches that only overlap on generic city/state terms."""
+        return (
+            self._team_has_distinct_overlap(stream_team1, event_team1_normalized, event_team1_tokens)
+            and self._team_has_distinct_overlap(stream_team2, event_team2_normalized, event_team2_tokens)
+        )
+
+    def _team_has_distinct_overlap(
+        self,
+        stream_team: str,
+        event_team_normalized: str,
+        event_team_tokens: frozenset[str],
+    ) -> bool:
+        """Return True when a team pairing shares a meaningful non-generic token."""
+        stream_tokens = _distinctive_tokens(stream_team)
+        event_tokens = frozenset(token for token in event_team_tokens if token not in _GENERIC_LOCATION_TOKENS)
+
+        if stream_tokens and event_tokens and stream_tokens & event_tokens:
+            return True
+
+        stream_last = self._last_distinctive_token(stream_team)
+        event_last = self._last_distinctive_token(event_team_normalized)
+        return bool(stream_last and event_last and stream_last == event_last)
+
+    @staticmethod
+    def _last_distinctive_token(value: str | None) -> str | None:
+        tokens = [token for token in normalize_text(value).split() if token not in _GENERIC_LOCATION_TOKENS]
+        return tokens[-1] if tokens else None
 
     def _get_prepared_event(self, event: Event) -> PreparedEvent:
         """Return memoized normalized event-side data."""
