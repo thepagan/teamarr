@@ -1506,7 +1506,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE settings SET schema_version = 71 WHERE id = 1")
         current_version = 71
 
-    # v72-v75: Column additions (NFHS settings, Emby API key, feed hint audit, NFHS levels)
+    # v72-v74: Column additions (NFHS settings, Emby API key, feed hint audit)
     # — handled by schema reconciliation
     if current_version < 72:
         conn.execute("UPDATE settings SET schema_version = 72 WHERE id = 1")
@@ -1520,7 +1520,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE settings SET schema_version = 74 WHERE id = 1")
         current_version = 74
 
+    # v75: Add configurable NFHS levels setting
     if current_version < 75:
+        _add_column_if_not_exists(conn, "settings", "nfhs_levels", """JSON DEFAULT '["Varsity"]'""")
         conn.execute("UPDATE settings SET schema_version = 75 WHERE id = 1")
         current_version = 75
 

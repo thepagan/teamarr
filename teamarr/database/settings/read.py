@@ -4,6 +4,7 @@ Query functions to fetch settings from the database.
 """
 
 import json
+import logging
 from sqlite3 import Connection
 
 from teamarr.providers.nfhs.levels import DEFAULT_SELECTED_LEVELS, LEVEL_NORMALIZATION, SUPPORTED_LEVELS
@@ -29,6 +30,8 @@ from .types import (
     TeamFilterSettings,
     UpdateCheckSettings,
 )
+
+logger = logging.getLogger(__name__)
 
 # Single source of truth for defaults - the dataclass itself
 _DISPLAY_DEFAULTS = DisplaySettings()
@@ -513,10 +516,21 @@ def get_nfhs_settings(conn: Connection) -> NFHSSettings:
     Returns:
         NFHSSettings object with enabled flag and selected state codes
     """
-    cursor = conn.execute(
-        """SELECT nfhs_enabled, nfhs_state_codes, nfhs_levels
-           FROM settings WHERE id = 1"""
-    )
+    try:
+        cursor = conn.execute(
+            """SELECT nfhs_enabled, nfhs_state_codes, nfhs_levels
+               FROM settings WHERE id = 1"""
+        )
+    except Exception as exc:
+        if "nfhs_levels" not in str(exc):
+            raise
+        logger.debug(
+            "[SETTINGS] nfhs_levels column missing; falling back to legacy NFHS settings query"
+        )
+        cursor = conn.execute(
+            """SELECT nfhs_enabled, nfhs_state_codes
+               FROM settings WHERE id = 1"""
+        )
     row = cursor.fetchone()
 
     if not row:
