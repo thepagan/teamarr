@@ -47,11 +47,13 @@ class NFHSProvider(SportsProvider):
     _shared_schools_by_state_cache: dict[str, list[dict]] = {}
     _shared_school_teams_cache: dict[str, list[dict]] = {}
     _shared_school_upcoming_events_cache: dict[tuple[str, str | None, str | None], list[dict]] = {}
+    _shared_activity_upcoming_events_cache: dict[tuple[str, str | None], list[dict]] = {}
     _shared_upcoming_events_by_scope_cache: dict[tuple[str, ...], list[dict]] = {}
     _shared_latest_team_rows_cache: dict[tuple[str, ...], list[dict]] = {}
     _shared_schools_lock = threading.RLock()
     _shared_school_teams_lock = threading.RLock()
     _shared_school_upcoming_events_lock = threading.RLock()
+    _shared_activity_upcoming_events_lock = threading.RLock()
     _shared_upcoming_events_by_scope_lock = threading.RLock()
     _shared_latest_team_rows_lock = threading.RLock()
     _shared_raw_team_row_count_cache: dict[tuple[str, ...], int] = {}
@@ -346,9 +348,11 @@ class NFHSProvider(SportsProvider):
             if parsed_event:
                 events.append(parsed_event)
 
+        fetch_mode = "activity search" if activity else "per-school fetch"
         logger.info(
-            "[NFHS] %s events discovered from SEARCH upcoming per-school fetch (skipped: missing_id=%s duplicate=%s state=%s content_type=%s status=%s level=%s sport=%s unmapped_league=%s missing_teams=%s)",
+            "[NFHS] %s events discovered from SEARCH upcoming %s (skipped: missing_id=%s duplicate=%s state=%s content_type=%s status=%s level=%s sport=%s unmapped_league=%s missing_teams=%s)",
             len(events),
+            fetch_mode,
             skipped_missing_id,
             skipped_duplicate,
             skipped_state,
@@ -447,6 +451,25 @@ class NFHSProvider(SportsProvider):
                 )
             return cls._shared_school_upcoming_events_cache[cache_key]
 
+    def _get_activity_upcoming_events_cached(
+        self,
+        activity: str,
+        level: str | None = None,
+    ) -> list[dict]:
+        """Return cached NFHS SEARCH upcoming event rows for an activity-scoped query."""
+        cls = type(self)
+        cache_key = (activity, level)
+        with cls._shared_activity_upcoming_events_lock:
+            if cache_key not in cls._shared_activity_upcoming_events_cache:
+                cls._shared_activity_upcoming_events_cache[cache_key] = (
+                    self.client.get_upcoming_events_for_activity(
+                        activity=activity,
+                        level=level,
+                    )
+                    or []
+                )
+            return cls._shared_activity_upcoming_events_cache[cache_key]
+
     def _get_upcoming_events_for_scope_cached(
         self,
         state_filter: set[str],
@@ -463,19 +486,27 @@ class NFHSProvider(SportsProvider):
                 return cls._shared_upcoming_events_by_scope_cache[scope_key]
 
             upcoming: list[dict] = []
-            for state_code in sorted(state_filter):
-                schools = self._get_schools_for_state_cached(state_code)
-                for school in schools:
-                    school_key = school.get("key")
-                    if not school_key:
-                        continue
-                    upcoming.extend(
-                        self._get_school_upcoming_events_cached(
-                            school_key,
-                            activity=activity,
-                            level=level,
-                        )
+            if activity:
+                upcoming.extend(
+                    self._get_activity_upcoming_events_cached(
+                        activity,
+                        level=level,
                     )
+                )
+            else:
+                for state_code in sorted(state_filter):
+                    schools = self._get_schools_for_state_cached(state_code)
+                    for school in schools:
+                        school_key = school.get("key")
+                        if not school_key:
+                            continue
+                        upcoming.extend(
+                            self._get_school_upcoming_events_cached(
+                                school_key,
+                                activity=activity,
+                                level=level,
+                            )
+                        )
 
             cls._shared_upcoming_events_by_scope_cache[scope_key] = upcoming
             return upcoming

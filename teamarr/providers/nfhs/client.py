@@ -333,66 +333,66 @@ class NFHSClient:
         )
         return []
 
-    def get_upcoming_events_for_school(
+    def _extract_upcoming_rows(
         self,
-        school_key: str,
-        activity: str | None = None,
-        level: str | None = None,
+        payload: Any,
+        *,
+        source: str,
+        log_context: str,
     ) -> list[dict[str, Any]]:
-        """Retrieve all upcoming event records for a specific school from NFHS SEARCH v3."""
-        initial_params: dict[str, Any] = {
-            "school_key": school_key,
-        }
-        if activity:
-            initial_params["activity"] = activity
-        if level:
-            initial_params["level"] = level
+        """Extract upcoming event rows from NFHS SEARCH payloads."""
+        if isinstance(payload, list):
+            logger.debug(
+                "[NFHS] Loaded %d upcoming SEARCH events for %s via %s[list]",
+                len(payload),
+                log_context,
+                source,
+            )
+            return payload
 
+        if isinstance(payload, dict):
+            for key in ("results", "items", "data"):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    logger.debug(
+                        "[NFHS] Loaded %d upcoming SEARCH events for %s via %s[%s]",
+                        len(rows),
+                        log_context,
+                        source,
+                        key,
+                    )
+                    return rows
+
+            logger.warning(
+                "[NFHS] Unexpected upcoming SEARCH events payload for %s source=%s keys=%s",
+                log_context,
+                source,
+                list(payload.keys())[:10],
+            )
+            return []
+
+        logger.warning(
+            "[NFHS] Unexpected upcoming SEARCH events payload for %s source=%s type=%s",
+            log_context,
+            source,
+            type(payload).__name__,
+        )
+        return []
+
+    def _get_upcoming_events_with_total(
+        self,
+        params: dict[str, Any],
+        *,
+        log_context: str,
+    ) -> list[dict[str, Any]]:
+        """Retrieve upcoming events by probing total then refetching with size=total."""
         initial = self._request(
             SEARCH_API_BASE,
             "/search/events/upcoming",
-            params=initial_params,
+            params=params,
         )
-
         def _extract_rows(payload: Any, *, source: str) -> list[dict[str, Any]]:
-            """Extract upcoming event rows from NFHS SEARCH payloads."""
-            if isinstance(payload, list):
-                logger.debug(
-                    "[NFHS] Loaded %d upcoming SEARCH events for school_key=%s via %s[list]",
-                    len(payload),
-                    school_key,
-                    source,
-                )
-                return payload
-
-            if isinstance(payload, dict):
-                for key in ("results", "items", "data"):
-                    rows = payload.get(key)
-                    if isinstance(rows, list):
-                        logger.debug(
-                            "[NFHS] Loaded %d upcoming SEARCH events for school_key=%s via %s[%s]",
-                            len(rows),
-                            school_key,
-                            source,
-                            key,
-                        )
-                        return rows
-
-                logger.warning(
-                    "[NFHS] Unexpected upcoming SEARCH events payload for school_key=%s source=%s keys=%s",
-                    school_key,
-                    source,
-                    list(payload.keys())[:10],
-                )
-                return []
-
-            logger.warning(
-                "[NFHS] Unexpected upcoming SEARCH events payload for school_key=%s source=%s type=%s",
-                school_key,
-                source,
-                type(payload).__name__,
-            )
-            return []
+            return self._extract_upcoming_rows(payload, source=source, log_context=log_context)
 
         total = 0
         if isinstance(initial, dict):
@@ -409,12 +409,46 @@ class NFHSClient:
             SEARCH_API_BASE,
             "/search/events/upcoming",
             params={
-                **initial_params,
+                **params,
                 "size": total,
             },
         )
 
         return _extract_rows(data, source=f"full-total-{total}")
+
+    def get_upcoming_events_for_school(
+        self,
+        school_key: str,
+        activity: str | None = None,
+        level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve all upcoming event records for a specific school from NFHS SEARCH v3."""
+        params: dict[str, Any] = {
+            "school_key": school_key,
+        }
+        if activity:
+            params["activity"] = activity
+        if level:
+            params["level"] = level
+        return self._get_upcoming_events_with_total(params, log_context=f"school_key={school_key}")
+
+    def get_upcoming_events_for_activity(
+        self,
+        activity: str,
+        level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve upcoming event records for an activity-scoped NFHS SEARCH query."""
+        params: dict[str, Any] = {
+            "activity": activity,
+        }
+        if activity:
+            params["activity"] = activity
+        if level:
+            params["level"] = level
+        return self._get_upcoming_events_with_total(
+            params,
+            log_context=f"activity={activity},level={level or '*'}",
+        )
 
     def get_school_details(self, school_key: str) -> dict[str, Any]:
         """Compatibility stub: sport inventory now comes from SEARCH v3 team rows."""
