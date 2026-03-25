@@ -85,11 +85,13 @@ export interface DisplaySettings {
 export interface NFHSSettings {
   enabled: boolean
   state_codes: string[]
+  levels: string[]
 }
 
 export interface NFHSSettingsUpdate {
   enabled?: boolean
   state_codes?: string[]
+  levels?: string[]
 }
 
 export interface TSDBKeyValidationResult {

@@ -241,6 +241,7 @@ class NFHSSettings:
 
     enabled: bool = False  # Disabled by default to avoid unnecessary API work
     state_codes: list[str] = field(default_factory=list)  # e.g. ["KY", "IN", "OH"]
+    levels: list[str] = field(default_factory=lambda: ["Varsity"])
 
 
 @dataclass

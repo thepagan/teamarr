@@ -131,6 +131,7 @@ def get_settings():
         nfhs=NFHSSettingsModel(
             enabled=settings.nfhs.enabled,
             state_codes=settings.nfhs.state_codes,
+            levels=settings.nfhs.levels,
         ),
         team_filter=TeamFilterSettingsModel(
             include_teams=settings.team_filter.include_teams,

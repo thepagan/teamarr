@@ -41,6 +41,7 @@ import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   useSettings,
   useUpdateDispatcharrSettings,
@@ -107,6 +108,14 @@ import type {
   TSDBKeyValidationResult,
 } from "@/api/settings"
 import { validateTSDBKey } from "@/api/settings"
+
+const NFHS_LEVEL_OPTIONS = [
+  "Varsity",
+  "Junior Varsity",
+  "Sophomore",
+  "Freshman",
+  "Middle School",
+] as const
 
 function formatRelativeTime(dateStr: string | null): string {
   if (!dateStr) return "Never"
@@ -1640,6 +1649,43 @@ export function Settings() {
             />
             <p className="text-xs text-muted-foreground">
               Enter one or more two-letter US state codes separated by commas.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Competition Levels</Label>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {NFHS_LEVEL_OPTIONS.map((level) => {
+                const checked = nfhs?.levels.includes(level) ?? false
+                return (
+                  <label
+                    key={level}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md border p-3 text-sm",
+                      !nfhs?.enabled && "opacity-60"
+                    )}
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={!nfhs || !nfhs.enabled}
+                      onCheckedChange={(nextChecked) => {
+                        if (!nfhs) return
+                        const nextLevels = nextChecked
+                          ? [...nfhs.levels, level]
+                          : nfhs.levels.filter((entry) => entry !== level)
+                        setNFHS({
+                          ...nfhs,
+                          levels: nextLevels.length > 0 ? nextLevels : ["Varsity"],
+                        })
+                      }}
+                    />
+                    <span>{level}</span>
+                  </label>
+                )
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Select which NFHS competition levels Teamarr should import. At least one level is required.
             </p>
           </div>
 

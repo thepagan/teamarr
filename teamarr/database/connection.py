@@ -1506,7 +1506,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE settings SET schema_version = 71 WHERE id = 1")
         current_version = 71
 
-    # v72-v74: Column additions (NFHS settings, Emby API key, feed hint audit)
+    # v72-v75: Column additions (NFHS settings, Emby API key, feed hint audit, NFHS levels)
     # — handled by schema reconciliation
     if current_version < 72:
         conn.execute("UPDATE settings SET schema_version = 72 WHERE id = 1")
@@ -1519,6 +1519,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     if current_version < 74:
         conn.execute("UPDATE settings SET schema_version = 74 WHERE id = 1")
         current_version = 74
+
+    if current_version < 75:
+        conn.execute("UPDATE settings SET schema_version = 75 WHERE id = 1")
+        current_version = 75
 
 def _dedup_cross_group_channels(conn: sqlite3.Connection) -> None:
     """Merge duplicate channels that exist for the same event across groups.

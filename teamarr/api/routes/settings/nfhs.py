@@ -23,6 +23,7 @@ def get_settings(conn: Connection = Depends(get_connection)) -> NFHSSettingsMode
     return NFHSSettingsModel(
         enabled=settings.enabled,
         state_codes=settings.state_codes,
+        levels=settings.levels,
     )
 
 
@@ -37,6 +38,7 @@ def update_settings(
         conn,
         enabled=payload.enabled,
         state_codes=payload.state_codes,
+        levels=payload.levels,
     )
 
     settings = get_nfhs_settings(conn)
@@ -44,4 +46,5 @@ def update_settings(
     return NFHSSettingsModel(
         enabled=settings.enabled,
         state_codes=settings.state_codes,
+        levels=settings.levels,
     )

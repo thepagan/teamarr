@@ -17,8 +17,10 @@ from teamarr.core import (
 
 from teamarr.providers.nfhs.config import (
     ACTIVITY_LABEL_BY_SPORT,
+    DEFAULT_SELECTED_LEVELS,
     GENDER_NORMALIZATION,
     LEAGUE_MAP,
+    LEVEL_QUERY_VALUE_BY_LEVEL,
     LEVEL_NORMALIZATION,
     SPORT_NORMALIZATION,
     SUPPORTED_CONTENT_TYPES,
@@ -99,6 +101,27 @@ class NFHSProvider(SportsProvider):
             cls._log_settings_failure_once(exc)
             return set()
 
+    def _get_runtime_level_filter(self) -> set[str]:
+        """Return selected NFHS competition levels from persisted settings."""
+        cls = type(self)
+        try:
+            with get_connection() as conn:
+                settings = get_nfhs_settings(conn)
+                normalized_levels = [
+                    LEVEL_NORMALIZATION.get(level, level)
+                    for level in settings.levels
+                    if isinstance(level, str)
+                ]
+                selected = {
+                    level
+                    for level in normalized_levels
+                    if level in SUPPORTED_LEVELS
+                }
+                return selected or set(DEFAULT_SELECTED_LEVELS)
+        except Exception as exc:
+            cls._log_settings_failure_once(exc)
+            return set(DEFAULT_SELECTED_LEVELS)
+
     # ------------------------------------------------------------------
     # Supported leagues
     # ------------------------------------------------------------------
@@ -121,6 +144,7 @@ class NFHSProvider(SportsProvider):
         state_filter = self._get_runtime_state_filter()
         if not state_filter:
             return []
+        level_filter = self._get_runtime_level_filter()
         teams: List[Team] = []
         latest_team_rows = self._get_latest_team_rows()
         raw_team_row_count = self._get_raw_team_row_count()
@@ -131,7 +155,7 @@ class NFHSProvider(SportsProvider):
             gender = GENDER_NORMALIZATION.get(team.get("gender"), team.get("gender"))
             level = LEVEL_NORMALIZATION.get(team.get("level"), team.get("level"))
 
-            if level not in SUPPORTED_LEVELS:
+            if level not in level_filter:
                 continue
 
             if sport not in SUPPORTED_SPORTS:
@@ -204,7 +228,8 @@ class NFHSProvider(SportsProvider):
         if not state_filter:
             return []
         activity = self._resolve_activity_for_league(league) if league else None
-        level_filter = self._resolve_activity_level_for_league(league) if league else None
+        selected_levels = self._get_runtime_level_filter()
+        level_filter = self._resolve_activity_level_for_league(selected_levels) if league else None
         target_date_str = None
         if target_date is not None:
             try:
@@ -285,7 +310,7 @@ class NFHSProvider(SportsProvider):
                 skipped_status += 1
                 continue
 
-            if level not in SUPPORTED_LEVELS:
+            if level not in selected_levels:
                 skipped_level += 1
                 continue
 
@@ -469,11 +494,12 @@ class NFHSProvider(SportsProvider):
         sport = next(iter(sports))
         return ACTIVITY_LABEL_BY_SPORT.get(sport, sport).lower()
 
-    def _resolve_activity_level_for_league(self, league_code: str | None) -> str | None:
-        """Return NFHS search level filter for league-scoped upcoming event queries."""
-        if not league_code:
+    def _resolve_activity_level_for_league(self, selected_levels: set[str]) -> str | None:
+        """Return NFHS search level filter when a single level is selected."""
+        if len(selected_levels) != 1:
             return None
-        return "varsity"
+        selected_level = next(iter(selected_levels))
+        return LEVEL_QUERY_VALUE_BY_LEVEL.get(selected_level)
 
     def _get_raw_team_rows(self) -> list[dict]:
         """Return raw NFHS SEARCH v3 team rows for the configured scope."""

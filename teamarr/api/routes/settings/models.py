@@ -266,6 +266,10 @@ class NFHSSettingsModel(BaseModel):
         default_factory=list,
         description="List of 2-letter US state codes to fetch NFHS schools/events",
     )
+    levels: list[str] = Field(
+        default_factory=lambda: ["Varsity"],
+        description="Competition levels to fetch from NFHS",
+    )
 
 
 class NFHSSettingsUpdate(BaseModel):
@@ -273,6 +277,7 @@ class NFHSSettingsUpdate(BaseModel):
 
     enabled: bool | None = None
     state_codes: list[str] | None = None
+    levels: list[str] | None = None
 
 # =============================================================================
 # TEAM FILTER SETTINGS

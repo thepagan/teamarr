@@ -7,6 +7,8 @@ import json
 import logging
 from sqlite3 import Connection
 
+from teamarr.providers.nfhs.config import DEFAULT_SELECTED_LEVELS, LEVEL_NORMALIZATION, SUPPORTED_LEVELS
+
 logger = logging.getLogger(__name__)
 
 
@@ -469,6 +471,7 @@ def update_nfhs_settings(
     conn: Connection,
     enabled: bool | None = None,
     state_codes: list[str] | None | object = _NOT_PROVIDED,
+    levels: list[str] | None | object = _NOT_PROVIDED,
 ) -> bool:
     """Update NFHS high school sports settings.
 
@@ -476,6 +479,7 @@ def update_nfhs_settings(
         conn: Database connection
         enabled: Master toggle for NFHS provider
         state_codes: List of 2-letter state codes. Use [] to clear, or omit to leave unchanged.
+        levels: NFHS competition levels to include. Use [] to reset to the default Varsity level.
 
     Returns:
         True if updated
@@ -498,6 +502,21 @@ def update_nfhs_settings(
 
         updates.append("nfhs_state_codes = ?")
         values.append(json.dumps(normalized_codes))
+
+    if levels is not _NOT_PROVIDED:
+        normalized_levels: list[str] = []
+        for level in levels or []:
+            if not isinstance(level, str):
+                continue
+            normalized = LEVEL_NORMALIZATION.get(level.strip(), level.strip())
+            if normalized in SUPPORTED_LEVELS and normalized not in normalized_levels:
+                normalized_levels.append(normalized)
+
+        if not normalized_levels:
+            normalized_levels = list(DEFAULT_SELECTED_LEVELS)
+
+        updates.append("nfhs_levels = ?")
+        values.append(json.dumps(normalized_levels))
 
     if not updates:
         return False
@@ -869,5 +888,4 @@ def update_backup_settings(
         logger.info("[BACKUP] Updated settings: %s", [u.split(" = ")[0] for u in updates])
         return True
     return False
-
 

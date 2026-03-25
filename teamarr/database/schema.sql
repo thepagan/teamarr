@@ -359,9 +359,10 @@ CREATE TABLE IF NOT EXISTS settings (
     -- NFHS High School Sports
     nfhs_enabled BOOLEAN DEFAULT 0,                 -- Enable NFHS high school sports integration
     nfhs_state_codes JSON DEFAULT '[]',             -- Two-letter state codes to import (e.g., ["KY","IN"])
+    nfhs_levels JSON DEFAULT '["Varsity"]',         -- Competition levels to include from NFHS
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 74
+    schema_version INTEGER DEFAULT 75
 );
 
 -- Insert default settings

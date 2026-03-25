@@ -6,6 +6,8 @@ Query functions to fetch settings from the database.
 import json
 from sqlite3 import Connection
 
+from teamarr.providers.nfhs.config import DEFAULT_SELECTED_LEVELS, LEVEL_NORMALIZATION, SUPPORTED_LEVELS
+
 from .types import (
     AllSettings,
     APISettings,
@@ -461,6 +463,7 @@ def _build_nfhs_settings(row) -> NFHSSettings:
     d = _NFHS_DEFAULTS
 
     state_codes = d.state_codes
+    levels = d.levels or list(DEFAULT_SELECTED_LEVELS)
     if "nfhs_state_codes" in row.keys() and row["nfhs_state_codes"]:
         try:
             parsed = json.loads(row["nfhs_state_codes"])
@@ -476,11 +479,28 @@ def _build_nfhs_settings(row) -> NFHSSettings:
         except json.JSONDecodeError:
             pass
 
+    if "nfhs_levels" in row.keys() and row["nfhs_levels"]:
+        try:
+            parsed = json.loads(row["nfhs_levels"])
+            if isinstance(parsed, list):
+                normalized_levels: list[str] = []
+                for level in parsed:
+                    if not isinstance(level, str):
+                        continue
+                    normalized = LEVEL_NORMALIZATION.get(level.strip(), level.strip())
+                    if normalized in SUPPORTED_LEVELS and normalized not in normalized_levels:
+                        normalized_levels.append(normalized)
+                if normalized_levels:
+                    levels = normalized_levels
+        except json.JSONDecodeError:
+            pass
+
     return NFHSSettings(
         enabled=bool(row["nfhs_enabled"])
         if "nfhs_enabled" in row.keys() and row["nfhs_enabled"] is not None
         else d.enabled,
         state_codes=state_codes,
+        levels=levels,
     )
 
 
@@ -494,7 +514,7 @@ def get_nfhs_settings(conn: Connection) -> NFHSSettings:
         NFHSSettings object with enabled flag and selected state codes
     """
     cursor = conn.execute(
-        """SELECT nfhs_enabled, nfhs_state_codes
+        """SELECT nfhs_enabled, nfhs_state_codes, nfhs_levels
            FROM settings WHERE id = 1"""
     )
     row = cursor.fetchone()
