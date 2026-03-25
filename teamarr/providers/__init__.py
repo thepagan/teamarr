@@ -18,9 +18,14 @@ to inject the LeagueMappingSource into providers.
 from teamarr.providers.espn import ESPNClient, ESPNProvider
 from teamarr.providers.hockeytech import HockeyTechClient, HockeyTechProvider
 from teamarr.providers.mlbstats import MLBStatsClient, MLBStatsProvider
-from teamarr.providers.nfhs import NFHSClient, NFHSProvider
 from teamarr.providers.registry import ProviderConfig, ProviderRegistry
 from teamarr.providers.tsdb import RateLimitStats, TSDBClient, TSDBProvider
+
+
+class _NFHSProviderPlaceholder:
+    """Placeholder class to avoid importing NFHS during package initialization."""
+
+    pass
 
 # =============================================================================
 # PROVIDER FACTORY FUNCTIONS
@@ -95,8 +100,10 @@ def _create_mlbstats_provider() -> MLBStatsProvider:
     )
 
 
-def _create_nfhs_provider() -> NFHSProvider:
+def _create_nfhs_provider():
     """Factory for NFHS provider."""
+    from teamarr.providers.nfhs import NFHSProvider
+
     return NFHSProvider()
 
 
@@ -132,7 +139,7 @@ ProviderRegistry.register(
 
 ProviderRegistry.register(
     name="nfhs",
-    provider_class=NFHSProvider,
+    provider_class=_NFHSProviderPlaceholder,
     factory=_create_nfhs_provider,
     priority=70,  # High school sports provider
     enabled=True,
@@ -172,3 +179,15 @@ __all__ = [
     "TSDBClient",
     "TSDBProvider",
 ]
+
+
+def __getattr__(name: str):
+    if name == "NFHSClient":
+        from teamarr.providers.nfhs import NFHSClient
+
+        return NFHSClient
+    if name == "NFHSProvider":
+        from teamarr.providers.nfhs import NFHSProvider
+
+        return NFHSProvider
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
