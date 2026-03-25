@@ -6,6 +6,12 @@ from datetime import datetime
 from typing import List
 from teamarr.database.connection import get_connection
 from teamarr.database.settings.read import get_nfhs_settings
+from teamarr.providers.nfhs.levels import (
+    DEFAULT_SELECTED_LEVELS,
+    LEVEL_NORMALIZATION,
+    LEVEL_QUERY_VALUE_BY_LEVEL,
+    SUPPORTED_LEVELS,
+)
 
 from teamarr.core import (
     Event,
@@ -17,14 +23,10 @@ from teamarr.core import (
 
 from teamarr.providers.nfhs.config import (
     ACTIVITY_LABEL_BY_SPORT,
-    DEFAULT_SELECTED_LEVELS,
     GENDER_NORMALIZATION,
     LEAGUE_MAP,
-    LEVEL_QUERY_VALUE_BY_LEVEL,
-    LEVEL_NORMALIZATION,
     SPORT_NORMALIZATION,
     SUPPORTED_CONTENT_TYPES,
-    SUPPORTED_LEVELS,
     SUPPORTED_SPORTS,
     SUPPORTED_STATUSES,
 )

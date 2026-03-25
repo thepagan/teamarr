@@ -1,5 +1,12 @@
 """NFHS provider configuration."""
 
+from teamarr.providers.nfhs.levels import (
+    DEFAULT_SELECTED_LEVELS,
+    LEVEL_NORMALIZATION,
+    LEVEL_QUERY_VALUE_BY_LEVEL,
+    SUPPORTED_LEVELS,
+)
+
 SEARCH_API_BASE = "https://search-api.nfhsnetwork.com/v3"
 CFUNITY_API_BASE = "https://cfunity.nfhsnetwork.com/v2"
 
@@ -35,19 +42,6 @@ SUPPORTED_SPORTS = {
     "Water Polo",
     "Wrestling",
 }
-
-# Levels we support from NFHS
-SUPPORTED_LEVELS = {
-    "Varsity",
-    "Junior Varsity",
-    "Sophomore",
-    "Freshman",
-    "Middle School",
-}
-
-DEFAULT_SELECTED_LEVELS = [
-    "Varsity",
-]
 
 # Content/status filtering
 SUPPORTED_CONTENT_TYPES = {"game"}
@@ -125,33 +119,6 @@ GENDER_NORMALIZATION = {
     "Girls": "girls",
     "Coed": None,
     "Mixed": None,
-}
-
-LEVEL_NORMALIZATION = {
-    "Varsity": "Varsity",
-    "varsity": "Varsity",
-    "Junior Varsity": "Junior Varsity",
-    "junior varsity": "Junior Varsity",
-    "JV": "Junior Varsity",
-    "jv": "Junior Varsity",
-    "Sophomore": "Sophomore",
-    "sophomore": "Sophomore",
-    "Freshman": "Freshman",
-    "freshman": "Freshman",
-    "Middle School": "Middle School",
-    "middle school": "Middle School",
-    "MiddleSchool": "Middle School",
-    "middleschool": "Middle School",
-    "MS": "Middle School",
-    "ms": "Middle School",
-}
-
-LEVEL_QUERY_VALUE_BY_LEVEL = {
-    "Varsity": "varsity",
-    "Junior Varsity": "junior varsity",
-    "Sophomore": "sophomore",
-    "Freshman": "freshman",
-    "Middle School": "middle school",
 }
 
 SPORT_NORMALIZATION = {

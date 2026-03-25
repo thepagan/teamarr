@@ -6,7 +6,7 @@ Query functions to fetch settings from the database.
 import json
 from sqlite3 import Connection
 
-from teamarr.providers.nfhs.config import DEFAULT_SELECTED_LEVELS, LEVEL_NORMALIZATION, SUPPORTED_LEVELS
+from teamarr.providers.nfhs.levels import DEFAULT_SELECTED_LEVELS, LEVEL_NORMALIZATION, SUPPORTED_LEVELS
 
 from .types import (
     AllSettings,

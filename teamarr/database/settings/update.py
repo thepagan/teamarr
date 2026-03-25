@@ -7,7 +7,7 @@ import json
 import logging
 from sqlite3 import Connection
 
-from teamarr.providers.nfhs.config import DEFAULT_SELECTED_LEVELS, LEVEL_NORMALIZATION, SUPPORTED_LEVELS
+from teamarr.providers.nfhs.levels import DEFAULT_SELECTED_LEVELS, LEVEL_NORMALIZATION, SUPPORTED_LEVELS
 
 logger = logging.getLogger(__name__)
 
@@ -888,4 +888,3 @@ def update_backup_settings(
         logger.info("[BACKUP] Updated settings: %s", [u.split(" = ")[0] for u in updates])
         return True
     return False
-
