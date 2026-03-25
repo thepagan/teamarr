@@ -38,7 +38,7 @@ def list_teams(conn: Connection, active_only: bool = False) -> list[dict]:
         List of team dicts with parsed leagues
     """
     if active_only:
-        cursor = conn.execute("SELECT * FROM teams WHERE active = 1 ORDER BY team_name")
+        cursor = conn.execute("SELECT * FROM teams WHERE active = TRUE ORDER BY team_name")
     else:
         cursor = conn.execute("SELECT * FROM teams ORDER BY team_name")
     return [_row_to_dict(row) for row in cursor.fetchall()]

@@ -116,7 +116,7 @@ class TeamLeagueCache:
                            cached_team_count as team_count, import_enabled,
                            league_alias, tsdb_tier
                     FROM leagues
-                    WHERE import_enabled = 1 AND enabled = 1
+                    WHERE import_enabled = TRUE AND enabled = TRUE
                 """
                 params: list = []
 
@@ -144,7 +144,7 @@ class TeamLeagueCache:
                                league_alias, tsdb_tier,
                                1 as priority
                         FROM leagues
-                        WHERE enabled = 1
+                        WHERE enabled = TRUE
 
                         UNION ALL
 

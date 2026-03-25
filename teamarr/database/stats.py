@@ -385,7 +385,7 @@ def get_dashboard_stats(conn: Connection) -> dict:
     teams_row = conn.execute("""
         SELECT
             COUNT(*) as total,
-            SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active,
+            SUM(CASE WHEN active = TRUE THEN 1 ELSE 0 END) as active,
             SUM(CASE WHEN template_id IS NOT NULL THEN 1 ELSE 0 END) as assigned
         FROM teams
     """).fetchone()
@@ -405,7 +405,7 @@ def get_dashboard_stats(conn: Connection) -> dict:
     groups = conn.execute("""
         SELECT id, name, leagues, total_stream_count
         FROM event_epg_groups
-        WHERE enabled = 1
+        WHERE enabled = TRUE
     """).fetchall()
 
     # Build group name lookup and collect configured leagues
@@ -1063,7 +1063,7 @@ def get_match_stats_summary(conn: Connection, run_id: int | None = None) -> dict
     matched_by_group = conn.execute(
         """
         SELECT group_id, group_name, COUNT(*) as count,
-               SUM(CASE WHEN from_cache = 1 THEN 1 ELSE 0 END) as from_cache
+               SUM(CASE WHEN from_cache = TRUE THEN 1 ELSE 0 END) as from_cache
         FROM epg_matched_streams
         WHERE run_id = ?
         GROUP BY group_id, group_name
@@ -1178,7 +1178,7 @@ def get_live_xmltv_content(conn: Connection) -> dict[str, list[str]]:
         SELECT x.xmltv_content
         FROM team_epg_xmltv x
         JOIN teams t ON x.team_id = t.id
-        WHERE t.active = 1
+        WHERE t.active = TRUE
         AND x.xmltv_content IS NOT NULL AND x.xmltv_content != ''
     """)
     for row in cursor.fetchall():
@@ -1189,7 +1189,7 @@ def get_live_xmltv_content(conn: Connection) -> dict[str, list[str]]:
     cursor = conn.execute("""
         SELECT x.xmltv_content FROM event_epg_xmltv x
         JOIN event_epg_groups g ON x.group_id = g.id
-        WHERE g.enabled = 1
+        WHERE g.enabled = TRUE
         AND x.xmltv_content IS NOT NULL AND x.xmltv_content != ''
     """)
     for row in cursor.fetchall():

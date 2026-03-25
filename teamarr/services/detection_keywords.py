@@ -48,7 +48,7 @@ def _load_user_keywords(category: str) -> list[dict]:
             rows = conn.execute(
                 """SELECT keyword, is_regex, target_value, priority
                    FROM detection_keywords
-                   WHERE category = ? AND enabled = 1
+                   WHERE category = ? AND enabled = TRUE
                    ORDER BY priority DESC, keyword""",
                 (category,),
             ).fetchall()

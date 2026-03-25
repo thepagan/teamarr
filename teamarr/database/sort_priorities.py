@@ -382,7 +382,7 @@ def get_sort_priorities_with_channel_counts(
         FROM managed_channels mc
         JOIN event_epg_groups g ON mc.event_epg_group_id = g.id
         WHERE g.channel_assignment_mode = 'auto'
-          AND g.enabled = 1
+          AND g.enabled = TRUE
           AND mc.deleted_at IS NULL
         GROUP BY mc.sport, mc.league
     """)

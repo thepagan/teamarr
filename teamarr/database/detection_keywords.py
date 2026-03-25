@@ -33,7 +33,7 @@ def list_keywords(
         params.append(category)
 
     if enabled_only:
-        query += " AND enabled = 1"
+        query += " AND enabled = TRUE"
 
     query += " ORDER BY category, priority DESC, keyword"
 

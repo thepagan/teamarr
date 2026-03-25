@@ -80,7 +80,7 @@ class LeagueMappingService:
                        league_alias, league_id, gracenote_category,
                        fallback_provider, fallback_league_id
                 FROM leagues
-                WHERE enabled = 1
+                WHERE enabled = TRUE
                 ORDER BY provider, league_code
                 """
             )

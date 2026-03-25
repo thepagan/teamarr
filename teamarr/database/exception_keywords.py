@@ -77,7 +77,7 @@ def get_all_keywords(conn: Connection, include_disabled: bool = False) -> list[E
     else:
         cursor = conn.execute(
             """SELECT * FROM consolidation_exception_keywords
-               WHERE enabled = 1 ORDER BY label"""
+               WHERE enabled = TRUE ORDER BY label"""
         )
 
     return [_row_to_keyword(row) for row in cursor.fetchall()]
@@ -114,7 +114,7 @@ def get_keywords_by_behavior(
     """
     cursor = conn.execute(
         """SELECT * FROM consolidation_exception_keywords
-           WHERE behavior = ? AND enabled = 1
+           WHERE behavior = ? AND enabled = TRUE
            ORDER BY label""",
         (behavior,),
     )

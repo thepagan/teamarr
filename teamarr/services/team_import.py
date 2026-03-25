@@ -191,7 +191,7 @@ def bulk_import_teams(conn: Connection, teams: list[ImportTeam]) -> ImportResult
                     INSERT INTO teams (
                         provider, provider_team_id, primary_league, leagues, sport,
                         team_name, team_abbrev, team_logo_url, channel_id, active
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)
                     """,
                     (
                         team.provider,
@@ -225,7 +225,7 @@ def bulk_import_teams(conn: Connection, teams: list[ImportTeam]) -> ImportResult
                     INSERT INTO teams (
                         provider, provider_team_id, primary_league, leagues, sport,
                         team_name, team_abbrev, team_logo_url, channel_id, active
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)
                     """,
                     (
                         team.provider,

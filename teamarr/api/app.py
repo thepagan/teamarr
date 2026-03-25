@@ -46,7 +46,7 @@ def _cleanup_orphaned_xmltv(conn) -> None:
         # Delete XMLTV for inactive teams
         cursor = conn.execute("""
             DELETE FROM team_epg_xmltv
-            WHERE team_id IN (SELECT id FROM teams WHERE active = 0)
+            WHERE team_id IN (SELECT id FROM teams WHERE active = FALSE)
         """)
         if cursor.rowcount > 0:
             logger.info("[STARTUP] Cleaned up XMLTV for %d disabled teams", cursor.rowcount)
@@ -54,7 +54,7 @@ def _cleanup_orphaned_xmltv(conn) -> None:
         # Delete XMLTV for disabled groups
         cursor = conn.execute("""
             DELETE FROM event_epg_xmltv
-            WHERE group_id IN (SELECT id FROM event_epg_groups WHERE enabled = 0)
+            WHERE group_id IN (SELECT id FROM event_epg_groups WHERE enabled = FALSE)
         """)
         if cursor.rowcount > 0:
             logger.info("[STARTUP] Cleaned up XMLTV for %d disabled groups", cursor.rowcount)

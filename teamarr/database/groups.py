@@ -269,7 +269,7 @@ def get_all_groups(conn: Connection, include_disabled: bool = False) -> list[Eve
         cursor = conn.execute("SELECT * FROM event_epg_groups ORDER BY sort_order, name")
     else:
         cursor = conn.execute(
-            "SELECT * FROM event_epg_groups WHERE enabled = 1 ORDER BY sort_order, name"
+            "SELECT * FROM event_epg_groups WHERE enabled = TRUE ORDER BY sort_order, name"
         )
 
     return [_row_to_group(row) for row in cursor.fetchall()]
@@ -325,7 +325,7 @@ def get_groups_for_league(conn: Connection, league: str) -> list[EventEPGGroup]:
         List of EventEPGGroup objects that include the league
     """
     cursor = conn.execute(
-        "SELECT * FROM event_epg_groups WHERE enabled = 1 ORDER BY sort_order, name"
+        "SELECT * FROM event_epg_groups WHERE enabled = TRUE ORDER BY sort_order, name"
     )
 
     groups = []
@@ -349,7 +349,7 @@ def get_enabled_soccer_leagues(conn: Connection) -> list[str]:
         List of enabled soccer league codes (e.g., ['eng.1', 'esp.1', 'uefa.champions'])
     """
     cursor = conn.execute(
-        "SELECT league_code FROM leagues WHERE sport = 'soccer' AND enabled = 1"
+        "SELECT league_code FROM leagues WHERE sport = 'soccer' AND enabled = TRUE"
     )
     return [row["league_code"] for row in cursor.fetchall()]
 
@@ -1249,7 +1249,7 @@ def get_all_group_xmltv(conn: Connection, group_ids: list[int] | None = None) ->
         cursor = conn.execute(
             """SELECT x.xmltv_content FROM event_epg_xmltv x
                JOIN event_epg_groups g ON x.group_id = g.id
-               WHERE g.enabled = 1
+               WHERE g.enabled = TRUE
                AND x.xmltv_content IS NOT NULL AND x.xmltv_content != ''"""
         )
 
@@ -1292,5 +1292,4 @@ def delete_group_xmltv(conn: Connection, group_id: int) -> bool:
         logger.debug("[DELETED] XMLTV for group id=%d", group_id)
         return True
     return False
-
 

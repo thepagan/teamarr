@@ -45,7 +45,7 @@ def get_league(conn: sqlite3.Connection, league_code: str) -> dict | None:
         """
         SELECT league_code, provider, display_name, sport, event_type
         FROM leagues
-        WHERE league_code = ? AND enabled = 1
+        WHERE league_code = ? AND enabled = TRUE
         LIMIT 1
         """,
         (league_code.lower(),),
@@ -122,7 +122,7 @@ def get_league_mapping(
         SELECT league_code, provider, provider_league_id,
                provider_league_name, sport, display_name, logo_url
         FROM leagues
-        WHERE league_code = ? AND provider = ? AND enabled = 1
+        WHERE league_code = ? AND provider = ? AND enabled = TRUE
         """,
         (league_code.lower(), provider),
     )
@@ -155,7 +155,7 @@ def provider_supports_league(conn: sqlite3.Connection, league_code: str, provide
     cursor = conn.execute(
         """
         SELECT 1 FROM leagues
-        WHERE league_code = ? AND provider = ? AND enabled = 1
+        WHERE league_code = ? AND provider = ? AND enabled = TRUE
         """,
         (league_code.lower(), provider),
     )
@@ -177,7 +177,7 @@ def get_leagues_for_provider(conn: sqlite3.Connection, provider: str) -> list[Le
         SELECT league_code, provider, provider_league_id,
                provider_league_name, sport, display_name, logo_url
         FROM leagues
-        WHERE provider = ? AND enabled = 1
+        WHERE provider = ? AND enabled = TRUE
         ORDER BY league_code
         """,
         (provider,),
@@ -206,7 +206,7 @@ def get_all_leagues(conn: sqlite3.Connection) -> list[dict]:
         """
         SELECT league_code, provider, display_name, sport, league_alias
         FROM leagues
-        WHERE enabled = 1
+        WHERE enabled = TRUE
         ORDER BY sport, display_name
         """
     )
