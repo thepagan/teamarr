@@ -337,6 +337,7 @@ class NFHSClient:
         self,
         school_key: str,
         activity: str | None = None,
+        level: str | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve all upcoming event records for a specific school from NFHS SEARCH v3."""
         initial_params: dict[str, Any] = {
@@ -344,6 +345,8 @@ class NFHSClient:
         }
         if activity:
             initial_params["activity"] = activity
+        if level:
+            initial_params["level"] = level
 
         initial = self._request(
             SEARCH_API_BASE,

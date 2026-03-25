@@ -42,7 +42,7 @@ class NFHSProvider(SportsProvider):
     """
     _shared_schools_by_state_cache: dict[str, list[dict]] = {}
     _shared_school_teams_cache: dict[str, list[dict]] = {}
-    _shared_school_upcoming_events_cache: dict[tuple[str, str | None], list[dict]] = {}
+    _shared_school_upcoming_events_cache: dict[tuple[str, str | None, str | None], list[dict]] = {}
     _shared_upcoming_events_by_scope_cache: dict[tuple[str, ...], list[dict]] = {}
     _shared_latest_team_rows_cache: dict[tuple[str, ...], list[dict]] = {}
     _shared_schools_lock = threading.RLock()
@@ -204,6 +204,7 @@ class NFHSProvider(SportsProvider):
         if not state_filter:
             return []
         activity = self._resolve_activity_for_league(league) if league else None
+        level_filter = self._resolve_activity_level_for_league(league) if league else None
         target_date_str = None
         if target_date is not None:
             try:
@@ -222,11 +223,16 @@ class NFHSProvider(SportsProvider):
         skipped_unmapped_league = 0
         skipped_missing_teams = 0
 
-        upcoming = self._get_upcoming_events_for_scope_cached(state_filter, activity=activity)
+        upcoming = self._get_upcoming_events_for_scope_cached(
+            state_filter,
+            activity=activity,
+            level=level_filter,
+        )
         if league and activity and not upcoming:
             logger.info(
-                "[NFHS] No upcoming results for activity=%s league=%s; falling back to unfiltered scope fetch",
+                "[NFHS] No upcoming results for activity=%s level=%s league=%s; falling back to unfiltered scope fetch",
                 activity,
+                level_filter,
                 league,
             )
             upcoming = self._get_upcoming_events_for_scope_cached(state_filter)
@@ -397,16 +403,18 @@ class NFHSProvider(SportsProvider):
         self,
         school_key: str,
         activity: str | None = None,
+        level: str | None = None,
     ) -> list[dict]:
         """Return cached NFHS SEARCH v3 upcoming event rows for a school, shared across provider instances."""
         cls = type(self)
-        cache_key = (school_key, activity)
+        cache_key = (school_key, activity, level)
         with cls._shared_school_upcoming_events_lock:
             if cache_key not in cls._shared_school_upcoming_events_cache:
                 cls._shared_school_upcoming_events_cache[cache_key] = (
                     self.client.get_upcoming_events_for_school(
                         school_key,
                         activity=activity,
+                        level=level,
                     )
                     or []
                 )
@@ -416,10 +424,11 @@ class NFHSProvider(SportsProvider):
         self,
         state_filter: set[str],
         activity: str | None = None,
+        level: str | None = None,
     ) -> list[dict]:
         """Return cached aggregated upcoming NFHS events for the configured state scope."""
         scope_parts = tuple(sorted(state_filter)) if state_filter else ("ALL",)
-        scope_key = scope_parts + (f"activity={activity or '*'}",)
+        scope_key = scope_parts + (f"activity={activity or '*'}", f"level={level or '*'}")
         cls = type(self)
 
         with cls._shared_upcoming_events_by_scope_lock:
@@ -437,6 +446,7 @@ class NFHSProvider(SportsProvider):
                         self._get_school_upcoming_events_cached(
                             school_key,
                             activity=activity,
+                            level=level,
                         )
                     )
 
@@ -457,7 +467,13 @@ class NFHSProvider(SportsProvider):
             return None
 
         sport = next(iter(sports))
-        return ACTIVITY_LABEL_BY_SPORT.get(sport, sport)
+        return ACTIVITY_LABEL_BY_SPORT.get(sport, sport).lower()
+
+    def _resolve_activity_level_for_league(self, league_code: str | None) -> str | None:
+        """Return NFHS search level filter for league-scoped upcoming event queries."""
+        if not league_code:
+            return None
+        return "varsity"
 
     def _get_raw_team_rows(self) -> list[dict]:
         """Return raw NFHS SEARCH v3 team rows for the configured scope."""
