@@ -432,22 +432,22 @@ class NFHSClient:
             params["level"] = level
         return self._get_upcoming_events_with_total(params, log_context=f"school_key={school_key}")
 
-    def get_upcoming_events_for_activity(
+    def get_upcoming_events_for_state(
         self,
+        state_code: str,
         activity: str,
         level: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve upcoming event records for an activity-scoped NFHS SEARCH query."""
+        """Retrieve upcoming event records for a state/activity-scoped NFHS SEARCH query."""
         params: dict[str, Any] = {
+            "state": state_code,
             "activity": activity,
         }
-        if activity:
-            params["activity"] = activity
         if level:
             params["level"] = level
         return self._get_upcoming_events_with_total(
             params,
-            log_context=f"activity={activity},level={level or '*'}",
+            log_context=f"state={state_code},activity={activity},level={level or '*'}",
         )
 
     def get_school_details(self, school_key: str) -> dict[str, Any]:
