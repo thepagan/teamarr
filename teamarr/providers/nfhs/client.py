@@ -333,14 +333,22 @@ class NFHSClient:
         )
         return []
 
-    def get_upcoming_events_for_school(self, school_key: str) -> list[dict[str, Any]]:
+    def get_upcoming_events_for_school(
+        self,
+        school_key: str,
+        activity: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Retrieve all upcoming event records for a specific school from NFHS SEARCH v3."""
+        initial_params: dict[str, Any] = {
+            "school_key": school_key,
+        }
+        if activity:
+            initial_params["activity"] = activity
+
         initial = self._request(
             SEARCH_API_BASE,
             "/search/events/upcoming",
-            params={
-                "school_key": school_key,
-            },
+            params=initial_params,
         )
 
         def _extract_rows(payload: Any, *, source: str) -> list[dict[str, Any]]:
@@ -398,7 +406,7 @@ class NFHSClient:
             SEARCH_API_BASE,
             "/search/events/upcoming",
             params={
-                "school_key": school_key,
+                **initial_params,
                 "size": total,
             },
         )

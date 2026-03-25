@@ -157,6 +157,29 @@ SPORT_NORMALIZATION = {
     "Wrestling": "Wrestling",
 }
 
+ACTIVITY_LABEL_BY_SPORT = {
+    "Baseball": "Baseball",
+    "Basketball": "Basketball",
+    "Bowling": "Bowling",
+    "Cheer": "Cheerleading and Dance",
+    "Cross Country": "Cross Country",
+    "Field Hockey": "Field Hockey",
+    "Flag Football": "Flag Football",
+    "Football": "Football",
+    "Golf": "Golf",
+    "Gymnastics": "Gymnastics",
+    "Ice Hockey": "Ice Hockey",
+    "Lacrosse": "Lacrosse",
+    "Soccer": "Soccer",
+    "Softball": "Softball",
+    "Swimming": "Swimming",
+    "Tennis": "Tennis",
+    "Track & Field": "Track & Field",
+    "Volleyball": "Volleyball",
+    "Water Polo": "Water Polo",
+    "Wrestling": "Wrestling",
+}
+
 # Default HTTP settings for NFHS client
 REQUEST_TIMEOUT = 15
 USER_AGENT = "Teamarr-NFHS-Provider/1.0"

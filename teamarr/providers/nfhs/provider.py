@@ -16,6 +16,7 @@ from teamarr.core import (
 )
 
 from teamarr.providers.nfhs.config import (
+    ACTIVITY_LABEL_BY_SPORT,
     GENDER_NORMALIZATION,
     LEAGUE_MAP,
     LEVEL_NORMALIZATION,
@@ -41,7 +42,7 @@ class NFHSProvider(SportsProvider):
     """
     _shared_schools_by_state_cache: dict[str, list[dict]] = {}
     _shared_school_teams_cache: dict[str, list[dict]] = {}
-    _shared_school_upcoming_events_cache: dict[str, list[dict]] = {}
+    _shared_school_upcoming_events_cache: dict[tuple[str, str | None], list[dict]] = {}
     _shared_upcoming_events_by_scope_cache: dict[tuple[str, ...], list[dict]] = {}
     _shared_latest_team_rows_cache: dict[tuple[str, ...], list[dict]] = {}
     _shared_schools_lock = threading.RLock()
@@ -202,6 +203,7 @@ class NFHSProvider(SportsProvider):
         state_filter = self._get_runtime_state_filter()
         if not state_filter:
             return []
+        activity = self._resolve_activity_for_league(league) if league else None
         target_date_str = None
         if target_date is not None:
             try:
@@ -220,7 +222,14 @@ class NFHSProvider(SportsProvider):
         skipped_unmapped_league = 0
         skipped_missing_teams = 0
 
-        upcoming = self._get_upcoming_events_for_scope_cached(state_filter)
+        upcoming = self._get_upcoming_events_for_scope_cached(state_filter, activity=activity)
+        if league and activity and not upcoming:
+            logger.info(
+                "[NFHS] No upcoming results for activity=%s league=%s; falling back to unfiltered scope fetch",
+                activity,
+                league,
+            )
+            upcoming = self._get_upcoming_events_for_scope_cached(state_filter)
 
         for event in upcoming:
             event_id = event.get("id") or event.get("key")
@@ -384,18 +393,33 @@ class NFHSProvider(SportsProvider):
                 cls._shared_school_teams_cache[school_key] = self.client.get_school_teams(school_key) or []
             return cls._shared_school_teams_cache[school_key]
 
-    def _get_school_upcoming_events_cached(self, school_key: str) -> list[dict]:
+    def _get_school_upcoming_events_cached(
+        self,
+        school_key: str,
+        activity: str | None = None,
+    ) -> list[dict]:
         """Return cached NFHS SEARCH v3 upcoming event rows for a school, shared across provider instances."""
         cls = type(self)
+        cache_key = (school_key, activity)
         with cls._shared_school_upcoming_events_lock:
-            if school_key not in cls._shared_school_upcoming_events_cache:
-                cls._shared_school_upcoming_events_cache[school_key] = self.client.get_upcoming_events_for_school(
-                    school_key) or []
-            return cls._shared_school_upcoming_events_cache[school_key]
+            if cache_key not in cls._shared_school_upcoming_events_cache:
+                cls._shared_school_upcoming_events_cache[cache_key] = (
+                    self.client.get_upcoming_events_for_school(
+                        school_key,
+                        activity=activity,
+                    )
+                    or []
+                )
+            return cls._shared_school_upcoming_events_cache[cache_key]
 
-    def _get_upcoming_events_for_scope_cached(self, state_filter: set[str]) -> list[dict]:
+    def _get_upcoming_events_for_scope_cached(
+        self,
+        state_filter: set[str],
+        activity: str | None = None,
+    ) -> list[dict]:
         """Return cached aggregated upcoming NFHS events for the configured state scope."""
-        scope_key = tuple(sorted(state_filter)) if state_filter else ("ALL",)
+        scope_parts = tuple(sorted(state_filter)) if state_filter else ("ALL",)
+        scope_key = scope_parts + (f"activity={activity or '*'}",)
         cls = type(self)
 
         with cls._shared_upcoming_events_by_scope_lock:
@@ -409,10 +433,31 @@ class NFHSProvider(SportsProvider):
                     school_key = school.get("key")
                     if not school_key:
                         continue
-                    upcoming.extend(self._get_school_upcoming_events_cached(school_key))
+                    upcoming.extend(
+                        self._get_school_upcoming_events_cached(
+                            school_key,
+                            activity=activity,
+                        )
+                    )
 
             cls._shared_upcoming_events_by_scope_cache[scope_key] = upcoming
             return upcoming
+
+    def _resolve_activity_for_league(self, league_code: str | None) -> str | None:
+        """Map a Teamarr NFHS league code to the NFHS search activity label."""
+        if not league_code:
+            return None
+
+        sports = {
+            sport
+            for (sport, _gender), mapped_league in LEAGUE_MAP.items()
+            if mapped_league == league_code and sport
+        }
+        if len(sports) != 1:
+            return None
+
+        sport = next(iter(sports))
+        return ACTIVITY_LABEL_BY_SPORT.get(sport, sport)
 
     def _get_raw_team_rows(self) -> list[dict]:
         """Return raw NFHS SEARCH v3 team rows for the configured scope."""
