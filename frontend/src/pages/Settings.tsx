@@ -996,6 +996,7 @@ export function Settings() {
   const [newKeyword, setNewKeyword] = useState({ label: "", match_terms: "", behavior: "consolidate" })
   const [editingKeyword, setEditingKeyword] = useState<{ id: number; label: string; match_terms: string } | null>(null)
   const [nfhs, setNFHS] = useState<NFHSSettings | null>(null)
+  const [nfhsStateCodesInput, setNfhsStateCodesInput] = useState("")
 
   // Local state for channel range inputs (allows free typing)
   const [channelRangeStart, setChannelRangeStart] = useState("")
@@ -1103,6 +1104,7 @@ export function Settings() {
   useEffect(() => {
     if (nfhsData) {
       setNFHS(nfhsData)
+      setNfhsStateCodesInput(nfhsData.state_codes.join(", "))
     }
   }, [nfhsData])
 
@@ -1634,16 +1636,19 @@ export function Settings() {
             <Label htmlFor="nfhs-state-codes">State Codes</Label>
             <Input
               id="nfhs-state-codes"
-              value={nfhs ? nfhs.state_codes.join(", ") : "Loading..."}
-              onChange={(e) =>
-                nfhs && setNFHS({
+              value={nfhs ? nfhsStateCodesInput : "Loading..."}
+              onChange={(e) => {
+                if (!nfhs) return
+                const rawValue = e.target.value
+                setNfhsStateCodesInput(rawValue)
+                setNFHS({
                   ...nfhs,
-                  state_codes: e.target.value
-                    .split(",")
+                  state_codes: rawValue
+                    .split(/[,\s]+/)
                     .map((s) => s.trim().toUpperCase())
                     .filter(Boolean),
                 })
-              }
+              }}
               placeholder="CA, NY, FL"
               disabled={!nfhs || !nfhs.enabled}
             />
