@@ -24,6 +24,13 @@ class SortPriority:
     updated_at: str | None = None
 
 
+def _subscription_leagues_json_each(conn: Connection) -> str:
+    """Return dialect-appropriate SQL for iterating subscription leagues."""
+    if getattr(conn, "dialect", None) == "postgres":
+        return "jsonb_array_elements_text(s.leagues) AS je(value)"
+    return "json_each(s.leagues) AS je"
+
+
 def get_all_sort_priorities(conn: Connection) -> list[SortPriority]:
     """Get all sort priority entries ordered by priority.
 
@@ -66,9 +73,10 @@ def get_active_sort_priorities(conn: Connection) -> list[SortPriority]:
     """
     # Get unique sport/league combinations from enabled AUTO groups
     # The leagues column is a JSON array like ["nfl", "nba"]
-    cursor = conn.execute("""
+    json_each_sql = _subscription_leagues_json_each(conn)
+    cursor = conn.execute(f"""
         SELECT DISTINCT l.sport, l.league_code
-        FROM sports_subscription s, json_each(s.leagues) AS je
+        FROM sports_subscription s, {json_each_sql}
         JOIN leagues l ON je.value = l.league_code
         WHERE s.id = 1
     """)
@@ -285,12 +293,13 @@ def auto_populate_sort_priorities(conn: Connection) -> int:
     # The leagues column is a JSON array like ["nfl", "nba"]
     # Prioritize leagues table (curated) first, then league_cache (discovered)
     # This ensures predefined leagues appear before discovered ones
-    cursor = conn.execute("""
+    json_each_sql = _subscription_leagues_json_each(conn)
+    cursor = conn.execute(f"""
         SELECT DISTINCT
             COALESCE(l.sport, lc.sport) as sport,
             je.value as league_code,
             CASE WHEN l.league_code IS NOT NULL THEN 0 ELSE 1 END as is_discovered
-        FROM sports_subscription s, json_each(s.leagues) AS je
+        FROM sports_subscription s, {json_each_sql}
         LEFT JOIN leagues l ON je.value = l.league_code
         LEFT JOIN league_cache lc ON je.value = lc.league_slug
         WHERE s.id = 1
