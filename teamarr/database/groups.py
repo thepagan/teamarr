@@ -948,7 +948,7 @@ def update_group_stats(
     if total_stream_count is not None:
         cursor = conn.execute(
             """UPDATE event_epg_groups
-               SET last_refresh = datetime('now'),
+               SET last_refresh = CURRENT_TIMESTAMP,
                    stream_count = ?,
                    matched_count = ?,
                    filtered_stale = ?,
@@ -985,7 +985,7 @@ def update_group_stats(
     else:
         cursor = conn.execute(
             """UPDATE event_epg_groups
-               SET last_refresh = datetime('now'),
+               SET last_refresh = CURRENT_TIMESTAMP,
                    stream_count = ?,
                    matched_count = ?,
                    filtered_stale = ?,
@@ -1266,10 +1266,10 @@ def store_group_xmltv(conn: Connection, group_id: int, xmltv_content: str) -> No
     """
     conn.execute(
         """INSERT INTO event_epg_xmltv (group_id, xmltv_content, updated_at)
-           VALUES (?, ?, datetime('now'))
+           VALUES (?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT(group_id) DO UPDATE SET
                xmltv_content = excluded.xmltv_content,
-               updated_at = datetime('now')""",
+               updated_at = CURRENT_TIMESTAMP""",
         (group_id, xmltv_content),
     )
     conn.commit()
@@ -1292,4 +1292,3 @@ def delete_group_xmltv(conn: Connection, group_id: int) -> bool:
         logger.debug("[DELETED] XMLTV for group id=%d", group_id)
         return True
     return False
-

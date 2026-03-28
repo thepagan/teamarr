@@ -1244,7 +1244,7 @@ def cleanup_stuck_runs(conn: Connection) -> int:
         """
         UPDATE processing_runs
         SET status = 'failed',
-            completed_at = datetime('now'),
+            completed_at = CURRENT_TIMESTAMP,
             error_message = 'Run interrupted (app restart or crash)'
         WHERE status = 'running'
         """

@@ -4,12 +4,21 @@ Provides REST API for managing consolidation exception keywords.
 These keywords control how duplicate streams are handled during event matching.
 """
 
+import sqlite3
+
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from teamarr.database import get_db
+
+try:
+    import psycopg2
+except ImportError:  # pragma: no cover - optional dependency
+    psycopg2 = None
+
+INTEGRITY_ERRORS = (sqlite3.IntegrityError, *((psycopg2.IntegrityError,) if psycopg2 else ()))
 
 router = APIRouter()
 
@@ -144,8 +153,6 @@ def get_keyword(keyword_id: int):
 @router.post("", response_model=ExceptionKeywordResponse, status_code=status.HTTP_201_CREATED)
 def create_keyword(request: ExceptionKeywordCreate):
     """Create a new exception keyword."""
-    import sqlite3
-
     from teamarr.database.exception_keywords import (
         create_keyword as db_create_keyword,
     )
@@ -163,7 +170,7 @@ def create_keyword(request: ExceptionKeywordCreate):
                 enabled=request.enabled,
             )
             keyword = db_get_keyword(conn, keyword_id)
-    except sqlite3.IntegrityError as e:
+    except INTEGRITY_ERRORS as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Label '{request.label}' already exists",
@@ -183,8 +190,6 @@ def create_keyword(request: ExceptionKeywordCreate):
 @router.put("/{keyword_id}", response_model=ExceptionKeywordResponse)
 def update_keyword(keyword_id: int, request: ExceptionKeywordUpdate):
     """Update an exception keyword."""
-    import sqlite3
-
     from teamarr.database.exception_keywords import (
         get_keyword as db_get_keyword,
     )
@@ -210,7 +215,7 @@ def update_keyword(keyword_id: int, request: ExceptionKeywordUpdate):
                 enabled=request.enabled,
             )
             keyword = db_get_keyword(conn, keyword_id)
-    except sqlite3.IntegrityError as e:
+    except INTEGRITY_ERRORS as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Label '{request.label}' already exists",

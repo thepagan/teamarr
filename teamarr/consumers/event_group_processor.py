@@ -2638,10 +2638,10 @@ class EventGroupProcessor:
         conn.execute(
             """
             INSERT INTO event_epg_xmltv (group_id, xmltv_content, updated_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(group_id) DO UPDATE SET
                 xmltv_content = excluded.xmltv_content,
-                updated_at = datetime('now')
+                updated_at = CURRENT_TIMESTAMP
             """,
             (group_id, xmltv_content),
         )

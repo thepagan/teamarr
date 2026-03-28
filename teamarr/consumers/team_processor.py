@@ -640,10 +640,10 @@ class TeamProcessor:
         conn.execute(
             """
             INSERT INTO team_epg_xmltv (team_id, xmltv_content, updated_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(team_id) DO UPDATE SET
                 xmltv_content = excluded.xmltv_content,
-                updated_at = datetime('now')
+                updated_at = CURRENT_TIMESTAMP
             """,
             (team_id, xmltv_content),
         )

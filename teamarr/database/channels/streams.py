@@ -88,7 +88,7 @@ def remove_stream_from_channel(
     """
     cursor = conn.execute(
         """UPDATE managed_channel_streams
-           SET removed_at = datetime('now'),
+           SET removed_at = CURRENT_TIMESTAMP,
                remove_reason = ?
            WHERE managed_channel_id = ?
              AND dispatcharr_stream_id = ?

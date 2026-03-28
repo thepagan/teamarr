@@ -14,7 +14,14 @@ import sqlite3
 from datetime import datetime
 from sqlite3 import Connection
 
+try:
+    import psycopg2
+except ImportError:  # pragma: no cover - optional dependency
+    psycopg2 = None
+
 logger = logging.getLogger(__name__)
+
+OPERATIONAL_ERRORS = (sqlite3.OperationalError, *((psycopg2.OperationalError,) if psycopg2 else ()))
 
 MAX_CHANNEL = 999999  # Effectively no limit per Dispatcharr update
 
@@ -81,7 +88,7 @@ def get_global_consolidation_mode(conn: Connection) -> str:
             "SELECT global_consolidation_mode FROM settings WHERE id = 1"
         )
         row = cursor.fetchone()
-    except sqlite3.OperationalError:
+    except OPERATIONAL_ERRORS:
         return "consolidate"
     if not row or not row["global_consolidation_mode"]:
         return "consolidate"

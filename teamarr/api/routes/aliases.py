@@ -2,6 +2,11 @@
 
 from sqlite3 import Connection, IntegrityError
 
+try:
+    import psycopg2
+except ImportError:  # pragma: no cover - optional dependency
+    psycopg2 = None
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -18,6 +23,8 @@ from teamarr.database.aliases import (
 )
 
 router = APIRouter(prefix="/aliases", tags=["Aliases"])
+
+INTEGRITY_ERRORS = (IntegrityError, *((psycopg2.IntegrityError,) if psycopg2 else ()))
 
 
 # =============================================================================
@@ -178,7 +185,7 @@ def create_new_alias(
             provider=request.provider,
         )
         return AliasResponse.from_db(alias)
-    except IntegrityError as e:
+    except INTEGRITY_ERRORS as e:
         raise HTTPException(
             status_code=409,
             detail=f"Alias '{request.alias}' already exists for league '{request.league}'",

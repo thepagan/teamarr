@@ -389,7 +389,7 @@ def mark_channel_deleted(
     """
     cursor = conn.execute(
         """UPDATE managed_channels
-           SET deleted_at = datetime('now'),
+           SET deleted_at = CURRENT_TIMESTAMP,
                delete_reason = ?
            WHERE id = ?""",
         (reason, channel_id),
