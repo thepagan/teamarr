@@ -152,6 +152,9 @@ def init_db(db_path: Path | str | None = None) -> None:
             _run_migrations(conn)
             _seed_tsdb_cache_if_needed(conn)
             conn.execute("SELECT id FROM settings LIMIT 1")
+            # PostgreSQL DDL is transactional. Commit before opening a second
+            # connection for bootstrap import so the new schema is visible.
+            conn.commit()
             _maybe_auto_import_sqlite_into_postgres(conn, path)
 
         logger.info("[DB] PostgreSQL schema initialized")
