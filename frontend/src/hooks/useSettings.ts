@@ -18,7 +18,9 @@ import {
   getReconciliationSettings,
   updateReconciliationSettings,
   getDisplaySettings,
+  getDatabaseSettings,
   updateDisplaySettings,
+  updateDatabaseSettings,
   getTeamFilterSettings,
   updateTeamFilterSettings,
   getExceptionKeywords,
@@ -51,6 +53,7 @@ import type {
   DurationSettings,
   ReconciliationSettings,
   DisplaySettings,
+  DatabaseSettings,
   TeamFilterSettingsUpdate,
   ChannelNumberingSettingsUpdate,
   StreamOrderingSettingsUpdate,
@@ -222,6 +225,24 @@ export function useUpdateDisplaySettings() {
 
   return useMutation({
     mutationFn: (data: DisplaySettings) => updateDisplaySettings(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+    },
+  })
+}
+
+export function useDatabaseSettings() {
+  return useQuery({
+    queryKey: ["settings", "database"],
+    queryFn: getDatabaseSettings,
+  })
+}
+
+export function useUpdateDatabaseSettings() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: DatabaseSettings) => updateDatabaseSettings(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] })
     },

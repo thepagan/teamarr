@@ -13,6 +13,7 @@ from .types import (
     AllSettings,
     APISettings,
     BackupSettings,
+    DatabaseSettings,
     ChannelNumberingSettings,
     DispatcharrSettings,
     DisplaySettings,
@@ -200,6 +201,7 @@ def get_all_settings(conn: Connection) -> AllSettings:
         backup=_build_backup_settings(row),
         feed_separation=_build_feed_separation_settings(row),
         emby=_build_emby_settings(row),
+        database=_build_database_settings(row),
         epg_generation_counter=row["epg_generation_counter"] or 0,
         schema_version=row["schema_version"] or 2,
     )
@@ -784,6 +786,7 @@ def get_backup_settings(conn: Connection) -> BackupSettings:
 
 # Single source of truth for Emby settings defaults
 _EMBY_DEFAULTS = EmbySettings()
+_DATABASE_DEFAULTS = DatabaseSettings()
 
 
 def _build_emby_settings(row) -> EmbySettings:
@@ -807,6 +810,45 @@ def _build_emby_settings(row) -> EmbySettings:
         if "emby_api_key" in row.keys()
         else d.api_key,
     )
+
+
+def _build_database_settings(row) -> DatabaseSettings:
+    """Build DatabaseSettings from DB row, using dataclass defaults for NULL."""
+    d = _DATABASE_DEFAULTS
+    backend = (
+        row["database_backend"]
+        if "database_backend" in row.keys() and row["database_backend"] is not None
+        else d.backend
+    )
+    if backend not in ("sqlite", "postgresql"):
+        backend = d.backend
+
+    return DatabaseSettings(
+        backend=backend,
+        postgres_url=row["postgres_url"] if "postgres_url" in row.keys() else d.postgres_url,
+        postgres_database=(
+            row["postgres_database"] if "postgres_database" in row.keys() else d.postgres_database
+        ),
+        postgres_username=(
+            row["postgres_username"] if "postgres_username" in row.keys() else d.postgres_username
+        ),
+        postgres_password=(
+            row["postgres_password"] if "postgres_password" in row.keys() else d.postgres_password
+        ),
+    )
+
+
+def get_database_settings(conn: Connection) -> DatabaseSettings:
+    """Get stored database configuration settings."""
+    cursor = conn.execute(
+        """SELECT database_backend, postgres_url, postgres_database,
+                  postgres_username, postgres_password
+           FROM settings WHERE id = 1"""
+    )
+    row = cursor.fetchone()
+    if not row:
+        return DatabaseSettings()
+    return _build_database_settings(row)
 
 
 def get_emby_settings(conn: Connection) -> EmbySettings:

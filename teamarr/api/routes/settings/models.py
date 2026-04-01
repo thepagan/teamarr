@@ -279,6 +279,21 @@ class NFHSSettingsUpdate(BaseModel):
     state_codes: list[str] | None = None
     levels: list[str] | None = None
 
+
+# =============================================================================
+# DATABASE SETTINGS
+# =============================================================================
+
+
+class DatabaseSettingsModel(BaseModel):
+    """Stored database configuration shown in the System tab."""
+
+    backend: str = "sqlite"
+    postgres_url: str | None = None
+    postgres_database: str | None = None
+    postgres_username: str | None = None
+    postgres_password: str | None = None
+
 # =============================================================================
 # TEAM FILTER SETTINGS
 # =============================================================================
@@ -494,6 +509,7 @@ class AllSettingsModel(BaseModel):
     epg: EPGSettingsModel
     durations: DurationSettingsModel
     display: DisplaySettingsModel
+    database: DatabaseSettingsModel | None = None
     nfhs: NFHSSettingsModel | None = None
     team_filter: TeamFilterSettingsModel | None = None
     channel_numbering: ChannelNumberingSettingsModel | None = None

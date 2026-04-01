@@ -272,6 +272,17 @@ class EmbySettings:
 
 
 @dataclass
+class DatabaseSettings:
+    """Stored database configuration for the UI."""
+
+    backend: str = "sqlite"
+    postgres_url: str | None = None
+    postgres_database: str | None = None
+    postgres_username: str | None = None
+    postgres_password: str | None = None
+
+
+@dataclass
 class AllSettings:
     """Complete application settings."""
 
@@ -292,5 +303,6 @@ class AllSettings:
     backup: BackupSettings = field(default_factory=BackupSettings)
     feed_separation: FeedSeparationSettings = field(default_factory=FeedSeparationSettings)
     emby: EmbySettings = field(default_factory=EmbySettings)
+    database: DatabaseSettings = field(default_factory=DatabaseSettings)
     epg_generation_counter: int = 0
     schema_version: int = 52

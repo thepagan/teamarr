@@ -356,13 +356,20 @@ CREATE TABLE IF NOT EXISTS settings (
     emby_password TEXT,
     emby_api_key TEXT,
 
+    -- Database Configuration (stored in UI; runtime backend still selected at startup)
+    database_backend TEXT DEFAULT 'sqlite' CHECK(database_backend IN ('sqlite', 'postgresql')),
+    postgres_url TEXT,
+    postgres_database TEXT,
+    postgres_username TEXT,
+    postgres_password TEXT,
+
     -- NFHS High School Sports
     nfhs_enabled BOOLEAN DEFAULT 0,                 -- Enable NFHS high school sports integration
     nfhs_state_codes JSON DEFAULT '[]',             -- Two-letter state codes to import (e.g., ["KY","IN"])
     nfhs_levels JSON DEFAULT '["Varsity"]',         -- Competition levels to include from NFHS
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 75
+    schema_version INTEGER DEFAULT 76
 );
 
 -- Insert default settings

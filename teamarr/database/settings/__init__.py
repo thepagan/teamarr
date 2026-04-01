@@ -7,6 +7,7 @@ Settings are organized into logical groups for easier management.
 from .read import (
     get_all_settings,
     get_backup_settings,
+    get_database_settings,
     get_channel_numbering_settings,
     get_dispatcharr_settings,
     get_display_settings,
@@ -24,6 +25,7 @@ from .types import (
     AllSettings,
     APISettings,
     BackupSettings,
+    DatabaseSettings,
     ChannelNumberingSettings,
     DispatcharrSettings,
     DisplaySettings,
@@ -43,6 +45,7 @@ from .types import (
 from .update import (
     increment_epg_generation_counter,
     update_backup_settings,
+    update_database_settings,
     update_channel_numbering_settings,
     update_dispatcharr_settings,
     update_display_settings,
@@ -76,6 +79,7 @@ __all__ = [
     "ChannelNumberingSettings",
     "UpdateCheckSettings",
     "BackupSettings",
+    "DatabaseSettings",
     "FeedSeparationSettings",
     "AllSettings",
     # Read operations
@@ -92,6 +96,7 @@ __all__ = [
     "get_channel_numbering_settings",
     "get_update_check_settings",
     "get_backup_settings",
+    "get_database_settings",
     "get_feed_separation_settings",
     # Update operations
     "update_dispatcharr_settings",
@@ -107,6 +112,7 @@ __all__ = [
     "update_channel_numbering_settings",
     "update_update_check_settings",
     "update_backup_settings",
+    "update_database_settings",
     "update_feed_separation_settings",
     "increment_epg_generation_counter",
 ]

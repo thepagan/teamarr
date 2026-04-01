@@ -530,6 +530,54 @@ def update_nfhs_settings(
     return False
 
 
+def update_database_settings(
+    conn: Connection,
+    backend: str | None = None,
+    postgres_url: str | None = None,
+    postgres_database: str | None = None,
+    postgres_username: str | None = None,
+    postgres_password: str | None = None,
+) -> bool:
+    """Update stored database configuration settings."""
+    updates = []
+    values = []
+
+    if backend is not None:
+        normalized_backend = backend.strip().lower()
+        if normalized_backend not in ("sqlite", "postgresql"):
+            logger.warning("[DATABASE] Invalid backend '%s'", backend)
+            return False
+        updates.append("database_backend = ?")
+        values.append(normalized_backend)
+
+    if postgres_url is not None:
+        updates.append("postgres_url = ?")
+        values.append(postgres_url.strip() or None)
+
+    if postgres_database is not None:
+        updates.append("postgres_database = ?")
+        values.append(postgres_database.strip() or None)
+
+    if postgres_username is not None:
+        updates.append("postgres_username = ?")
+        values.append(postgres_username.strip() or None)
+
+    if postgres_password is not None:
+        updates.append("postgres_password = ?")
+        values.append(postgres_password or None)
+
+    if not updates:
+        return False
+
+    query = f"UPDATE settings SET {', '.join(updates)} WHERE id = 1"
+    cursor = conn.execute(query, values)
+    if cursor.rowcount > 0:
+        conn.commit()
+        logger.info("[UPDATED] Database settings: %s", [u.split(" = ")[0] for u in updates])
+        return True
+    return False
+
+
 def update_channel_numbering_settings(
     conn: Connection,
     global_channel_mode: str | None = None,

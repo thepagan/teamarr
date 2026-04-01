@@ -94,6 +94,14 @@ export interface NFHSSettingsUpdate {
   levels?: string[]
 }
 
+export interface DatabaseSettings {
+  backend: "sqlite" | "postgresql"
+  postgres_url: string | null
+  postgres_database: string | null
+  postgres_username: string | null
+  postgres_password: string | null
+}
+
 export interface TSDBKeyValidationResult {
   valid: boolean
   is_premium: boolean
@@ -241,6 +249,7 @@ export interface AllSettings {
   durations: DurationSettings
   reconciliation: ReconciliationSettings
   display?: DisplaySettings
+  database?: DatabaseSettings
   nfhs?: NFHSSettings
   team_filter?: TeamFilterSettings
   channel_numbering?: ChannelNumberingSettings
@@ -385,6 +394,16 @@ export async function updateDisplaySettings(
   data: DisplaySettings
 ): Promise<DisplaySettings> {
   return api.put("/settings/display", data)
+}
+
+export async function getDatabaseSettings(): Promise<DatabaseSettings> {
+  return api.get("/settings/database")
+}
+
+export async function updateDatabaseSettings(
+  data: DatabaseSettings
+): Promise<DatabaseSettings> {
+  return api.put("/settings/database", data)
 }
 
 // NFHS Settings API

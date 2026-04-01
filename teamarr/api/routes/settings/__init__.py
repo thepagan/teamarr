@@ -13,6 +13,7 @@ from fastapi import APIRouter
 from teamarr.database import get_db
 
 from .channel_numbering import router as channel_numbering_router
+from .database import router as database_router
 from .dispatcharr import router as dispatcharr_router
 from .display import router as display_router
 from .emby import router as emby_router
@@ -23,6 +24,7 @@ from .lifecycle import router as lifecycle_router
 from .models import (
     AllSettingsModel,
     ChannelNumberingSettingsModel,
+    DatabaseSettingsModel,
     DispatcharrSettingsModel,
     DisplaySettingsModel,
     DurationSettingsModel,
@@ -47,6 +49,7 @@ router = APIRouter()
 
 # Include sub-routers
 router.include_router(dispatcharr_router)
+router.include_router(database_router)
 router.include_router(emby_router)
 router.include_router(lifecycle_router)
 router.include_router(epg_router)
@@ -127,6 +130,13 @@ def get_settings():
             xmltv_generator_name=settings.display.xmltv_generator_name,
             xmltv_generator_url=settings.display.xmltv_generator_url,
             tsdb_api_key=settings.display.tsdb_api_key,
+        ),
+        database=DatabaseSettingsModel(
+            backend=settings.database.backend,
+            postgres_url=settings.database.postgres_url,
+            postgres_database=settings.database.postgres_database,
+            postgres_username=settings.database.postgres_username,
+            postgres_password=settings.database.postgres_password,
         ),
         nfhs=NFHSSettingsModel(
             enabled=settings.nfhs.enabled,

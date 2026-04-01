@@ -54,6 +54,8 @@ import {
   useUpdateEPGSettings,
   useUpdateDurationSettings,
   useUpdateDisplaySettings,
+  useDatabaseSettings,
+  useUpdateDatabaseSettings,
   useExceptionKeywords,
   useCreateExceptionKeyword,
   useDeleteExceptionKeyword,
@@ -99,6 +101,7 @@ import type {
   EPGSettings,
   DurationSettings,
   DisplaySettings,
+  DatabaseSettings,
   NFHSSettings,
   ChannelNumberingSettings,
   UpdateCheckSettings,
@@ -902,6 +905,8 @@ export function Settings() {
   const updateEPG = useUpdateEPGSettings()
   const updateDurations = useUpdateDurationSettings()
   const updateDisplay = useUpdateDisplaySettings()
+  const { data: databaseData } = useDatabaseSettings()
+  const updateDatabase = useUpdateDatabaseSettings()
   const { data: nfhsData } = useNFHSSettings()
   const updateNFHS = useUpdateNFHSSettings()
 
@@ -962,6 +967,13 @@ export function Settings() {
   const [epg, setEPG] = useState<EPGSettings | null>(null)
   const [durations, setDurations] = useState<DurationSettings | null>(null)
   const [display, setDisplay] = useState<DisplaySettings | null>(null)
+  const [databaseSettings, setDatabaseSettings] = useState<DatabaseSettings>({
+    backend: "sqlite",
+    postgres_url: null,
+    postgres_database: null,
+    postgres_username: null,
+    postgres_password: null,
+  })
   const [tsdbValidation, setTsdbValidation] = useState<TSDBKeyValidationResult | null>(null)
   const [tsdbValidating, setTsdbValidating] = useState(false)
   const [channelNumbering, setChannelNumbering] = useState<ChannelNumberingSettings>({
@@ -1099,6 +1111,12 @@ export function Settings() {
       setFeedSeparation(feedSeparationData)
     }
   }, [feedSeparationData])
+
+  useEffect(() => {
+    if (databaseData) {
+      setDatabaseSettings(databaseData)
+    }
+  }, [databaseData])
 
   // Sync NFHS settings when data loads
   useEffect(() => {
@@ -1270,6 +1288,15 @@ export function Settings() {
       toast.success(message || "Display settings saved")
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to save")
+    }
+  }
+
+  const handleSaveDatabaseSettings = async () => {
+    try {
+      await updateDatabase.mutateAsync(databaseSettings)
+      toast.success("Database settings saved")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save database settings")
     }
   }
 
@@ -3477,6 +3504,112 @@ export function Settings() {
         <h2 className="text-lg font-semibold">Advanced</h2>
         <p className="text-sm text-muted-foreground">Advanced configuration options</p>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Database</CardTitle>
+          <CardDescription>
+            Store the preferred database backend and PostgreSQL connection details.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-3">
+            <Label>Backend</Label>
+            <div className="flex flex-col gap-3 sm:flex-row sm:gap-6">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="database-backend"
+                  value="sqlite"
+                  checked={databaseSettings.backend === "sqlite"}
+                  onChange={() => setDatabaseSettings({ ...databaseSettings, backend: "sqlite" })}
+                  className="accent-primary"
+                />
+                <span className="text-sm">SQLite</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="database-backend"
+                  value="postgresql"
+                  checked={databaseSettings.backend === "postgresql"}
+                  onChange={() => setDatabaseSettings({ ...databaseSettings, backend: "postgresql" })}
+                  className="accent-primary"
+                />
+                <span className="text-sm">PostgreSQL</span>
+              </label>
+            </div>
+          </div>
+
+          {databaseSettings.backend === "postgresql" && (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2 md:col-span-2">
+                <Label htmlFor="postgres-url">PostgreSQL Host / URL</Label>
+                <Input
+                  id="postgres-url"
+                  value={databaseSettings.postgres_url ?? ""}
+                  onChange={(e) =>
+                    setDatabaseSettings({ ...databaseSettings, postgres_url: e.target.value || null })
+                  }
+                  placeholder="localhost or postgres.example.com:5432"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="postgres-database">Database Name</Label>
+                <Input
+                  id="postgres-database"
+                  value={databaseSettings.postgres_database ?? ""}
+                  onChange={(e) =>
+                    setDatabaseSettings({ ...databaseSettings, postgres_database: e.target.value || null })
+                  }
+                  placeholder="teamarr"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="postgres-username">Username</Label>
+                <Input
+                  id="postgres-username"
+                  value={databaseSettings.postgres_username ?? ""}
+                  onChange={(e) =>
+                    setDatabaseSettings({ ...databaseSettings, postgres_username: e.target.value || null })
+                  }
+                  placeholder="teamarr"
+                />
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <Label htmlFor="postgres-password">Password</Label>
+                <Input
+                  id="postgres-password"
+                  type="password"
+                  value={databaseSettings.postgres_password ?? ""}
+                  onChange={(e) =>
+                    setDatabaseSettings({ ...databaseSettings, postgres_password: e.target.value || null })
+                  }
+                  placeholder="Enter PostgreSQL password"
+                />
+              </div>
+            </div>
+          )}
+
+          <p className="text-xs text-muted-foreground">
+            This stores your preferred database configuration in Teamarr. The active runtime backend
+            is still selected at startup, so changing this will require the app&apos;s startup config
+            to be updated and Teamarr to be restarted.
+          </p>
+
+          <Button
+            onClick={handleSaveDatabaseSettings}
+            disabled={updateDatabase.isPending}
+          >
+            {updateDatabase.isPending ? (
+              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4 mr-1" />
+            )}
+            Save
+          </Button>
+        </CardContent>
+      </Card>
 
       {/* Update Notifications */}
       <Card>

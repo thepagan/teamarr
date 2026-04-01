@@ -1526,6 +1526,21 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE settings SET schema_version = 75 WHERE id = 1")
         current_version = 75
 
+    # v76: Add stored database configuration settings
+    if current_version < 76:
+        _add_column_if_not_exists(
+            conn,
+            "settings",
+            "database_backend",
+            """TEXT DEFAULT 'sqlite' CHECK(database_backend IN ('sqlite', 'postgresql'))""",
+        )
+        _add_column_if_not_exists(conn, "settings", "postgres_url", "TEXT")
+        _add_column_if_not_exists(conn, "settings", "postgres_database", "TEXT")
+        _add_column_if_not_exists(conn, "settings", "postgres_username", "TEXT")
+        _add_column_if_not_exists(conn, "settings", "postgres_password", "TEXT")
+        conn.execute("UPDATE settings SET schema_version = 76 WHERE id = 1")
+        current_version = 76
+
 def _dedup_cross_group_channels(conn: sqlite3.Connection) -> None:
     """Merge duplicate channels that exist for the same event across groups.
 
