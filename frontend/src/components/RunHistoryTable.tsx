@@ -205,8 +205,8 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
       if (!q) return true
       return (
         f.stream_name.toLowerCase().includes(q) ||
-        f.extracted_team1?.toLowerCase().includes(q) ||
-        f.extracted_team2?.toLowerCase().includes(q) ||
+        f.parsed_team1?.toLowerCase().includes(q) ||
+        f.parsed_team2?.toLowerCase().includes(q) ||
         f.detected_league?.toLowerCase().includes(q) ||
         f.reason.toLowerCase().includes(q)
       )

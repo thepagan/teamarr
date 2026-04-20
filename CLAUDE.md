@@ -218,6 +218,7 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Dependencies | `pyproject.toml` |
 | League configs | `teamarr/database/schema.sql` |
 | Schema version | `teamarr/database/schema.sql` (v74) |
+| Schema version | `teamarr/database/schema.sql` (v76) |
 | Schema reconciliation | `teamarr/database/reconciliation.py` |
 | Provider registration | `teamarr/providers/__init__.py` |
 
@@ -242,7 +243,7 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 ## Key Subsystems
 
 **Template Engine** (`teamarr/templates/`):
-- 193 variables in `variables/` (17 categories)
+- 201 variables in `variables/` (17 categories)
 - 20 condition evaluators in `conditions.py`
 - Suffix rules: `.next`, `.last` for multi-game scenarios
 

@@ -1125,7 +1125,6 @@ export function Settings() {
       setNfhsStateCodesInput(nfhsData.state_codes.join(", "))
     }
   }, [nfhsData])
-
   // Sync emby state when data loads
   useEffect(() => {
     if (embyData) {

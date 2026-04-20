@@ -197,7 +197,7 @@ class TeamProcessor:
     ) -> BatchTeamResult:
         """Process all active teams.
 
-        ESPN teams are processed in parallel (up to MAX_WORKERS).
+        Most providers (ESPN, HockeyTech, MLBStats) are processed in parallel.
         TSDB teams are processed sequentially (rate limit is ~10/min).
 
         Args:
@@ -218,19 +218,20 @@ class TeamProcessor:
         total_teams = len(teams)
         processed_count = 0
 
-        # Separate teams by provider
-        espn_teams = [t for t in teams if t.provider == "espn"]
+        # Separate teams by provider: TSDB is rate-limited (sequential),
+        # all other providers (ESPN, HockeyTech, MLBStats) are parallel
+        parallel_teams = [t for t in teams if t.provider != "tsdb"]
         tsdb_teams = [t for t in teams if t.provider == "tsdb"]
         other_teams = [t for t in teams if t.provider not in {"espn", "tsdb"}]
 
         channels: list[dict] = []
 
         # Process ESPN teams in parallel
-        if espn_teams:
-            num_workers = min(MAX_WORKERS, len(espn_teams))
+        if parallel_teams:
+            num_workers = min(MAX_WORKERS, len(parallel_teams))
             logger.info(
-                "[TEAM_BATCH] ESPN: %d teams, %d workers",
-                len(espn_teams),
+                "[TEAM_BATCH] Parallel: %d teams, %d workers",
+                len(parallel_teams),
                 num_workers,
             )
 
@@ -257,7 +258,7 @@ class TeamProcessor:
 
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 future_to_team = {
-                    executor.submit(process_with_tracking, team): team for team in espn_teams
+                    executor.submit(process_with_tracking, team): team for team in parallel_teams
                 }
 
                 for future in as_completed(future_to_team):
@@ -298,7 +299,7 @@ class TeamProcessor:
                             msg = f"Finished {team.team_name}"
                         progress_callback(processed_count, total_teams, msg)
 
-            logger.debug("[TEAM_BATCH] ESPN parallel processing complete")
+            logger.debug("[TEAM_BATCH] Parallel processing complete")
 
         # Process non-ESPN, non-TSDB teams in parallel
         if other_teams:

@@ -585,7 +585,11 @@ class EventGroupProcessor:
                     home_team=r.event.home_team.name if r.event else None,
                     away_team=r.event.away_team.name if r.event else None,
                     league=r.league,
-                    start_time=r.event.start_time.isoformat() if r.event else None,
+                    start_time=(
+                        r.event.start_time.isoformat()
+                        if r.event and r.event.start_time
+                        else None
+                    ),
                     from_cache=getattr(r, "from_cache", False),
                     exclusion_reason=r.exclusion_reason,
                 )

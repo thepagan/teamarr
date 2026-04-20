@@ -849,8 +849,6 @@ def get_database_settings(conn: Connection) -> DatabaseSettings:
     if not row:
         return DatabaseSettings()
     return _build_database_settings(row)
-
-
 def get_emby_settings(conn: Connection) -> EmbySettings:
     """Get Emby integration settings.
 

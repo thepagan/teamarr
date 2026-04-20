@@ -275,8 +275,8 @@ export interface FailedMatch {
   reason: string
   exclusion_reason: string | null
   detail: string | null
-  extracted_team1: string | null
-  extracted_team2: string | null
+  parsed_team1: string | null
+  parsed_team2: string | null
   detected_league: string | null
   created_at: string
 }

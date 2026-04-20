@@ -207,17 +207,18 @@ export function EventMatcherModal({
   const sortedLeagues = useMemo(() => {
     if (!leaguesData?.leagues) return []
     return [...leaguesData.leagues].sort((a, b) => {
-      const sportCompare = a.sport.localeCompare(b.sport)
+      const sportCompare = (a.sport ?? "").localeCompare(b.sport ?? "")
       if (sportCompare !== 0) return sportCompare
-      return a.name.localeCompare(b.name)
+      return (a.name ?? a.slug ?? "").localeCompare(b.name ?? b.slug ?? "")
     })
   }, [leaguesData?.leagues])
 
   const leaguesBySport = useMemo(() => {
     const grouped: Record<string, CachedLeague[]> = {}
     for (const l of sortedLeagues) {
-      if (!grouped[l.sport]) grouped[l.sport] = []
-      grouped[l.sport].push(l)
+      const sport = l.sport ?? "Unknown"
+      if (!grouped[sport]) grouped[sport] = []
+      grouped[sport].push(l)
     }
     return grouped
   }, [sortedLeagues])

@@ -461,7 +461,6 @@ export function useUpdateNFHSSettings() {
     },
   })
 }
-
 // Emby Settings Hooks
 export function useEmbySettings() {
   return useQuery({

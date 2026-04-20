@@ -93,6 +93,7 @@ class DetectionKeywordService:
     _card_segment_patterns: ClassVar[list[tuple[Pattern[str], str]] | None] = None
     _exclusion_patterns: ClassVar[list[Pattern[str]] | None] = None
     _separators: ClassVar[list[str] | None] = None
+    _league_alias_map: ClassVar[dict[str, str] | None] = None
 
     # ==========================================================================
     # Pattern Accessors
@@ -511,8 +512,47 @@ class DetectionKeywordService:
         return cls.detect_event_type(text) == "EVENT_CARD"
 
     @classmethod
+    def _get_league_alias_map(cls) -> dict[str, str]:
+        """Build a map from league aliases/short codes to canonical league_code.
+
+        Maps league_id and league_alias (lowercased) to the primary key league_code.
+        E.g., 'ncaam' → 'mens-college-basketball', 'epl' → 'eng.1'.
+        """
+        if cls._league_alias_map is None:
+            cls._league_alias_map = {}
+            try:
+                from teamarr.database import get_db
+
+                with get_db() as conn:
+                    rows = conn.execute(
+                        "SELECT league_code, league_id, league_alias FROM leagues"
+                    ).fetchall()
+                    for row in rows:
+                        canonical = row["league_code"]
+                        if row["league_id"]:
+                            cls._league_alias_map[row["league_id"].lower()] = canonical
+                        if row["league_alias"]:
+                            cls._league_alias_map[row["league_alias"].lower()] = canonical
+            except Exception as e:
+                logger.debug("[DETECT_SVC] Could not load league alias map: %s", e)
+        return cls._league_alias_map
+
+    @classmethod
+    def _resolve_league_code(cls, code: str) -> str:
+        """Resolve a league code alias to its canonical league_code.
+
+        If the code is already canonical (exists as a league_code PK), returns as-is.
+        Otherwise checks league_id and league_alias columns for a match.
+        """
+        alias_map = cls._get_league_alias_map()
+        return alias_map.get(code.lower(), code)
+
+    @classmethod
     def detect_league(cls, text: str) -> str | list[str] | None:
         """Detect league code from text.
+
+        Resolves aliases/short codes to canonical league_code automatically.
+        E.g., user hint 'ncaam' → 'mens-college-basketball'.
 
         Args:
             text: Stream name to check
@@ -522,7 +562,9 @@ class DetectionKeywordService:
         """
         for pattern, code in cls.get_league_hints():
             if pattern.search(text):
-                return code
+                if isinstance(code, list):
+                    return [cls._resolve_league_code(c) for c in code]
+                return cls._resolve_league_code(code)
         return None
 
     @classmethod
@@ -622,6 +664,7 @@ class DetectionKeywordService:
         cls._card_segment_patterns = None
         cls._exclusion_patterns = None
         cls._separators = None
+        cls._league_alias_map = None
         logger.info("[DETECT_SVC] Pattern cache invalidated")
 
     @classmethod
