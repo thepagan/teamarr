@@ -1561,7 +1561,7 @@ def _dedup_cross_group_channels(conn: sqlite3.Connection) -> None:
         GROUP BY event_id, event_provider,
                  COALESCE(exception_keyword, ''),
                  primary_stream_id
-        HAVING cnt > 1
+        HAVING COUNT(*) > 1
     """)
     dup_groups = cursor.fetchall()
 

@@ -376,7 +376,7 @@ class ChannelReconciler:
             GROUP BY mc.event_id, mc.event_provider,
                      COALESCE(mc.exception_keyword, ''),
                      mc.primary_stream_id
-            HAVING channel_count > 1
+            HAVING COUNT(*) > 1
         """)
         duplicates = [dict(row) for row in cursor.fetchall()]
 
