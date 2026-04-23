@@ -143,7 +143,6 @@ def _reconcile_table(
                 "[RECONCILE] Added %s.%s (%s)", table, col_name, col_def
             )
         except DB_OPERATIONAL_EXCEPTIONS as e:
-        except DB_OPERATIONAL_EXCEPTIONS as e:
             msg = f"Failed to add {table}.{col_name}: {e}"
             result.errors.append(msg)
             logger.warning("[RECONCILE] %s", msg)
