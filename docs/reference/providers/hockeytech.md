@@ -68,6 +68,7 @@ feed=modulekit&key={client_key}&view={view}&client_code={league_code}&fmt=json&l
 | `schedule` | Full season schedule |
 | `scorebar` | Live scores |
 | `teamsbyseason` | Teams in league |
+| `seasons` | Season metadata (playoff flag, season names, dates) |
 
 The `provider_league_id` in `schema.sql` is the `client_code` value (e.g., `ohl`, `ahl`, `lhjmq` for QMJHL).
 
@@ -77,6 +78,7 @@ The `provider_league_id` in `schema.sql` is the `client_code` value (e.g., `ohl`
 |------|-----|
 | Full season schedule | 30 minutes |
 | Teams | 24 hours |
+| Seasons metadata | 24 hours |
 | Past games | 7 days |
 | Today's games | 30 minutes |
 | Tomorrow's games | 4 hours |
@@ -91,6 +93,7 @@ The provider fetches the full season schedule and caches it, then filters by dat
 - **Lookback**: Scans 7 days back to resolve `.last` template variables
 - **QMJHL client code**: Uses `lhjmq` (French: Ligue de hockey junior majeur du Québec)
 - **Thread-safe**: Connection pooling with configurable limits
+- **Season type via seasons view**: HockeyTech's `schedule` feed leaves `game_type` empty for every game, but each game has a `season_id`. The separate `seasons` view is joined in to map `season_id` → canonical season_type: `playoff == "1"` → `postseason`; `season_name` containing `preseason` / `pre-season` / `exhibition` → `preseason`; anything else → `regular`. Showcase/All-Star seasons (e.g. "AHL 2026 All-Star Challenge", "OHL Top Prospects") fall into `regular` since they have no playoff flag and no preseason keyword.
 
 ## File Locations
 

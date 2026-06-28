@@ -14,6 +14,8 @@ from teamarr.templates.context import (
     TemplateContext,
 )
 from teamarr.templates.variables.home_away import (
+    extract_broadcast_feed,
+    extract_broadcast_feed_team,
     extract_feed_home_away,
     extract_feed_team,
     extract_feed_team_abbrev,
@@ -64,7 +66,8 @@ def _make_event() -> Event:
 
 
 def _context_with_feed(
-    feed_team: Team | None, event: Event | None = None,
+    feed_team: Team | None,
+    event: Event | None = None,
 ) -> tuple[TemplateContext, GameContext | None]:
     game_ctx = None
     if event:
@@ -244,3 +247,53 @@ class TestFeedTeamEdgeCases:
         team_no_short = _make_team("4", "Tampa Bay Rays", "", "TB")
         ctx, _ = _context_with_feed(team_no_short)
         assert extract_feed_team_short(ctx, None) == "Tampa Bay Rays"
+
+
+# ===========================================================================
+# Broadcast feed labels (#195)
+# ===========================================================================
+
+
+class TestBroadcastFeed:
+    """{broadcast_feed} returns 'Home Team Feed' / 'Away Team Feed' / ''."""
+
+    def test_home_feed(self):
+        event = _make_event()
+        ctx, gc = _context_with_feed(HOME, event)
+        assert extract_broadcast_feed(ctx, gc) == "Home Team Feed"
+
+    def test_away_feed(self):
+        event = _make_event()
+        ctx, gc = _context_with_feed(AWAY, event)
+        assert extract_broadcast_feed(ctx, gc) == "Away Team Feed"
+
+    def test_no_feed_team_returns_empty(self):
+        ctx, gc = _context_with_feed(None, _make_event())
+        assert extract_broadcast_feed(ctx, gc) == ""
+
+    def test_no_game_context_returns_empty(self):
+        # Without game_ctx we can't tell home vs away, so render nothing
+        # and let the resolver's whitespace cleanup drop the orphan phrase.
+        ctx, _ = _context_with_feed(HOME)
+        assert extract_broadcast_feed(ctx, None) == ""
+
+
+class TestBroadcastFeedTeam:
+    """{broadcast_feed_team} returns '{Team Name} Feed' or ''."""
+
+    def test_with_feed_team(self):
+        ctx, gc = _context_with_feed(HOME, _make_event())
+        assert extract_broadcast_feed_team(ctx, gc) == "Baltimore Orioles Feed"
+
+    def test_away_team_feed(self):
+        ctx, gc = _context_with_feed(AWAY, _make_event())
+        assert extract_broadcast_feed_team(ctx, gc) == "New York Yankees Feed"
+
+    def test_no_feed_team_returns_empty(self):
+        ctx, gc = _context_with_feed(None, _make_event())
+        assert extract_broadcast_feed_team(ctx, gc) == ""
+
+    def test_no_game_context_still_works(self):
+        # Unlike broadcast_feed, this only needs feed_team — no home/away check.
+        ctx, _ = _context_with_feed(HOME)
+        assert extract_broadcast_feed_team(ctx, None) == "Baltimore Orioles Feed"

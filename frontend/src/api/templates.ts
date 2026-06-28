@@ -80,7 +80,7 @@ export interface Template {
   xmltv_flags: XmltvFlags | null
   xmltv_video: XmltvVideo | null
   xmltv_categories: string[] | null
-  categories_apply_to: string
+  xmltv_filler_categories: string[] | null
 
   // Filler: Pregame
   pregame_enabled: boolean
@@ -132,7 +132,7 @@ export interface TemplateCreate {
   xmltv_flags?: XmltvFlags | null
   xmltv_video?: XmltvVideo | null
   xmltv_categories?: string[] | null
-  categories_apply_to?: string
+  xmltv_filler_categories?: string[] | null
 
   // Filler: Pregame
   pregame_enabled?: boolean

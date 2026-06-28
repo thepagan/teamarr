@@ -1,8 +1,12 @@
 """Playoff and season type template variables.
 
 Variables for identifying game type (playoff, preseason, regular season).
+All comparisons use canonical season_type constants from core; providers are
+responsible for mapping their native values to these constants before the
+Event reaches the template layer.
 """
 
+from teamarr.core import SEASON_POSTSEASON, SEASON_PRESEASON, SEASON_REGULAR
 from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
@@ -12,7 +16,7 @@ from teamarr.templates.variables.registry import (
 
 
 def _get_season_type(game_ctx: GameContext | None) -> str:
-    """Get season type from event."""
+    """Get canonical season_type from event (one of SEASON_* or '')."""
     if not game_ctx or not game_ctx.event:
         return ""
     return game_ctx.event.season_type or ""
@@ -22,7 +26,7 @@ def _get_season_type(game_ctx: GameContext | None) -> str:
     name="season_type",
     category=Category.PLAYOFFS,
     suffix_rules=SuffixRules.ALL,
-    description="Season type (e.g., 'Regular Season', 'Playoffs', 'Preseason')",
+    description="Season type ('regular', 'postseason', 'preseason', 'offseason')",
 )
 def extract_season_type(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     return _get_season_type(game_ctx)
@@ -35,10 +39,7 @@ def extract_season_type(ctx: TemplateContext, game_ctx: GameContext | None) -> s
     description="'true' if playoff/postseason game",
 )
 def extract_is_playoff(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
-    season_type = _get_season_type(game_ctx).lower()
-    if "post" in season_type or "playoff" in season_type:
-        return "true"
-    return ""
+    return "true" if _get_season_type(game_ctx) == SEASON_POSTSEASON else ""
 
 
 @register_variable(
@@ -48,10 +49,7 @@ def extract_is_playoff(ctx: TemplateContext, game_ctx: GameContext | None) -> st
     description="'true' if preseason/exhibition game",
 )
 def extract_is_preseason(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
-    season_type = _get_season_type(game_ctx).lower()
-    if "pre" in season_type or "exhibition" in season_type:
-        return "true"
-    return ""
+    return "true" if _get_season_type(game_ctx) == SEASON_PRESEASON else ""
 
 
 @register_variable(
@@ -61,11 +59,4 @@ def extract_is_preseason(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     description="'true' if regular season game",
 )
 def extract_is_regular_season(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
-    season_type = _get_season_type(game_ctx).lower()
-    if not season_type:
-        return ""
-    # Regular season if not playoff and not preseason
-    if "post" not in season_type and "playoff" not in season_type:
-        if "pre" not in season_type and "exhibition" not in season_type:
-            return "true"
-    return ""
+    return "true" if _get_season_type(game_ctx) == SEASON_REGULAR else ""

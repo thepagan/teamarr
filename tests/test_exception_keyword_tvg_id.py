@@ -12,9 +12,8 @@ from unittest.mock import patch
 import pytest
 
 from teamarr.consumers.lifecycle.types import generate_event_tvg_id, slugify_keyword
-from teamarr.templates.context import TemplateContext, TeamChannelContext
+from teamarr.templates.context import TeamChannelContext, TemplateContext
 from teamarr.templates.resolver import TemplateResolver
-
 
 # =============================================================================
 # SLUGIFY KEYWORD
@@ -57,42 +56,88 @@ class TestSlugifyKeyword:
 
 
 class TestGenerateEventTvgId:
-    """Test tvg-id generation with exception keyword support."""
+    """Test tvg-id generation with exception keyword support.
+
+    All five parameters are required (no defaults on discriminators). This is
+    intentional — tests pass explicit None to document which discriminators
+    each scenario exercises and which it intentionally omits, mirroring the
+    discipline production callers must follow.
+    """
 
     def test_basic_no_keyword(self):
-        assert generate_event_tvg_id("401547679") == "teamarr-event-401547679"
+        assert (
+            generate_event_tvg_id("401547679", "espn", None, None, None)
+            == "teamarr-event-401547679"
+        )
 
     def test_with_segment(self):
-        result = generate_event_tvg_id("401547679", segment="prelims")
+        result = generate_event_tvg_id("401547679", "espn", "prelims", None, None)
         assert result == "teamarr-event-401547679-prelims"
 
     def test_with_keyword(self):
-        result = generate_event_tvg_id("401547679", exception_keyword="Spanish")
+        result = generate_event_tvg_id("401547679", "espn", None, "Spanish", None)
         assert result == "teamarr-event-401547679-spanish"
 
     def test_with_segment_and_keyword(self):
-        result = generate_event_tvg_id(
-            "401547679", segment="main_card", exception_keyword="French"
-        )
+        result = generate_event_tvg_id("401547679", "espn", "main_card", "French", None)
         assert result == "teamarr-event-401547679-main_card-french"
 
     def test_none_keyword_same_as_no_keyword(self):
-        assert generate_event_tvg_id("123", exception_keyword=None) == "teamarr-event-123"
+        assert generate_event_tvg_id("123", "espn", None, None, None) == "teamarr-event-123"
 
     def test_empty_keyword_same_as_no_keyword(self):
-        assert generate_event_tvg_id("123", exception_keyword="") == "teamarr-event-123"
+        assert generate_event_tvg_id("123", "espn", None, "", None) == "teamarr-event-123"
 
     def test_different_keywords_produce_different_ids(self):
-        id_spanish = generate_event_tvg_id("123", exception_keyword="Spanish")
-        id_french = generate_event_tvg_id("123", exception_keyword="French")
-        id_none = generate_event_tvg_id("123")
+        id_spanish = generate_event_tvg_id("123", "espn", None, "Spanish", None)
+        id_french = generate_event_tvg_id("123", "espn", None, "French", None)
+        id_none = generate_event_tvg_id("123", "espn", None, None, None)
         assert id_spanish != id_french
         assert id_spanish != id_none
         assert id_french != id_none
 
     def test_multi_word_keyword(self):
-        result = generate_event_tvg_id("123", exception_keyword="4K HDR")
+        result = generate_event_tvg_id("123", "espn", None, "4K HDR", None)
         assert result == "teamarr-event-123-4k-hdr"
+
+    def test_with_feed_team_id(self):
+        result = generate_event_tvg_id("401547679", "espn", None, None, "23")
+        assert result == "teamarr-event-401547679-feed-23"
+
+    def test_feed_team_id_distinct_from_no_feed(self):
+        # Same event, three feed scenarios — must produce three distinct tvg_ids
+        # so XMLTV channel/programme entries don't collide and Dispatcharr can
+        # show the correct EPG for each feed-separated channel.
+        no_feed = generate_event_tvg_id("401", "espn", None, None, None)
+        home_feed = generate_event_tvg_id("401", "espn", None, None, "10")
+        away_feed = generate_event_tvg_id("401", "espn", None, None, "20")
+        assert no_feed != home_feed != away_feed != no_feed
+        assert no_feed == "teamarr-event-401"
+        assert home_feed == "teamarr-event-401-feed-10"
+        assert away_feed == "teamarr-event-401-feed-20"
+
+    def test_feed_team_id_combines_with_segment_and_keyword(self):
+        result = generate_event_tvg_id("401", "espn", "prelims", "Spanish", "23")
+        assert result == "teamarr-event-401-prelims-spanish-feed-23"
+
+    def test_none_feed_team_id_unchanged(self):
+        # Backwards compat: no feed_team_id matches the pre-fix tvg_id format
+        assert generate_event_tvg_id("123", "espn", None, None, None) == "teamarr-event-123"
+
+    def test_feed_team_id_slugified(self):
+        # Provider IDs are usually numeric but the function accepts strings —
+        # if a provider ever uses a non-slug-safe ID, slugify guards it.
+        result = generate_event_tvg_id("123", "espn", None, None, "ABC.42")
+        assert result == "teamarr-event-123-feed-abc-42"
+
+    def test_missing_args_is_typeerror(self):
+        # Required-args discipline: catching the v2.4.4-style miss at write time.
+        import pytest
+
+        with pytest.raises(TypeError):
+            generate_event_tvg_id("123")  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            generate_event_tvg_id("123", "espn", None, None)  # type: ignore[call-arg]
 
 
 # =============================================================================
@@ -159,9 +204,7 @@ class TestTemplateContextExtraVars:
         mock_build = self._make_build_vars({"exception_keyword": ""})
 
         with patch.object(resolver, "_build_all_variables", side_effect=mock_build):
-            result = resolver.resolve(
-                "Game ({exception_keyword})", minimal_context
-            )
+            result = resolver.resolve("Game ({exception_keyword})", minimal_context)
         assert result == "Game (French)"
 
     def test_extra_vars_empty_keyword_cleaned_up(self, minimal_context):
@@ -171,9 +214,7 @@ class TestTemplateContextExtraVars:
         mock_build = self._make_build_vars({"exception_keyword": ""})
 
         with patch.object(resolver, "_build_all_variables", side_effect=mock_build):
-            result = resolver.resolve(
-                "Game ({exception_keyword})", minimal_context
-            )
+            result = resolver.resolve("Game ({exception_keyword})", minimal_context)
         # Resolver cleans up empty wrappers
         assert result == "Game"
 
@@ -191,11 +232,13 @@ class TestTemplateContextExtraVars:
         """Extra vars work alongside normal template variables."""
         resolver = TemplateResolver()
         minimal_context.extra_vars = {"exception_keyword": "Spanish"}
-        mock_build = self._make_build_vars({
-            "exception_keyword": "",
-            "home_team": "Lakers",
-            "away_team": "Celtics",
-        })
+        mock_build = self._make_build_vars(
+            {
+                "exception_keyword": "",
+                "home_team": "Lakers",
+                "away_team": "Celtics",
+            }
+        )
 
         with patch.object(resolver, "_build_all_variables", side_effect=mock_build):
             result = resolver.resolve(

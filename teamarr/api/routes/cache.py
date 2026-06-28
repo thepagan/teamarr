@@ -6,7 +6,6 @@ Provides endpoints for cache management:
 - GET /cache/refresh/status - Get refresh progress
 - GET /cache/leagues - List cached leagues
 - GET /cache/teams/search - Search teams by name
-- GET /cache/candidate-leagues - Find candidate leagues for a matchup
 """
 
 import json
@@ -257,36 +256,6 @@ def search_teams(
     }
 
 
-@router.get("/candidate-leagues")
-def find_candidate_leagues(
-    team1: str = Query(..., min_length=2, description="First team name"),
-    team2: str = Query(..., min_length=2, description="Second team name"),
-    sport: str | None = Query(None, description="Filter by sport"),
-) -> dict:
-    """Find leagues where both teams exist.
-
-    Used for event matching - given two team names, find which leagues
-    they could both be playing in.
-
-    Args:
-        team1: First team name
-        team2: Second team name
-        sport: Optional sport filter
-
-    Returns:
-        List of (league, provider) tuples where both teams exist
-    """
-    cache_service = create_cache_service(get_db)
-    candidates = cache_service.find_candidate_leagues(team1, team2, sport)
-
-    return {
-        "team1": team1,
-        "team2": team2,
-        "candidates": [{"league": league, "provider": provider} for league, provider in candidates],
-        "count": len(candidates),
-    }
-
-
 @router.get("/leagues/{league_slug}/teams")
 def get_league_teams(league_slug: str) -> list[dict]:
     """Get all teams for a specific league.
@@ -301,62 +270,6 @@ def get_league_teams(league_slug: str) -> list[dict]:
 
     with get_db() as conn:
         return db_get_league_teams(conn, league_slug)
-
-
-@router.get("/team-leagues/{provider}/{provider_team_id}")
-def get_team_leagues(provider: str, provider_team_id: str) -> dict:
-    """Get all leagues a team plays in.
-
-    Used for multi-league display (e.g., soccer teams playing in
-    domestic league, Champions League, cup competitions, etc.)
-
-    Args:
-        provider: Provider name ('espn' or 'tsdb')
-        provider_team_id: Team ID from the provider
-
-    Returns:
-        Dict with team info and list of leagues
-    """
-    from teamarr.database.team_cache import get_team_leagues as db_get_team_leagues
-
-    # Query leagues directly from database
-    with get_db() as conn:
-        leagues = db_get_team_leagues(conn, provider, provider_team_id)
-
-    # Get league details for each
-    cache_service = create_cache_service(get_db)
-    all_leagues = cache_service.get_leagues()
-    league_lookup = {lg.slug: lg for lg in all_leagues}
-
-    league_details = []
-    for league_slug in leagues:
-        if league_slug in league_lookup:
-            entry = league_lookup[league_slug]
-            league_details.append(
-                {
-                    "slug": entry.slug,
-                    "name": entry.name,
-                    "sport": entry.sport,
-                    "logo_url": entry.logo_url,
-                }
-            )
-        else:
-            # League not found in cache, add basic info
-            league_details.append(
-                {
-                    "slug": league_slug,
-                    "name": league_slug.upper(),
-                    "sport": None,
-                    "logo_url": None,
-                }
-            )
-
-    return {
-        "provider": provider,
-        "provider_team_id": provider_team_id,
-        "leagues": league_details,
-        "count": len(league_details),
-    }
 
 
 @router.get("/team-picker-leagues")

@@ -32,21 +32,22 @@ Teamarr's backend is a FastAPI application serving a REST API at `/api/v1/` and 
 | `detection_keywords.py` | 9 | Detection keyword CRUD, import/export |
 | `subscription.py` | 9 | Global/per-group subscription config, soccer mode |
 | `variables.py` | 3 | Template variable discovery and introspection |
-| `migration.py` | 5 | V1 to V2 database migration |
 | `backup.py` | 11 | Database backup creation, restore, compression |
 
 ## Application Startup
 
 The lifespan handler in `app.py` orchestrates startup in phases:
 
-1. **INITIALIZING** — Database init, migration detection
+1. **INITIALIZING** — Database init and integrity check
 2. **REFRESHING_CACHE** — Team/league cache refresh from providers (skippable via `SKIP_CACHE_REFRESH`)
 3. **LOADING_SETTINGS** — Display settings, timezone from DB
 4. **CONNECTING_DISPATCHARR** — Lazy factory initialization
 5. **STARTING_SCHEDULER** — Background EPG cron scheduler
 6. **READY** — Fully operational
 
-If a V1 database is detected, only migration endpoints are served (all others return 503).
+V1 (Teamarr 1.x) databases are no longer supported. If a V1 database is detected on
+startup the application refuses to start with a clear error pointing the user to
+move or delete the file before retrying.
 
 ## Generation Status
 

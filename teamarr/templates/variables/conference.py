@@ -7,6 +7,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -18,6 +19,7 @@ from teamarr.templates.variables.registry import (
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's college conference name",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_college_conference(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.conference:
@@ -30,6 +32,7 @@ def extract_college_conference(ctx: TemplateContext, game_ctx: GameContext | Non
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's college conference abbreviation",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_college_conference_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.conference_abbrev:
@@ -45,6 +48,7 @@ def extract_college_conference_abbrev(ctx: TemplateContext, game_ctx: GameContex
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's pro conference (e.g., 'NFC', 'Eastern')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_pro_conference(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.conference:
@@ -57,6 +61,7 @@ def extract_pro_conference(ctx: TemplateContext, game_ctx: GameContext | None) -
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's pro conference abbreviation",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_pro_conference_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.conference_abbrev:
@@ -69,6 +74,7 @@ def extract_pro_conference_abbrev(ctx: TemplateContext, game_ctx: GameContext | 
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's pro division (e.g., 'NFC North')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_pro_division(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.division:
@@ -84,6 +90,7 @@ def extract_pro_division(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's college conference",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_college_conference(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats and game_ctx.opponent_stats.conference:
@@ -96,6 +103,7 @@ def extract_opponent_college_conference(ctx: TemplateContext, game_ctx: GameCont
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's college conference abbreviation",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_college_conference_abbrev(
     ctx: TemplateContext, game_ctx: GameContext | None
@@ -110,6 +118,7 @@ def extract_opponent_college_conference_abbrev(
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's pro conference",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_pro_conference(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats and game_ctx.opponent_stats.conference:
@@ -122,6 +131,7 @@ def extract_opponent_pro_conference(ctx: TemplateContext, game_ctx: GameContext 
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's pro conference abbreviation",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_pro_conference_abbrev(
     ctx: TemplateContext, game_ctx: GameContext | None
@@ -136,6 +146,7 @@ def extract_opponent_pro_conference_abbrev(
     category=Category.CONFERENCE,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's pro division",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_pro_division(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats and game_ctx.opponent_stats.division:

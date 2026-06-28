@@ -10,6 +10,7 @@ from teamarr.templates.variables import (  # noqa: F401 - side effect imports
     conference,
     home_away,
     identity,
+    motorsports,
     odds,
     outcome,
     playoffs,
@@ -20,12 +21,14 @@ from teamarr.templates.variables import (  # noqa: F401 - side effect imports
     standings,
     statistics,
     streaks,
+    summary,
     venue,
 )
 from teamarr.templates.variables import datetime as datetime_vars  # noqa: F401
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     VariableDefinition,
     VariableRegistry,
     get_registry,
@@ -35,6 +38,7 @@ from teamarr.templates.variables.registry import (
 __all__ = [
     "Category",
     "SuffixRules",
+    "TemplateScope",
     "VariableDefinition",
     "VariableRegistry",
     "get_registry",

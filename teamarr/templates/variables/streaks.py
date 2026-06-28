@@ -15,6 +15,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -50,6 +51,7 @@ def _get_streak_info(stats: TeamStats | None) -> tuple[str, int, str]:
     category=Category.STREAKS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's current streak formatted (e.g., 'W3' or 'L2')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     formatted, _, _ = _get_streak_info(ctx.team_stats)
@@ -61,6 +63,7 @@ def extract_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     category=Category.STREAKS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's streak as absolute value (e.g., '3' for either W3 or L3)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_streak_length(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     _, length, _ = _get_streak_info(ctx.team_stats)
@@ -72,6 +75,7 @@ def extract_streak_length(ctx: TemplateContext, game_ctx: GameContext | None) ->
     category=Category.STREAKS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's streak direction: 'win' or 'loss'",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_streak_type(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     _, _, streak_type = _get_streak_info(ctx.team_stats)
@@ -83,6 +87,7 @@ def extract_streak_type(ctx: TemplateContext, game_ctx: GameContext | None) -> s
     category=Category.STREAKS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's winning streak length (empty if on losing streak)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_win_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     _, length, streak_type = _get_streak_info(ctx.team_stats)
@@ -94,6 +99,7 @@ def extract_win_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> st
     category=Category.STREAKS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's losing streak length (empty if on winning streak)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_loss_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     _, length, streak_type = _get_streak_info(ctx.team_stats)
@@ -110,6 +116,7 @@ def extract_loss_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> s
     category=Category.STREAKS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's current streak formatted (e.g., 'W3' or 'L2')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx:
@@ -123,6 +130,7 @@ def extract_opponent_streak(ctx: TemplateContext, game_ctx: GameContext | None) 
     category=Category.STREAKS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's streak as absolute value (e.g., '3')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_streak_length(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx:
@@ -136,6 +144,7 @@ def extract_opponent_streak_length(ctx: TemplateContext, game_ctx: GameContext |
     category=Category.STREAKS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's streak direction: 'win' or 'loss'",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_streak_type(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx:
@@ -149,6 +158,7 @@ def extract_opponent_streak_type(ctx: TemplateContext, game_ctx: GameContext | N
     category=Category.STREAKS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's winning streak length (empty if on losing streak)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_win_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx:
@@ -162,6 +172,7 @@ def extract_opponent_win_streak(ctx: TemplateContext, game_ctx: GameContext | No
     category=Category.STREAKS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's losing streak length (empty if on winning streak)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_loss_streak(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx:

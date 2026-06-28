@@ -60,19 +60,6 @@ export interface BackupSettingsUpdate {
   path?: string
 }
 
-// =============================================================================
-// LEGACY BACKUP/RESTORE FUNCTIONS
-// =============================================================================
-
-/**
- * Download a backup of the database (legacy endpoint).
- * Opens the download in a new tab/triggers browser download.
- */
-export function downloadBackup(): void {
-  // Use direct URL for file download (not fetch)
-  window.location.href = "/api/v1/backup"
-}
-
 /**
  * Restore database from uploaded backup file.
  */

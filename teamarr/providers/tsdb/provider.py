@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 
 from teamarr.core import (
+    SEASON_POSTSEASON,
     Event,
     EventStatus,
     LeagueMappingSource,
@@ -18,6 +19,7 @@ from teamarr.core import (
     Venue,
 )
 from teamarr.providers.tsdb.client import TSDBClient
+from teamarr.providers.tsdb.racing import parse_racing_events
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,29 @@ class TSDBProvider(SportsProvider):
 
     # Days to scan backwards for .last variable resolution
     DAYS_BACK = 7
+
+    # Leagues whose schedules TSDB only serves via the full-season endpoint
+    # (eventsday.php / eventsnextleague.php return empty). The season fallback
+    # is gated to these so ordinary leagues with empty individual dates don't
+    # fire a per-date fetch — that's what caused the eventsround.php 404 storm
+    # in GH #217. Add a league here only if confirmed sparse on the day endpoints.
+    SEASON_FALLBACK_LEAGUES = frozenset({"unrivaled"})
+
+    # TSDB event `intRound` values that indicate postseason across leagues.
+    # Per TheSportsDB documentation (and verified on 2026-04-22 against NBA
+    # 2024 Playoffs + NHL 2024 Stanley Cup Final + IPL 2024 playoffs):
+    #   125 = Quarter-Final
+    #   150 = Semi-Final / Conference Finals
+    #   160 = First Round / Play-in
+    #   170 = Playoff Semi-Final (e.g. NBA Conference Semis)
+    #   180 = Playoff Final (e.g. NBA Conference Finals)
+    #   200 = Final / Championship
+    # Not every TSDB league uses these codes (AFL and NRL continue their normal
+    # round numbering through finals, e.g. NRL Grand Final shows intRound=24).
+    # For those leagues intRound stays in the low-integer range and maps to
+    # None — we can't distinguish playoffs from regular season without extra
+    # league-specific heuristics we don't want to maintain.
+    _POSTSEASON_ROUND_CODES = frozenset({"125", "150", "160", "170", "180", "200"})
 
     def __init__(
         self,
@@ -69,11 +94,24 @@ class TSDBProvider(SportsProvider):
     def get_events(self, league: str, target_date: date) -> list[Event]:
         """Get events for a league on a specific date.
 
-        Tries multiple endpoints in order:
+        Racing leagues (WEC, IMSA) are session-based: TSDB serves them only
+        via eventsseason.php, never eventsday.php/eventsnextleague.php (both
+        return "Invalid League ID" for these leagues), so they take a fully
+        separate path through `_get_racing_events`.
+
+        Other leagues try multiple endpoints in order:
         1. eventsday.php - Date-specific (works for most leagues)
         2. eventsnextleague.php - Upcoming events filtered by date
-        3. eventsround.php - Full season events filtered by date (Unrivaled, etc.)
+        3. eventsseason.php - Full season events filtered by date, gated to
+           SEASON_FALLBACK_LEAGUES (sparse leagues like Unrivaled)
         """
+        if self._client.get_sport(league) == "racing":
+            return [
+                event
+                for event in self._get_racing_events(league)
+                if any(s.start_time.date() == target_date for s in event.sessions)
+            ]
+
         date_str = target_date.strftime("%Y-%m-%d")
 
         # Try date-specific endpoint first
@@ -101,9 +139,12 @@ class TSDBProvider(SportsProvider):
             if events:
                 return events
 
-        # Final fallback: eventsround.php with round=1 (full season for some leagues)
-        # Works for leagues like Unrivaled where other endpoints return empty
-        data = self._client.get_events_by_round(league)
+        # Final fallback: full-season fetch, filtered by date. Gated to sparse
+        # leagues (Unrivaled) so ordinary leagues with empty dates don't fire a
+        # per-date fetch (GH #217).
+        if league not in self.SEASON_FALLBACK_LEAGUES:
+            return []
+        data = self._client.get_events_by_season(league)
         if data and data.get("events"):
             events = []
             for event_data in data["events"]:
@@ -117,6 +158,54 @@ class TSDBProvider(SportsProvider):
             return events
 
         return []
+
+    def get_sample_candidates(self, league: str) -> list[Event]:
+        """Recent + upcoming events for a league in two bulk calls.
+
+        Used for the template live preview: pulls the last finished events
+        (eventspastleague) and the next scheduled ones (eventsnextleague) so the
+        caller can prefer a just-completed game (recap/score vars) over an
+        upcoming one. Two calls total — safe for the rate-limited free tier,
+        unlike a per-day scan. Racing leagues go through the season path.
+        """
+        if self._client.get_sport(league) == "racing":
+            return self._get_racing_events(league)
+
+        events: list[Event] = []
+        for fetch in (
+            self._client.get_league_past_events,
+            self._client.get_league_next_events,
+        ):
+            data = fetch(league)
+            rows = (data or {}).get("results") or (data or {}).get("events") or []
+            for row in rows:
+                event = self._parse_event(row, league)
+                if event:
+                    events.append(event)
+        return events
+
+    def _get_racing_events(self, league: str) -> list[Event]:
+        """Get all session-grouped racing events for a league's current season(s).
+
+        Fetches the current year's season, plus next year's if we're in the
+        last quarter (Q4) so January races - e.g. the Rolex 24 - appear ahead
+        of time. Both fetches go through eventsseason.php, which is the only
+        endpoint TSDB serves for these leagues (eventsday.php/
+        eventsnextleague.php return "Invalid League ID").
+        """
+        sport = self._client.get_sport(league)
+        today = date.today()
+        seasons = [str(today.year)]
+        if today.month >= 10:
+            seasons.append(str(today.year + 1))
+
+        raw_events: list[dict] = []
+        for season in seasons:
+            data = self._client.get_events_by_season(league, season=season)
+            if data and data.get("events"):
+                raw_events.extend(data["events"])
+
+        return parse_racing_events(raw_events, league, sport, self.name)
 
     # TSDB rate limit optimization: cap at 14 days regardless of caller request
     # ESPN can handle 30+ days, but TSDB's 25 req/min limit makes that expensive
@@ -183,7 +272,7 @@ class TSDBProvider(SportsProvider):
     ) -> list[Event]:
         """Get events for a team on a specific date.
 
-        Uses eventsday first, then eventsround as fallback for leagues
+        Uses eventsday first, then the full-season fallback for sparse leagues
         where eventsday doesn't return data (e.g., Unrivaled).
         """
         date_str = target_date.strftime("%Y-%m-%d")
@@ -198,8 +287,10 @@ class TSDBProvider(SportsProvider):
                     team_events.append(event)
             return team_events
 
-        # Fallback: eventsround for leagues like Unrivaled
-        data = self._client.get_events_by_round(league)
+        # Fallback: full-season fetch, gated to sparse leagues (Unrivaled) — GH #217
+        if league not in self.SEASON_FALLBACK_LEAGUES:
+            return []
+        data = self._client.get_events_by_season(league)
         if data and data.get("events"):
             team_events = []
             for event_data in data["events"]:
@@ -306,6 +397,12 @@ class TSDBProvider(SportsProvider):
 
     def get_event(self, event_id: str, league: str) -> Event | None:
         """Get a specific event by ID."""
+        if self._client.get_sport(league) == "racing":
+            for event in self._get_racing_events(league):
+                if event.id == event_id:
+                    return event
+            return None
+
         data = self._client.get_event(event_id)
 
         if not data:
@@ -432,6 +529,8 @@ class TSDBProvider(SportsProvider):
             else:
                 short_name = event_name
 
+            season_type = self._parse_season_type(data)
+
             return Event(
                 id=str(event_id),
                 provider=self.name,
@@ -447,6 +546,7 @@ class TSDBProvider(SportsProvider):
                 away_score=away_score,
                 venue=venue,
                 broadcasts=[],  # TSDB doesn't provide broadcast info
+                season_type=season_type,
             )
 
         except Exception as e:
@@ -557,6 +657,24 @@ class TSDBProvider(SportsProvider):
             except ValueError:
                 pass
 
+        return None
+
+    def _parse_season_type(self, data: dict) -> str | None:
+        """Map an event's intRound to canonical season_type.
+
+        TSDB tags playoff/championship games with special three-digit intRound
+        values (see `_POSTSEASON_ROUND_CODES`). Regular-season games use low
+        integers (1, 2, 3, ... representing round/week). Leagues that don't
+        opt into the special codes (AFL, NRL, boxing) keep their low-integer
+        round numbering throughout finals, so we can't distinguish their
+        postseason from regular season — those return None.
+
+        Returns None (not `regular`) for non-postseason events to avoid
+        misreporting regular-season for leagues where we genuinely don't know.
+        """
+        round_str = str(data.get("intRound") or "").strip()
+        if round_str in self._POSTSEASON_ROUND_CODES:
+            return SEASON_POSTSEASON
         return None
 
     def _parse_status(self, data: dict) -> EventStatus:

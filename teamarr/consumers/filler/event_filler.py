@@ -49,10 +49,11 @@ class EventFillerConfig:
         default_factory=ConditionalFillerTemplate
     )
 
-    # XMLTV categories (list for multiple categories)
+    # XMLTV categories applied to filler programmes only (#199). Independent
+    # from the parent template's event categories — empty list means no
+    # <category> tags on filler. Pre-v72 used a categories_apply_to gate to
+    # share event categories with filler; replaced by a dedicated list.
     xmltv_categories: list[str] = field(default_factory=list)
-    # Whether categories apply to filler ('all') or just events ('events')
-    categories_apply_to: str = "events"
 
 
 @dataclass
@@ -105,9 +106,9 @@ class EventFillerGenerator:
         )
     """
 
-    def __init__(self, service: SportsDataService | None = None):
+    def __init__(self, service: SportsDataService | None = None, art_base_url: str = ""):
         self._service = service
-        self._resolver = TemplateResolver()
+        self._resolver = TemplateResolver(art_base_url)
         # Cache for team stats to avoid redundant API calls within a generation run
         self._stats_cache: dict[tuple[str, str], TeamStats | None] = {}
 
@@ -321,19 +322,22 @@ class EventFillerGenerator:
 
             # Resolve art URL if present
             # Unknown variables stay literal (e.g., {bad_var}) so user can identify issues
-            icon = self._resolver.resolve(template.art_url, context) if template.art_url else None
+            icon = (
+                self._resolver.resolve_art(template.art_url, context)
+                if template.art_url
+                else None
+            )
 
-            # Only include categories if categories_apply_to == "all"
-            # Filler never gets xmltv_flags (new/live/date are for live events only)
-            # Apply title case for proper XMLTV formatting (e.g., "Football" not "football")
+            # Filler categories come from the template's xmltv_filler_categories
+            # (independent from event categories). Empty list = no <category> tags.
+            # Filler never gets xmltv_flags — new/live/date are live-event metadata.
+            # Apply title case for proper XMLTV formatting (e.g., "Football" not "football").
             filler_categories = []
-            if config.categories_apply_to == "all":
-                # Resolve any {sport} variables in categories
-                for cat in config.xmltv_categories:
-                    if "{" in cat:
-                        filler_categories.append(self._resolver.resolve(cat, context).title())
-                    else:
-                        filler_categories.append(cat.title())
+            for cat in config.xmltv_categories:
+                if "{" in cat:
+                    filler_categories.append(self._resolver.resolve(cat, context).title())
+                else:
+                    filler_categories.append(cat.title())
 
             programme = Programme(
                 channel_id=channel_id,
@@ -527,8 +531,8 @@ def template_to_event_filler_config(template) -> EventFillerConfig:
         description_not_final=pg_cond.get("description_not_final"),
     )
 
-    # Get categories from template
-    categories = getattr(template, "xmltv_categories", None) or []
+    # Filler categories are independent from event categories (#199).
+    filler_categories = getattr(template, "xmltv_filler_categories", None) or []
 
     return EventFillerConfig(
         pregame_enabled=getattr(template, "pregame_enabled", True),
@@ -536,6 +540,5 @@ def template_to_event_filler_config(template) -> EventFillerConfig:
         postgame_enabled=getattr(template, "postgame_enabled", True),
         postgame_template=postgame_template,
         postgame_conditional=postgame_conditional,
-        xmltv_categories=categories,
-        categories_apply_to=getattr(template, "categories_apply_to", "events"),
+        xmltv_categories=filler_categories,
     )

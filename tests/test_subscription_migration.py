@@ -215,12 +215,14 @@ class TestSoccerConfigMerge:
             {"provider": "espn", "team_id": "2", "name": "Chelsea"},
         ]
         db.execute(
-            "INSERT INTO event_epg_groups (name, leagues, soccer_mode, soccer_followed_teams, enabled) "
+            "INSERT INTO event_epg_groups "
+            "(name, leagues, soccer_mode, soccer_followed_teams, enabled) "
             "VALUES (?, '[]', 'teams', ?, 1)",
             ("Group A", json.dumps(teams_a)),
         )
         db.execute(
-            "INSERT INTO event_epg_groups (name, leagues, soccer_mode, soccer_followed_teams, enabled) "
+            "INSERT INTO event_epg_groups "
+            "(name, leagues, soccer_mode, soccer_followed_teams, enabled) "
             "VALUES (?, '[]', 'teams', ?, 1)",
             ("Group B", json.dumps(teams_b)),
         )

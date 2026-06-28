@@ -206,6 +206,13 @@ class EPGSettingsModel(BaseModel):
     include_final_events: bool = False
     midnight_crossover_mode: str = "postgame"
     cron_expression: str = "0 * * * *"
+    epg_xtream_fallback_enabled: bool = False
+    epg_xtream_cache_hours: int = 24
+    epg_channel_source_enabled: bool = False
+    epg_channel_source_groups: list[int] = []
+    epg_stream_pre_buffer_minutes: int = 60
+    epg_stream_post_buffer_minutes: int = 60
+    art_base_url: str = ""
 
 
 # =============================================================================
@@ -495,6 +502,125 @@ class EmbyConnectionTestResponse(BaseModel):
 
 
 # =============================================================================
+# JELLYFIN SETTINGS
+# =============================================================================
+
+
+class JellyfinSettingsModel(BaseModel):
+    """Jellyfin integration settings."""
+
+    enabled: bool = False
+    url: str | None = None
+    username: str | None = None
+    password: str | None = None
+    api_key: str | None = None
+
+    @field_serializer("password")
+    @classmethod
+    def _mask_password(cls, v: str | None) -> str | None:
+        return MASKED_SECRET if v else None
+
+    @field_serializer("api_key")
+    @classmethod
+    def _mask_api_key(cls, v: str | None) -> str | None:
+        return MASKED_SECRET if v else None
+
+
+class JellyfinSettingsUpdate(BaseModel):
+    """Update model for Jellyfin settings (all fields optional)."""
+
+    enabled: bool | None = None
+    url: str | None = None
+    username: str | None = None
+    password: str | None = None
+    api_key: str | None = None
+
+
+class JellyfinConnectionTestRequest(BaseModel):
+    """Request to test Jellyfin connection."""
+
+    url: str | None = Field(
+        None, description="Override URL (uses saved if not provided)"
+    )
+    username: str | None = Field(None, description="Override username")
+    password: str | None = Field(None, description="Override password")
+    api_key: str | None = Field(None, description="Override API key")
+
+
+class JellyfinConnectionTestResponse(BaseModel):
+    """Response from Jellyfin connection test."""
+
+    success: bool
+    server_name: str | None = None
+    server_version: str | None = None
+    error: str | None = None
+
+
+# =============================================================================
+# CHANNELS DVR SETTINGS
+# =============================================================================
+
+
+class ChannelsDVRSettingsModel(BaseModel):
+    """Channels DVR integration settings."""
+
+    enabled: bool = False
+    url: str | None = None
+    source_name: str | None = None
+    lineup_id: str | None = None
+
+
+class ChannelsDVRSettingsUpdate(BaseModel):
+    """Update model for Channels DVR settings (all fields optional)."""
+
+    enabled: bool | None = None
+    url: str | None = None
+    source_name: str | None = None
+    lineup_id: str | None = None
+
+
+class ChannelsDVRConnectionTestRequest(BaseModel):
+    """Request to test Channels DVR connection."""
+
+    url: str | None = Field(
+        None, description="Override URL (uses saved if not provided)"
+    )
+    source_name: str | None = Field(None, description="Override source name")
+
+
+class ChannelsDVRConnectionTestResponse(BaseModel):
+    """Response from Channels DVR connection test."""
+
+    success: bool
+    server_version: str | None = None
+    source_name: str | None = None
+    error: str | None = None
+
+
+class ChannelsDVRSourcesResponse(BaseModel):
+    """List of M3U sources discovered on the Channels DVR server."""
+
+    success: bool
+    sources: list[str] = []
+    error: str | None = None
+
+
+class ChannelsDVRLineup(BaseModel):
+    """An XMLTV lineup configured on the Channels DVR server."""
+
+    id: str
+    name: str
+
+
+class ChannelsDVRLineupsResponse(BaseModel):
+    """List of XMLTV lineups discovered on the Channels DVR server."""
+
+    success: bool
+    lineups: list[ChannelsDVRLineup] = []
+    error: str | None = None
+
+
+# =============================================================================
 # ALL SETTINGS
 # =============================================================================
 
@@ -517,6 +643,8 @@ class AllSettingsModel(BaseModel):
     update_check: UpdateCheckSettingsModel | None = None
     feed_separation: FeedSeparationSettingsModel | None = None
     emby: EmbySettingsModel = EmbySettingsModel()
+    jellyfin: JellyfinSettingsModel = JellyfinSettingsModel()
+    channelsdvr: ChannelsDVRSettingsModel = ChannelsDVRSettingsModel()
     epg_generation_counter: int = 0
     schema_version: int = 44
 

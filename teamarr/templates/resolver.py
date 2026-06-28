@@ -35,9 +35,24 @@ class TemplateResolver:
         result = resolver.resolve_conditional(options, context)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, art_base_url: str = "") -> None:
         self._registry = get_registry()
         self._condition_selector = get_condition_selector()
+        # Game-thumbs base URL (epic z02s), applied by resolve_art() so every art
+        # sink (EPG icon, Dispatcharr channel logo, fillers) reconstructs URLs the
+        # same way. Empty = no prefixing.
+        self.art_base_url = art_base_url or ""
+
+    def resolve_art(self, template: str, context: TemplateContext) -> str:
+        """Resolve an art/icon field, then apply the game-thumbs base URL.
+
+        The single entry point for ALL art/logo URLs so the base-URL reconstruction
+        happens in one place and propagates to every consumer. Relative paths get
+        the base prefixed; absolute URLs pass through unchanged (idempotent).
+        """
+        from teamarr.utilities.art_url import apply_art_base_url
+
+        return apply_art_base_url(self.resolve(template, context), self.art_base_url) or ""
 
     def resolve(self, template: str, context: TemplateContext) -> str:
         """Replace all {variable} placeholders with values.
@@ -92,6 +107,15 @@ class TemplateResolver:
         text = re.sub(r" {2,}", " ", text)
 
         return text.strip()
+
+    def build_variable_map(self, ctx: TemplateContext) -> dict[str, str]:
+        """Public: resolve every registered variable for a context.
+
+        Returns the full name -> value map (including .next/.last suffixes),
+        the same map used internally during resolution. Useful for previewing
+        a real event against every variable (live sample data).
+        """
+        return self._build_all_variables(ctx)
 
     def _build_all_variables(self, ctx: TemplateContext) -> dict[str, str]:
         """Build complete variable dict with all suffixes.

@@ -54,6 +54,14 @@ export interface EPGSettings {
   include_final_events: boolean
   midnight_crossover_mode: string
   cron_expression: string
+  epg_xtream_fallback_enabled: boolean
+  epg_xtream_cache_hours: number
+  epg_channel_source_enabled: boolean
+  epg_channel_source_groups: number[]
+  epg_stream_pre_buffer_minutes: number
+  epg_stream_post_buffer_minutes: number
+  /** Game-thumbs base URL prefixed onto relative art paths in templates (z02s). */
+  art_base_url: string
 }
 
 // Note: team_schedule_days_ahead default is 30 (for Team EPG)
@@ -150,7 +158,7 @@ export interface ChannelNumberingSettingsUpdate {
 }
 
 export interface StreamOrderingRule {
-  type: "m3u" | "group" | "regex"
+  type: "m3u" | "group" | "regex" | "stream_type" | "team_feed" | "not_team_feed" | "epg_match" | "dispatcharr_group" | "stats_metric" | "catch_all"
   value: string
   priority: number  // 1-99, lower = higher priority
 }
@@ -241,6 +249,52 @@ export interface EmbyTestResponse {
   error?: string | null
 }
 
+export interface JellyfinSettings {
+  enabled: boolean
+  url: string | null
+  username: string | null
+  password: string | null
+  api_key: string | null
+}
+
+export interface JellyfinTestResponse {
+  success: boolean
+  server_name?: string | null
+  server_version?: string | null
+  error?: string | null
+}
+
+export interface ChannelsDVRSettings {
+  enabled: boolean
+  url: string | null
+  source_name: string | null
+  lineup_id: string | null
+}
+
+export interface ChannelsDVRTestResponse {
+  success: boolean
+  server_version?: string | null
+  source_name?: string | null
+  error?: string | null
+}
+
+export interface ChannelsDVRSourcesResponse {
+  success: boolean
+  sources: string[]
+  error?: string | null
+}
+
+export interface ChannelsDVRLineup {
+  id: string
+  name: string
+}
+
+export interface ChannelsDVRLineupsResponse {
+  success: boolean
+  lineups: ChannelsDVRLineup[]
+  error?: string | null
+}
+
 export interface AllSettings {
   dispatcharr: DispatcharrSettings
   lifecycle: LifecycleSettings
@@ -257,6 +311,8 @@ export interface AllSettings {
   update_check?: UpdateCheckSettings
   feed_separation?: FeedSeparationSettings
   emby?: EmbySettings
+  jellyfin?: JellyfinSettings
+  channelsdvr?: ChannelsDVRSettings
   epg_generation_counter: number
   schema_version: number
   // UI timezone info (read-only, from environment or fallback to epg_timezone)
@@ -306,6 +362,17 @@ export interface EPGSourcesResponse {
 // API Functions
 export async function getSettings(): Promise<AllSettings> {
   return api.get("/settings")
+}
+
+export interface DispatcharrChannelGroup {
+  id: number
+  name: string
+  from_m3u: boolean
+}
+
+/** List Dispatcharr channel groups (for the channel-source picker + sorting rule). */
+export async function getDispatcharrChannelGroups(): Promise<DispatcharrChannelGroup[]> {
+  return api.get("/dispatcharr/channel-groups")
 }
 
 export async function getDispatcharrSettings(): Promise<DispatcharrSettings> {
@@ -553,4 +620,40 @@ export async function updateEmbySettings(data: Partial<EmbySettings>): Promise<E
 
 export async function testEmbyConnection(data?: { url?: string; username?: string; password?: string; api_key?: string }): Promise<EmbyTestResponse> {
   return api.post("/emby/test", data || {})
+}
+
+// Jellyfin Settings API
+export async function getJellyfinSettings(): Promise<JellyfinSettings> {
+  return api.get("/settings/jellyfin")
+}
+
+export async function updateJellyfinSettings(data: Partial<JellyfinSettings>): Promise<JellyfinSettings> {
+  return api.put("/settings/jellyfin", data)
+}
+
+export async function testJellyfinConnection(data?: { url?: string; username?: string; password?: string; api_key?: string }): Promise<JellyfinTestResponse> {
+  return api.post("/jellyfin/test", data || {})
+}
+
+// Channels DVR Settings API
+export async function getChannelsDVRSettings(): Promise<ChannelsDVRSettings> {
+  return api.get("/settings/channelsdvr")
+}
+
+export async function updateChannelsDVRSettings(data: Partial<ChannelsDVRSettings>): Promise<ChannelsDVRSettings> {
+  return api.put("/settings/channelsdvr", data)
+}
+
+export async function testChannelsDVRConnection(data?: { url?: string; source_name?: string }): Promise<ChannelsDVRTestResponse> {
+  return api.post("/channelsdvr/test", data || {})
+}
+
+export async function getChannelsDVRSources(url?: string): Promise<ChannelsDVRSourcesResponse> {
+  const qs = url ? `?url=${encodeURIComponent(url)}` : ""
+  return api.get(`/channelsdvr/sources${qs}`)
+}
+
+export async function getChannelsDVRLineups(url?: string): Promise<ChannelsDVRLineupsResponse> {
+  const qs = url ? `?url=${encodeURIComponent(url)}` : ""
+  return api.get(`/channelsdvr/lineups${qs}`)
 }

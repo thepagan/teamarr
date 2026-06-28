@@ -588,254 +588,276 @@ def _ensure_indexes_v43(conn: sqlite3.Connection) -> None:
 
 
 def _normalize_data_v43(conn: sqlite3.Connection) -> None:
-    """Apply all idempotent data transformations for v43."""
+    """Apply all idempotent data transformations for v43.
 
-    # -------------------------------------------------------------------------
-    # v3: teams.league -> primary_league + leagues JSON array
-    # -------------------------------------------------------------------------
-    if _table_exists(conn, "teams"):
-        existing = _get_table_columns(conn, "teams")
-        if "league" in existing and "primary_league" not in existing:
-            logger.info("[CHECKPOINT] Migrating teams.league to primary_league + leagues")
-            _add_column_safe(conn, "teams", "primary_league", "TEXT NOT NULL DEFAULT ''")
-            _add_column_safe(conn, "teams", "leagues", "TEXT NOT NULL DEFAULT '[]'")
-            conn.execute("""
-                UPDATE teams
-                SET primary_league = league,
-                    leagues = json_array(league)
-                WHERE primary_league = '' OR primary_league IS NULL
-            """)
+    Each helper covers a specific schema-version migration that originally
+    landed as its own _run_migrations block; consolidating them into the
+    checkpoint avoids running 40+ tiny migrations on fresh installs.
+    """
+    _migrate_teams_primary_league_v3(conn)
+    _migrate_group_mode_v20(conn)
+    _migrate_epg_output_path_v28(conn)
+    _seed_sports_v29(conn)
+    _consolidate_rugby_v31(conn)
+    _migrate_channel_group_mode_v40_v42(conn)
+    _migrate_exception_keywords_v35(conn)
 
-    # -------------------------------------------------------------------------
-    # v20: group_mode based on league count
-    # -------------------------------------------------------------------------
-    if _table_exists(conn, "event_epg_groups"):
-        columns = _get_table_columns(conn, "event_epg_groups")
-        if "group_mode" in columns and "leagues" in columns:
-            conn.execute("""
-                UPDATE event_epg_groups
-                SET group_mode = CASE
-                    WHEN json_array_length(leagues) > 1 THEN 'multi'
-                    ELSE 'single'
-                END
-                WHERE group_mode IS NULL
-            """)
 
-    # -------------------------------------------------------------------------
-    # v28: epg_output_path default change
-    # -------------------------------------------------------------------------
-    if _table_exists(conn, "settings"):
-        columns = _get_table_columns(conn, "settings")
-        if "epg_output_path" in columns:
-            conn.execute("""
-                UPDATE settings
-                SET epg_output_path = './data/teamarr.xml'
-                WHERE id = 1 AND epg_output_path = './teamarr.xml'
-            """)
+def _migrate_teams_primary_league_v3(conn: sqlite3.Connection) -> None:
+    """v3: teams.league -> primary_league + leagues JSON array."""
+    if not _table_exists(conn, "teams"):
+        return
+    existing = _get_table_columns(conn, "teams")
+    if "league" not in existing or "primary_league" in existing:
+        return
 
-    # -------------------------------------------------------------------------
-    # v29: Seed sports table
-    # -------------------------------------------------------------------------
+    logger.info("[CHECKPOINT] Migrating teams.league to primary_league + leagues")
+    _add_column_safe(conn, "teams", "primary_league", "TEXT NOT NULL DEFAULT ''")
+    _add_column_safe(conn, "teams", "leagues", "TEXT NOT NULL DEFAULT '[]'")
+    conn.execute("""
+        UPDATE teams
+        SET primary_league = league,
+            leagues = json_array(league)
+        WHERE primary_league = '' OR primary_league IS NULL
+    """)
+
+
+def _migrate_group_mode_v20(conn: sqlite3.Connection) -> None:
+    """v20: derive event_epg_groups.group_mode from league count."""
+    if not _table_exists(conn, "event_epg_groups"):
+        return
+    columns = _get_table_columns(conn, "event_epg_groups")
+    if "group_mode" not in columns or "leagues" not in columns:
+        return
+
+    conn.execute("""
+        UPDATE event_epg_groups
+        SET group_mode = CASE
+            WHEN json_array_length(leagues) > 1 THEN 'multi'
+            ELSE 'single'
+        END
+        WHERE group_mode IS NULL
+    """)
+
+
+def _migrate_epg_output_path_v28(conn: sqlite3.Connection) -> None:
+    """v28: epg_output_path default changed from ./teamarr.xml to ./data/teamarr.xml."""
+    if not _table_exists(conn, "settings"):
+        return
+    if "epg_output_path" not in _get_table_columns(conn, "settings"):
+        return
+
+    conn.execute("""
+        UPDATE settings
+        SET epg_output_path = './data/teamarr.xml'
+        WHERE id = 1 AND epg_output_path = './teamarr.xml'
+    """)
+
+
+def _seed_sports_v29(conn: sqlite3.Connection) -> None:
+    """v29: seed sports table with the canonical sport_code/display_name pairs."""
+    if not _table_exists(conn, "sports"):
+        return
+    for sport_code, display_name in SPORTS_SEED_V43:
+        conn.execute(
+            "INSERT OR REPLACE INTO sports (sport_code, display_name) VALUES (?, ?)",
+            (sport_code, display_name),
+        )
+
+
+def _consolidate_rugby_v31(conn: sqlite3.Connection) -> None:
+    """v31: rugby_league + rugby_union collapsed into a single rugby sport."""
     if _table_exists(conn, "sports"):
-        for sport_code, display_name in SPORTS_SEED_V43:
-            conn.execute(
-                "INSERT OR REPLACE INTO sports (sport_code, display_name) VALUES (?, ?)",
-                (sport_code, display_name),
-            )
-
-    # -------------------------------------------------------------------------
-    # v31: Consolidate rugby_league/rugby_union -> rugby
-    # -------------------------------------------------------------------------
-    if _table_exists(conn, "sports"):
-        # Remove old entries
         conn.execute("DELETE FROM sports WHERE sport_code IN ('rugby_league', 'rugby_union')")
-        # Ensure unified entry exists (already in seed, but be safe)
         conn.execute(
             "INSERT OR REPLACE INTO sports (sport_code, display_name) VALUES ('rugby', 'Rugby')"
         )
 
-    # Update references in other tables (only if sport column exists)
     for table in ["team_cache", "league_cache", "teams"]:
-        if _table_exists(conn, table):
-            columns = _get_table_columns(conn, table)
-            if "sport" in columns:
-                conn.execute(f"""
-                    UPDATE {table}
-                    SET sport = 'rugby'
-                    WHERE sport IN ('rugby_league', 'rugby_union')
-                """)
+        if not _table_exists(conn, table):
+            continue
+        if "sport" not in _get_table_columns(conn, table):
+            continue
+        conn.execute(f"""
+            UPDATE {table}
+            SET sport = 'rugby'
+            WHERE sport IN ('rugby_league', 'rugby_union')
+        """)
 
-    # -------------------------------------------------------------------------
-    # v40/v42: channel_group_mode enum -> pattern format
-    # -------------------------------------------------------------------------
-    if _table_exists(conn, "event_epg_groups"):
-        columns = _get_table_columns(conn, "event_epg_groups")
 
-        # Convert old enum values to pattern format (if column exists)
-        if "channel_group_mode" in columns:
-            # Check if table has CHECK constraint that would block the UPDATE
-            # If so, we need to recreate the table (constraint removal)
-            cursor = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='event_epg_groups'"
+def _migrate_channel_group_mode_v40_v42(conn: sqlite3.Connection) -> None:
+    """v40/v42: channel_group_mode enum (sport/league) → pattern format ({sport}/{league}).
+
+    If the live table still carries the old CHECK constraint we have to
+    recreate the table (drop + insert) to drop the constraint, otherwise
+    we just UPDATE in place.
+    """
+    if not _table_exists(conn, "event_epg_groups"):
+        return
+    columns = _get_table_columns(conn, "event_epg_groups")
+    if "channel_group_mode" not in columns:
+        return
+
+    cursor = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='event_epg_groups'"
+    )
+    row = cursor.fetchone()
+    table_sql = row[0] if row else ""
+
+    has_check_constraint = (
+        "channel_group_mode" in table_sql
+        and "CHECK" in table_sql
+        and "'sport'" in table_sql
+        and "'league'" in table_sql
+    )
+
+    if has_check_constraint:
+        _recreate_event_epg_groups_v42(conn, table_sql)
+        return
+
+    conn.execute("""
+        UPDATE event_epg_groups
+        SET channel_group_mode = '{sport}'
+        WHERE channel_group_mode = 'sport'
+    """)
+    conn.execute("""
+        UPDATE event_epg_groups
+        SET channel_group_mode = '{league}'
+        WHERE channel_group_mode = 'league'
+    """)
+
+    # v42 recovery: clamp invalid enum values back to defaults
+    if "channel_assignment_mode" in columns:
+        conn.execute("""
+            UPDATE event_epg_groups
+            SET channel_assignment_mode = 'auto'
+            WHERE channel_assignment_mode NOT IN ('auto', 'manual')
+        """)
+    if "channel_sort_order" in columns:
+        conn.execute("""
+            UPDATE event_epg_groups
+            SET channel_sort_order = 'time'
+            WHERE channel_sort_order NOT IN ('time', 'sport_time', 'league_time')
+        """)
+    if "overlap_handling" in columns:
+        conn.execute("""
+            UPDATE event_epg_groups
+            SET overlap_handling = 'add_stream'
+            WHERE overlap_handling NOT IN ('add_stream', 'add_only', 'create_all', 'skip')
+        """)
+
+
+def _recreate_event_epg_groups_v42(conn: sqlite3.Connection, table_sql: str) -> None:
+    """Drop+recreate event_epg_groups to strip the v40 CHECK constraint.
+
+    Done inline (no external module imports) because this is part of the
+    consolidated checkpoint and must stay self-contained.
+    """
+    logger.info("[CHECKPOINT] Recreating event_epg_groups to remove CHECK constraint")
+
+    conn.execute("DROP TABLE IF EXISTS event_epg_groups_new")
+
+    all_cols = list(_get_table_columns(conn, "event_epg_groups"))
+    legacy = {"stream_profile_id", "team_filter_enabled"}
+    cols = [c for c in all_cols if c not in legacy]
+
+    select_exprs = []
+    for c in cols:
+        if c == "channel_group_mode":
+            select_exprs.append(
+                "CASE channel_group_mode "
+                "WHEN 'sport' THEN '{sport}' "
+                "WHEN 'league' THEN '{league}' "
+                "ELSE channel_group_mode END"
             )
-            row = cursor.fetchone()
-            table_sql = row[0] if row else ""
-
-            has_check_constraint = (
-                "channel_group_mode" in table_sql
-                and "CHECK" in table_sql
-                and "'sport'" in table_sql
-                and "'league'" in table_sql
+        elif c == "channel_assignment_mode":
+            select_exprs.append(
+                "CASE "
+                "WHEN channel_assignment_mode = 'one_per_stream' "
+                "THEN 'manual' "
+                "WHEN channel_assignment_mode IN ('auto','manual') "
+                "THEN channel_assignment_mode "
+                "ELSE 'auto' END"
             )
-
-            if has_check_constraint:
-                # Table has CHECK constraint - must recreate table to remove it
-                # Inline the table recreation (self-contained, no external imports)
-                logger.info("[CHECKPOINT] Recreating event_epg_groups to remove CHECK constraint")
-
-                conn.execute("DROP TABLE IF EXISTS event_epg_groups_new")
-
-                # Get current columns, filter out legacy ones that won't exist in new table
-                all_cols = list(_get_table_columns(conn, "event_epg_groups"))
-                legacy = {"stream_profile_id", "team_filter_enabled"}
-                cols = [c for c in all_cols if c not in legacy]
-
-                # Build SELECT with CASE conversions for enum columns
-                select_exprs = []
-                for c in cols:
-                    if c == "channel_group_mode":
-                        select_exprs.append(
-                            "CASE channel_group_mode "
-                            "WHEN 'sport' THEN '{sport}' "
-                            "WHEN 'league' THEN '{league}' "
-                            "ELSE channel_group_mode END"
-                        )
-                    elif c == "channel_assignment_mode":
-                        select_exprs.append(
-                            "CASE "
-                            "WHEN channel_assignment_mode = 'one_per_stream' "
-                            "THEN 'manual' "
-                            "WHEN channel_assignment_mode IN ('auto','manual') "
-                            "THEN channel_assignment_mode "
-                            "ELSE 'auto' END"
-                        )
-                    elif c == "channel_sort_order":
-                        select_exprs.append(
-                            "CASE "
-                            "WHEN channel_sort_order "
-                            "IN ('time','sport_time','league_time') "
-                            "THEN channel_sort_order "
-                            "ELSE 'time' END"
-                        )
-                    elif c == "overlap_handling":
-                        select_exprs.append(
-                            "CASE "
-                            "WHEN overlap_handling "
-                            "IN ('add_stream','add_only','create_all','skip') "
-                            "THEN overlap_handling "
-                            "ELSE 'add_stream' END"
-                        )
-                    else:
-                        select_exprs.append(c)
-
-                # Strip the CHECK constraint on channel_group_mode
-                new_sql = re.sub(
-                    r"\s*CHECK\s*\(\s*channel_group_mode\s+IN\s*\([^)]+\)\s*\)",
-                    "",
-                    table_sql,
-                )
-                # Point it at the new table name
-                new_sql = new_sql.replace(
-                    "CREATE TABLE event_epg_groups",
-                    "CREATE TABLE event_epg_groups_new",
-                    1,
-                )
-                conn.execute(new_sql)
-
-                col_list = ", ".join(cols)
-                sel_list = ", ".join(select_exprs)
-                conn.execute(
-                    f"INSERT INTO event_epg_groups_new ({col_list}) "
-                    f"SELECT {sel_list} FROM event_epg_groups"
-                )
-                conn.execute("DROP TABLE event_epg_groups")
-                conn.execute("ALTER TABLE event_epg_groups_new RENAME TO event_epg_groups")
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_event_epg_groups_parent
-                    ON event_epg_groups(parent_group_id)
-                """)
-                conn.execute("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_event_epg_groups_name_account
-                    ON event_epg_groups(name, COALESCE(m3u_account_id, -1))
-                """)
-                conn.commit()
-                # Table recreation handles all column conversions, skip remaining UPDATEs
-            else:
-                # No CHECK constraint - safe to UPDATE in place
-                conn.execute("""
-                    UPDATE event_epg_groups
-                    SET channel_group_mode = '{sport}'
-                    WHERE channel_group_mode = 'sport'
-                """)
-                conn.execute("""
-                    UPDATE event_epg_groups
-                    SET channel_group_mode = '{league}'
-                    WHERE channel_group_mode = 'league'
-                """)
-
-                # Fix invalid enum values (v42 recovery) - only if columns exist
-                # (skipped if table was recreated above since values are already converted)
-                if "channel_assignment_mode" in columns:
-                    conn.execute("""
-                        UPDATE event_epg_groups
-                        SET channel_assignment_mode = 'auto'
-                        WHERE channel_assignment_mode NOT IN ('auto', 'manual')
-                    """)
-                if "channel_sort_order" in columns:
-                    conn.execute("""
-                        UPDATE event_epg_groups
-                        SET channel_sort_order = 'time'
-                        WHERE channel_sort_order NOT IN ('time', 'sport_time', 'league_time')
-                    """)
-                if "overlap_handling" in columns:
-                    conn.execute("""
-                        UPDATE event_epg_groups
-                        SET overlap_handling = 'add_stream'
-                        WHERE overlap_handling NOT IN ('add_stream', 'add_only', 'create_all', 'skip')
-                    """)  # noqa: E501
-
-    # -------------------------------------------------------------------------
-    # v35: Exception keywords label + match_terms restructure
-    # -------------------------------------------------------------------------
-    if _table_exists(conn, "consolidation_exception_keywords"):
-        existing = _get_table_columns(conn, "consolidation_exception_keywords")
-
-        # Check if we need to migrate from old schema
-        if "keywords" in existing and "match_terms" not in existing:
-            logger.info("[CHECKPOINT] Migrating exception keywords to label + match_terms")
-            _add_column_safe(conn, "consolidation_exception_keywords", "label", "TEXT")
-            _add_column_safe(conn, "consolidation_exception_keywords", "match_terms", "TEXT")
-
-            # Migrate data: use display_name as label if set, else first keyword
-            conn.execute("""
-                UPDATE consolidation_exception_keywords
-                SET label = COALESCE(
-                    NULLIF(display_name, ''),
-                    TRIM(SUBSTR(keywords, 1, INSTR(keywords || ',', ',') - 1))
-                ),
-                match_terms = keywords
-                WHERE label IS NULL OR label = ''
-            """)
-
-        # Ensure default keywords exist
-        for label, match_terms, behavior in EXCEPTION_KEYWORDS_SEED_V43:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO consolidation_exception_keywords (label, match_terms, behavior)
-                VALUES (?, ?, ?)
-            """,  # noqa: E501
-                (label, match_terms, behavior),
+        elif c == "channel_sort_order":
+            select_exprs.append(
+                "CASE "
+                "WHEN channel_sort_order "
+                "IN ('time','sport_time','league_time') "
+                "THEN channel_sort_order "
+                "ELSE 'time' END"
             )
+        elif c == "overlap_handling":
+            select_exprs.append(
+                "CASE "
+                "WHEN overlap_handling "
+                "IN ('add_stream','add_only','create_all','skip') "
+                "THEN overlap_handling "
+                "ELSE 'add_stream' END"
+            )
+        else:
+            select_exprs.append(c)
+
+    new_sql = re.sub(
+        r"\s*CHECK\s*\(\s*channel_group_mode\s+IN\s*\([^)]+\)\s*\)",
+        "",
+        table_sql,
+    )
+    new_sql = new_sql.replace(
+        "CREATE TABLE event_epg_groups",
+        "CREATE TABLE event_epg_groups_new",
+        1,
+    )
+    conn.execute(new_sql)
+
+    col_list = ", ".join(cols)
+    sel_list = ", ".join(select_exprs)
+    conn.execute(
+        f"INSERT INTO event_epg_groups_new ({col_list}) "
+        f"SELECT {sel_list} FROM event_epg_groups"
+    )
+    conn.execute("DROP TABLE event_epg_groups")
+    conn.execute("ALTER TABLE event_epg_groups_new RENAME TO event_epg_groups")
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_event_epg_groups_parent
+        ON event_epg_groups(parent_group_id)
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_event_epg_groups_name_account
+        ON event_epg_groups(name, COALESCE(m3u_account_id, -1))
+    """)
+    conn.commit()
+
+
+def _migrate_exception_keywords_v35(conn: sqlite3.Connection) -> None:
+    """v35: exception keywords schema split into label + match_terms columns."""
+    if not _table_exists(conn, "consolidation_exception_keywords"):
+        return
+    existing = _get_table_columns(conn, "consolidation_exception_keywords")
+
+    if "keywords" in existing and "match_terms" not in existing:
+        logger.info("[CHECKPOINT] Migrating exception keywords to label + match_terms")
+        _add_column_safe(conn, "consolidation_exception_keywords", "label", "TEXT")
+        _add_column_safe(conn, "consolidation_exception_keywords", "match_terms", "TEXT")
+
+        conn.execute("""
+            UPDATE consolidation_exception_keywords
+            SET label = COALESCE(
+                NULLIF(display_name, ''),
+                TRIM(SUBSTR(keywords, 1, INSTR(keywords || ',', ',') - 1))
+            ),
+            match_terms = keywords
+            WHERE label IS NULL OR label = ''
+        """)
+
+    for label, match_terms, behavior in EXCEPTION_KEYWORDS_SEED_V43:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO consolidation_exception_keywords (label, match_terms, behavior)
+            VALUES (?, ?, ?)
+        """,  # noqa: E501
+            (label, match_terms, behavior),
+        )
 
 
 # =============================================================================

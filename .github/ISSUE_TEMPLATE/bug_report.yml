@@ -3,23 +3,12 @@ description: Report a bug or unexpected behavior
 title: "[Bug]: "
 labels: ["bug"]
 body:
-  - type: dropdown
-    id: teamarr-version
-    attributes:
-      label: Teamarr Version
-      description: Which major version are you using?
-      options:
-        - V1 (stable - ghcr.io/egyptiangio/teamarr:latest)
-        - V2 (alpha - ghcr.io/egyptiangio/teamarr:v2-alpha)
-    validations:
-      required: true
-
   - type: input
     id: version
     attributes:
       label: Tag / Commit
-      description: "Docker tag or commit hash (e.g., latest, v1.3.0, v2-alpha, dev@abc1234)"
-      placeholder: "latest or v2-alpha or dev@abc1234"
+      description: "Docker tag or commit hash (e.g., latest, v2.4.3, dev@abc1234)"
+      placeholder: "latest or v2.4.3 or dev@abc1234"
     validations:
       required: true
 

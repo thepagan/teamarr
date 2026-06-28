@@ -8,6 +8,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -44,6 +45,7 @@ def _is_home(ctx: TemplateContext, game_ctx: GameContext | None) -> bool | None:
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
     description="'true' if team is home, 'false' if away",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_is_home(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_home(ctx, game_ctx)
@@ -57,6 +59,7 @@ def extract_is_home(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
     description="'true' if team is away, 'false' if home",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_is_away(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_home(ctx, game_ctx)
@@ -70,6 +73,7 @@ def extract_is_away(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
     description="'at home' or 'on the road'",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_home_away_text(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_home(ctx, game_ctx)
@@ -83,6 +87,7 @@ def extract_home_away_text(ctx: TemplateContext, game_ctx: GameContext | None) -
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
     description="'vs' if home, 'at' if away",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_vs_at(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_home(ctx, game_ctx)
@@ -96,6 +101,7 @@ def extract_vs_at(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
     description="'vs' if home, '@' if away",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_vs_symbol(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_home(ctx, game_ctx)
@@ -258,6 +264,7 @@ def extract_away_team_logo(ctx: TemplateContext, game_ctx: GameContext | None) -
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Feed team full name (e.g., 'Baltimore Orioles')",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_feed_team(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team:
@@ -270,6 +277,7 @@ def extract_feed_team(ctx: TemplateContext, game_ctx: GameContext | None) -> str
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Feed team short name (e.g., 'Orioles')",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_feed_team_short(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team:
@@ -282,6 +290,7 @@ def extract_feed_team_short(ctx: TemplateContext, game_ctx: GameContext | None) 
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Feed team abbreviation uppercase (e.g., 'BAL')",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_feed_team_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team:
@@ -294,6 +303,7 @@ def extract_feed_team_abbrev(ctx: TemplateContext, game_ctx: GameContext | None)
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Feed team abbreviation lowercase (e.g., 'bal')",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_feed_team_abbrev_lower(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team:
@@ -306,6 +316,7 @@ def extract_feed_team_abbrev_lower(ctx: TemplateContext, game_ctx: GameContext |
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Feed team logo URL",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_feed_team_logo(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team:
@@ -318,6 +329,7 @@ def extract_feed_team_logo(ctx: TemplateContext, game_ctx: GameContext | None) -
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="'true' if this is the home team's feed, 'false' if away, '' if no feed",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_is_home_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team or not game_ctx or not game_ctx.event:
@@ -334,6 +346,7 @@ def extract_is_home_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="'true' if this is the away team's feed, 'false' if home, '' if no feed",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_is_away_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team or not game_ctx or not game_ctx.event:
@@ -350,6 +363,7 @@ def extract_is_away_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="'Home' if home feed, 'Away' if away feed, '' if no feed",
+    scope=TemplateScope.EVENT_ONLY,
 )
 def extract_feed_home_away(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team or not game_ctx or not game_ctx.event:
@@ -359,3 +373,43 @@ def extract_feed_home_away(ctx: TemplateContext, game_ctx: GameContext | None) -
         and game_ctx.event.home_team.id == ctx.feed_team.id
     )
     return "Home" if is_home else "Away"
+
+
+# --- Broadcast feed labels (#195) ---
+# Pre-formatted strings that include the literal " Feed" suffix so users can
+# drop them into EPG titles without orphan-text issues. When feed separation
+# is inactive, both return "" — the resolver's whitespace cleanup then drops
+# the whole phrase, unlike "{feed_home_away} Team Feed" which would leave
+# "Team Feed" behind.
+
+
+@register_variable(
+    name="broadcast_feed",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.BASE_ONLY,
+    description="'Home Team Feed' / 'Away Team Feed' / '' (empty when no feed separation)",
+    scope=TemplateScope.EVENT_ONLY,
+)
+def extract_broadcast_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    if not ctx.feed_team or not game_ctx or not game_ctx.event:
+        return ""
+    is_home = (
+        game_ctx.event.home_team
+        and game_ctx.event.home_team.id == ctx.feed_team.id
+    )
+    return "Home Team Feed" if is_home else "Away Team Feed"
+
+
+@register_variable(
+    name="broadcast_feed_team",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.BASE_ONLY,
+    description="'{Team Name} Feed' (e.g., 'Seattle Mariners Feed') or '' if no feed",
+    scope=TemplateScope.EVENT_ONLY,
+)
+def extract_broadcast_feed_team(
+    ctx: TemplateContext, game_ctx: GameContext | None
+) -> str:
+    if not ctx.feed_team:
+        return ""
+    return f"{ctx.feed_team.name} Feed"

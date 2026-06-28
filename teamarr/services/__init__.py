@@ -33,14 +33,6 @@ from teamarr.services.channel_service import (
     create_channel_service,
 )
 from teamarr.services.detection_keywords import DetectionKeywordService
-from teamarr.services.epg_service import (
-    EPGService,
-    EventEPGOptions,
-    GenerationResult,
-    TeamChannelConfig,
-    TeamEPGOptions,
-    create_epg_service,
-)
 from teamarr.services.group_service import (
     BatchGroupResult,
     ChannelStats,
@@ -75,13 +67,6 @@ __all__ = [
     "create_default_service",
     "get_league_mapping_service",
     "init_league_mapping_service",
-    # EPG service
-    "EPGService",
-    "EventEPGOptions",
-    "GenerationResult",
-    "TeamChannelConfig",
-    "TeamEPGOptions",
-    "create_epg_service",
     # Channel service
     "ChannelService",
     "DeletionResult",

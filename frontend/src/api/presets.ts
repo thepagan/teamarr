@@ -33,10 +33,6 @@ export async function fetchPresets(): Promise<ConditionPresetListResponse> {
   return api.get("/presets")
 }
 
-export async function getPreset(id: number): Promise<ConditionPreset> {
-  return api.get(`/presets/${id}`)
-}
-
 export async function createPreset(data: ConditionPresetCreate): Promise<ConditionPreset> {
   return api.post("/presets", data)
 }

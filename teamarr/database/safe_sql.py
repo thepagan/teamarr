@@ -34,6 +34,7 @@ VALID_COLUMNS: dict[str, set[str]] = {
         "idle_title",
         "idle_description",
         "xmltv_categories",
+        "xmltv_filler_categories",
         "pregame_periods",
         "postgame_periods",
         "use_conditional_descriptions",

@@ -6,10 +6,10 @@ proper layer isolation.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class FillerType(str, Enum):
+class FillerType(StrEnum):
     """Types of filler content."""
 
     PREGAME = "pregame"
@@ -81,10 +81,11 @@ class FillerConfig:
     idle_conditional: ConditionalFillerTemplate = field(default_factory=ConditionalFillerTemplate)
     idle_offseason: OffseasonFillerTemplate = field(default_factory=OffseasonFillerTemplate)
 
-    # XMLTV categories (list for multiple categories)
+    # XMLTV categories applied to filler programmes. Independent from event
+    # categories on the parent template — empty list means no <category> tags
+    # on filler. (Pre-v72 used a categories_apply_to gate to share event
+    # categories; replaced by a dedicated filler-categories list.)
     xmltv_categories: list[str] = field(default_factory=list)
-    # Whether categories apply to filler ('all') or just events ('events')
-    categories_apply_to: str = "events"
 
 
 @dataclass

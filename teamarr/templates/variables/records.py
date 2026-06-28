@@ -7,6 +7,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -26,6 +27,7 @@ def _get_win_pct(wins: int, losses: int, ties: int = 0) -> str:
     category=Category.RECORDS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's overall record (e.g., '10-2' or '8-3-1')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_record(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats:
@@ -38,6 +40,7 @@ def extract_team_record(ctx: TemplateContext, game_ctx: GameContext | None) -> s
     category=Category.RECORDS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's total wins",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_wins(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats:
@@ -50,6 +53,7 @@ def extract_team_wins(ctx: TemplateContext, game_ctx: GameContext | None) -> str
     category=Category.RECORDS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's total losses",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_losses(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats:
@@ -62,6 +66,7 @@ def extract_team_losses(ctx: TemplateContext, game_ctx: GameContext | None) -> s
     category=Category.RECORDS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's total ties/draws",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_ties(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats:
@@ -74,6 +79,7 @@ def extract_team_ties(ctx: TemplateContext, game_ctx: GameContext | None) -> str
     category=Category.RECORDS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's winning percentage (e.g., '.750')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_win_pct(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats:
@@ -86,6 +92,7 @@ def extract_team_win_pct(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.RECORDS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's overall record",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_record(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:
@@ -98,6 +105,7 @@ def extract_opponent_record(ctx: TemplateContext, game_ctx: GameContext | None) 
     category=Category.RECORDS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's total wins",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_wins(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:
@@ -110,6 +118,7 @@ def extract_opponent_wins(ctx: TemplateContext, game_ctx: GameContext | None) ->
     category=Category.RECORDS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's total losses",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_losses(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:
@@ -122,6 +131,7 @@ def extract_opponent_losses(ctx: TemplateContext, game_ctx: GameContext | None) 
     category=Category.RECORDS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's total ties/draws",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_ties(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:
@@ -134,6 +144,7 @@ def extract_opponent_ties(ctx: TemplateContext, game_ctx: GameContext | None) ->
     category=Category.RECORDS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's winning percentage",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_win_pct(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:

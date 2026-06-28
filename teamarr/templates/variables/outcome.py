@@ -7,6 +7,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -35,6 +36,7 @@ def _get_result(ctx: TemplateContext, game_ctx: GameContext | None) -> str | Non
     category=Category.OUTCOME,
     suffix_rules=SuffixRules.ALL,
     description="Game result ('W', 'L', or 'T')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_result(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     result = _get_result(ctx, game_ctx)
@@ -52,6 +54,7 @@ def extract_result(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     category=Category.OUTCOME,
     suffix_rules=SuffixRules.ALL,
     description="Game result lowercase ('w', 'l', or 't')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_result_lower(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     result = _get_result(ctx, game_ctx)
@@ -69,6 +72,7 @@ def extract_result_lower(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.OUTCOME,
     suffix_rules=SuffixRules.ALL,
     description="Game result as text ('defeated', 'lost to', 'tied')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_result_text(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     result = _get_result(ctx, game_ctx)

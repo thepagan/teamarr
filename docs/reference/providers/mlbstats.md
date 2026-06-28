@@ -61,6 +61,24 @@ The provider parses team short names from the `teamName` field (e.g., "Pirates" 
 https://www.mlbstatic.com/team-logos/{team_id}.svg
 ```
 
+## Season Type Normalization
+
+Each game from the `/schedule` endpoint has a `gameType` field (a single character code) that the provider maps to the canonical season_type values:
+
+| `gameType` | Canonical | MLB meaning |
+|------------|-----------|-------------|
+| `R` | `regular` | Regular Season |
+| `S` | `preseason` | Spring Training |
+| `E` | `preseason` | Exhibition |
+| `F` | `postseason` | Wild Card |
+| `D` | `postseason` | Division Series |
+| `L` | `postseason` | League Championship Series |
+| `W` | `postseason` | World Series |
+| `P` | `postseason` | Generic playoffs (used by minor leagues) |
+| `A` | *(none)* | All-Star — not a season type |
+
+All five playoff codes (`F`/`D`/`L`/`W`/`P`) map to `postseason` so consumer logic (template variables, playoff-bypass filter) doesn't need to know MLB's series structure.
+
 ## Limitations
 
 - No single-event lookup (`get_event()` returns `None`) — the API lacks a simple single-event endpoint

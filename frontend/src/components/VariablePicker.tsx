@@ -22,7 +22,7 @@ export function VariablePicker({
 
   const { data, isLoading } = useQuery({
     queryKey: ["variables"],
-    queryFn: fetchVariables,
+    queryFn: () => fetchVariables(),
     staleTime: Infinity, // Variables don't change during session
   })
 

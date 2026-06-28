@@ -3,10 +3,10 @@
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 
 
-class StartupPhase(str, Enum):
+class StartupPhase(StrEnum):
     """Phases of application startup."""
 
     INITIALIZING = "initializing"

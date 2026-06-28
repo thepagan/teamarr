@@ -70,10 +70,6 @@ export async function listTeams(activeOnly = false): Promise<Team[]> {
   return api.get(`/teams${params}`)
 }
 
-export async function getTeam(teamId: number): Promise<Team> {
-  return api.get(`/teams/${teamId}`)
-}
-
 export async function createTeam(data: TeamCreate): Promise<Team> {
   return api.post("/teams", data)
 }

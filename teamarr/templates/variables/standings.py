@@ -7,6 +7,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -16,6 +17,7 @@ from teamarr.templates.variables.registry import (
     category=Category.STANDINGS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's playoff seed (e.g., '1' for 1-seed)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_playoff_seed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.playoff_seed:
@@ -28,6 +30,7 @@ def extract_playoff_seed(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.STANDINGS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Games behind division/conference leader",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_games_back(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.games_back is not None:
@@ -46,6 +49,7 @@ def extract_games_back(ctx: TemplateContext, game_ctx: GameContext | None) -> st
     category=Category.STANDINGS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's playoff seed",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_playoff_seed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats and game_ctx.opponent_stats.playoff_seed:
@@ -58,6 +62,7 @@ def extract_opponent_playoff_seed(ctx: TemplateContext, game_ctx: GameContext | 
     category=Category.STANDINGS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's games behind leader",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_games_back(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:

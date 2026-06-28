@@ -7,7 +7,7 @@ import threading
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from teamarr.api.dependencies import get_sports_service
 from teamarr.api.generation_status import (
@@ -22,24 +22,15 @@ from teamarr.api.generation_status import (
 from teamarr.api.models import (
     EPGGenerateRequest,
     EPGGenerateResponse,
-    EventEPGRequest,
     EventSearchResult,
     GameDataCacheClearResponse,
     GameDataCacheStats,
     MatchCorrectionRequest,
     MatchCorrectionResponse,
     MatchStats,
-    StreamBatchMatchRequest,
-    StreamBatchMatchResponse,
-    StreamMatchResultModel,
 )
-from teamarr.consumers.matching import StreamMatcher
 from teamarr.database import get_db
-from teamarr.services import (
-    EventEPGOptions,
-    SportsDataService,
-    create_epg_service,
-)
+from teamarr.services import SportsDataService
 
 logger = logging.getLogger(__name__)
 
@@ -409,11 +400,6 @@ def get_xmltv():
     )
 
 
-# =============================================================================
-# Event-based EPG endpoints
-# =============================================================================
-
-
 def _parse_date(date_str: str | None) -> date:
     """Parse date string or return today."""
     if not date_str:
@@ -425,137 +411,6 @@ def _parse_date(date_str: str | None) -> date:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid date format. Use YYYY-MM-DD.",
         ) from None
-
-
-@router.post("/epg/events/generate", response_model=EPGGenerateResponse)
-def generate_event_epg(
-    request: EventEPGRequest,
-    service: SportsDataService = Depends(get_sports_service),
-):
-    """Generate event-based EPG. Each event gets its own channel."""
-    epg_service = create_epg_service(service)
-    target = _parse_date(request.target_date)
-
-    options = EventEPGOptions(
-        pregame_minutes=request.pregame_minutes,
-    )
-
-    result = epg_service.generate_event_epg(
-        request.leagues, target, request.channel_prefix, options
-    )
-
-    return EPGGenerateResponse(
-        programmes_count=len(result.programmes),
-        teams_processed=0,
-        events_processed=result.events_processed,
-        duration_seconds=(result.completed_at - result.started_at).total_seconds(),
-    )
-
-
-@router.get("/epg/events/xmltv")
-def get_event_xmltv(
-    leagues: str = Query(..., description="Comma-separated league codes"),
-    target_date: str | None = Query(None, description="Date (YYYY-MM-DD)"),
-    channel_prefix: str = Query("event"),
-    pregame_minutes: int = Query(0, ge=0, le=120),
-    duration_hours: float = Query(3.0, ge=1.0, le=8.0),
-    service: SportsDataService = Depends(get_sports_service),
-):
-    """Get XMLTV for event-based EPG. Each event gets its own channel."""
-    league_list = [x.strip() for x in leagues.split(",") if x.strip()]
-    if not league_list:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one league required",
-        )
-
-    epg_service = create_epg_service(service)
-    target = _parse_date(target_date)
-
-    options = EventEPGOptions(
-        pregame_minutes=pregame_minutes,
-    )
-
-    result = epg_service.generate_event_epg(league_list, target, channel_prefix, options)
-
-    return Response(
-        content=result.xmltv,
-        media_type="application/xml",
-        headers={"Content-Disposition": "inline; filename=teamarr-events.xml"},
-    )
-
-
-# =============================================================================
-# Stream Matching (with fingerprint cache)
-# =============================================================================
-
-
-@router.post("/epg/streams/match", response_model=StreamBatchMatchResponse)
-def match_streams(
-    request: StreamBatchMatchRequest,
-    service: SportsDataService = Depends(get_sports_service),
-):
-    """Match streams to events using fingerprint cache.
-
-    On cache hit: returns cached event, skips expensive matching.
-    On cache miss: performs full match, caches result.
-
-    Fingerprint = hash(group_id + stream_id + stream_name).
-    If stream name changes, fingerprint changes -> fresh match.
-    """
-    target = _parse_date(request.target_date)
-
-    # Create stream matcher for this group
-    matcher = StreamMatcher(
-        service=service,
-        db_factory=get_db,
-        group_id=request.group_id,
-        search_leagues=request.search_leagues,
-        include_leagues=request.include_leagues,
-    )
-
-    # Convert input to dicts
-    streams = [{"id": s.id, "name": s.name} for s in request.streams]
-
-    # Match all streams (uses cache where possible)
-    batch_result = matcher.match_all(streams, target)
-
-    # Purge stale cache entries
-    matcher.purge_stale()
-
-    # Build response
-    results = []
-    for r in batch_result.results:
-        result_model = StreamMatchResultModel(
-            stream_name=r.stream_name,
-            matched=r.matched,
-            event_id=r.event.id if r.event else None,
-            event_name=r.event.name if r.event else None,
-            league=r.league,
-            home_team=r.event.home_team.name if r.event else None,
-            away_team=r.event.away_team.name if r.event else None,
-            start_time=r.event.start_time.isoformat() if r.event else None,
-            included=r.included,
-            exclusion_reason=r.exclusion_reason,
-            from_cache=r.from_cache,
-        )
-        results.append(result_model)
-
-    # Calculate match rate
-    non_exception = batch_result.total
-    match_rate = batch_result.matched_count / non_exception if non_exception > 0 else 0.0
-
-    return StreamBatchMatchResponse(
-        total=batch_result.total,
-        matched=batch_result.matched_count,
-        included=batch_result.included_count,
-        unmatched=batch_result.unmatched_count,
-        match_rate=match_rate,
-        cache_hits=batch_result.cache_hits,
-        cache_misses=batch_result.cache_misses,
-        cache_hit_rate=batch_result.cache_hit_rate,
-        results=results,
-    )
 
 
 # =============================================================================

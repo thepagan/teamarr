@@ -226,6 +226,13 @@ def update_epg_settings(conn: Connection, **kwargs) -> bool:
         "include_final_events": "include_final_events",
         "midnight_crossover_mode": "midnight_crossover_mode",
         "cron_expression": "cron_expression",
+        "epg_xtream_fallback_enabled": "epg_xtream_fallback_enabled",
+        "epg_xtream_cache_hours": "epg_xtream_cache_hours",
+        "epg_channel_source_enabled": "epg_channel_source_enabled",
+        "epg_channel_source_groups": "epg_channel_source_groups",
+        "epg_stream_pre_buffer_minutes": "epg_stream_pre_buffer_minutes",
+        "epg_stream_post_buffer_minutes": "epg_stream_post_buffer_minutes",
+        "art_base_url": "art_base_url",
     }
 
     updates = []
@@ -237,6 +244,8 @@ def update_epg_settings(conn: Connection, **kwargs) -> bool:
             value = kwargs[key]
             if isinstance(value, bool):
                 value = int(value)
+            elif isinstance(value, (list, dict)):
+                value = json.dumps(value)
             values.append(value)
 
     if not updates:
@@ -279,6 +288,8 @@ def update_reconciliation_settings(conn: Connection, **kwargs) -> bool:
             value = kwargs[key]
             if isinstance(value, bool):
                 value = int(value)
+            elif isinstance(value, (list, dict)):
+                value = json.dumps(value)
             values.append(value)
 
     if not updates:
@@ -366,6 +377,8 @@ def update_display_settings(conn: Connection, **kwargs) -> bool:
             value = kwargs[key]
             if isinstance(value, bool):
                 value = int(value)
+            elif isinstance(value, (list, dict)):
+                value = json.dumps(value)
             values.append(value)
 
     if not updates:
@@ -645,10 +658,9 @@ def update_stream_ordering_rules(
     Returns:
         True if updated
     """
+    from .types import NO_VALUE_RULE_TYPES, VALID_RULE_TYPES
     from .types import StreamOrderingRule as RuleType
 
-    # Validate rules structure
-    valid_types = {"m3u", "group", "regex"}
     validated_rules = []
 
     for rule in rules:
@@ -662,15 +674,17 @@ def update_stream_ordering_rules(
             rule_value = rule.get("value")
             rule_priority = rule.get("priority")
 
-        if rule_type not in valid_types:
+        if rule_type not in VALID_RULE_TYPES:
             logger.warning(
                 "[STREAM_ORDER] Invalid rule type '%s', must be one of %s",
                 rule_type,
-                valid_types,
+                VALID_RULE_TYPES,
             )
             continue
 
-        if not rule_value or not isinstance(rule_value, str):
+        if rule_type not in NO_VALUE_RULE_TYPES and (
+            not rule_value or not isinstance(rule_value, str)
+        ):
             logger.warning("[STREAM_ORDER] Rule missing value, skipping")
             continue
 
@@ -875,6 +889,113 @@ def update_emby_settings(
     if cursor.rowcount > 0:
         logger.info(
             "[UPDATED] Emby settings: %s",
+            [u.split(" = ")[0] for u in updates],
+        )
+        return True
+    return False
+
+
+def update_jellyfin_settings(
+    conn: Connection,
+    enabled: bool | None = None,
+    url: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    api_key: str | None = None,
+) -> bool:
+    """Update Jellyfin integration settings.
+
+    Only updates fields that are explicitly provided.
+
+    Args:
+        conn: Database connection
+        enabled: Enable/disable Jellyfin integration
+        url: Jellyfin server URL
+        username: Jellyfin username
+        password: Jellyfin password
+        api_key: Jellyfin API key (alternative to username/password)
+
+    Returns:
+        True if updated
+    """
+    updates = []
+    values = []
+
+    if enabled is not None:
+        updates.append("jellyfin_enabled = ?")
+        values.append(int(enabled))
+    if url is not None:
+        updates.append("jellyfin_url = ?")
+        values.append(url.rstrip("/") if url else url)
+    if username is not None:
+        updates.append("jellyfin_username = ?")
+        values.append(username)
+    if password is not None:
+        updates.append("jellyfin_password = ?")
+        values.append(password)
+    if api_key is not None:
+        updates.append("jellyfin_api_key = ?")
+        values.append(api_key)
+
+    if not updates:
+        return False
+
+    query = f"UPDATE settings SET {', '.join(updates)} WHERE id = 1"
+    cursor = conn.execute(query, values)
+    if cursor.rowcount > 0:
+        logger.info(
+            "[UPDATED] Jellyfin settings: %s",
+            [u.split(" = ")[0] for u in updates],
+        )
+        return True
+    return False
+
+
+def update_channelsdvr_settings(
+    conn: Connection,
+    enabled: bool | None = None,
+    url: str | None = None,
+    source_name: str | None = None,
+    lineup_id: str | None = None,
+) -> bool:
+    """Update Channels DVR integration settings.
+
+    Only updates fields that are explicitly provided.
+
+    Args:
+        conn: Database connection
+        enabled: Enable/disable Channels DVR integration
+        url: Channels DVR server URL (e.g., http://channelsdvr:8089)
+        source_name: M3U source name to refresh
+        lineup_id: XMLTV lineup ID to refresh (drives EPG update)
+
+    Returns:
+        True if updated
+    """
+    updates = []
+    values = []
+
+    if enabled is not None:
+        updates.append("channelsdvr_enabled = ?")
+        values.append(int(enabled))
+    if url is not None:
+        updates.append("channelsdvr_url = ?")
+        values.append(url.rstrip("/") if url else url)
+    if source_name is not None:
+        updates.append("channelsdvr_source_name = ?")
+        values.append(source_name)
+    if lineup_id is not None:
+        updates.append("channelsdvr_lineup_id = ?")
+        values.append(lineup_id)
+
+    if not updates:
+        return False
+
+    query = f"UPDATE settings SET {', '.join(updates)} WHERE id = 1"
+    cursor = conn.execute(query, values)
+    if cursor.rowcount > 0:
+        logger.info(
+            "[UPDATED] Channels DVR settings: %s",
             [u.split(" = ")[0] for u in updates],
         )
         return True

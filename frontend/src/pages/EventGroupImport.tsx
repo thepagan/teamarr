@@ -92,6 +92,9 @@ export function EventGroupImport() {
   const [showBulkModal, setShowBulkModal] = useState(false)
   const [bulkStreamTimezone, setBulkStreamTimezone] = useState<string | null>(null)
   const [bulkEnabled, setBulkEnabled] = useState(true)
+  const [bulkNameMatch, setBulkNameMatch] = useState(true)
+  const [bulkTeamStreams, setBulkTeamStreams] = useState(false)
+  const [bulkEPGMatch, setBulkEPGMatch] = useState(false)
   const [bulkImporting, setBulkImporting] = useState(false)
 
   // Queries
@@ -205,7 +208,7 @@ export function EventGroupImport() {
       m3u_account_id: String(selectedAccount!.id),
       m3u_account_name: selectedAccount!.name,
     })
-    navigate(`/event-groups/new?${params.toString()}`)
+    navigate(`/sources/new?${params.toString()}`)
   }
 
   // Handle bulk import
@@ -222,6 +225,9 @@ export function EventGroupImport() {
         settings: {
           stream_timezone: bulkStreamTimezone,
           enabled: bulkEnabled,
+          name_match_enabled: bulkNameMatch,
+          team_streams_enabled: bulkTeamStreams,
+          epg_match_enabled: bulkEPGMatch,
         },
       })
 
@@ -235,7 +241,7 @@ export function EventGroupImport() {
 
       // Show success or navigate
       if (response.total_created > 0) {
-        navigate("/event-groups")
+        navigate("/sources")
       }
     } catch (error) {
       console.error("Bulk import failed:", error)
@@ -248,6 +254,7 @@ export function EventGroupImport() {
   const openBulkModal = () => {
     setBulkStreamTimezone(null)
     setBulkEnabled(true)
+    setBulkNameMatch(true)
     setShowBulkModal(true)
   }
 
@@ -576,7 +583,7 @@ export function EventGroupImport() {
             {/* Settings */}
             <div className="space-y-4">
               <Label className="text-sm font-medium">Settings</Label>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label className="text-xs text-muted-foreground">Stream Timezone</Label>
                   <StreamTimezoneSelector
@@ -592,6 +599,42 @@ export function EventGroupImport() {
                       onCheckedChange={setBulkEnabled}
                     />
                     <span className="text-sm">{bulkEnabled ? "Yes" : "No"}</span>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Stream name matching</Label>
+                  <div className="flex items-center gap-2 h-9">
+                    <Switch
+                      checked={bulkNameMatch}
+                      onCheckedChange={setBulkNameMatch}
+                    />
+                    <span className="text-sm text-muted-foreground">
+                      {bulkNameMatch ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Team stream source</Label>
+                  <div className="flex items-center gap-2 h-9">
+                    <Switch
+                      checked={bulkTeamStreams}
+                      onCheckedChange={setBulkTeamStreams}
+                    />
+                    <span className="text-sm text-muted-foreground">
+                      {bulkTeamStreams ? "Enabled" : "Disabled"}
+                    </span>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">EPG program matching</Label>
+                  <div className="flex items-center gap-2 h-9">
+                    <Switch
+                      checked={bulkEPGMatch}
+                      onCheckedChange={setBulkEPGMatch}
+                    />
+                    <span className="text-sm text-muted-foreground">
+                      {bulkEPGMatch ? "Enabled" : "Disabled"}
+                    </span>
                   </div>
                 </div>
               </div>

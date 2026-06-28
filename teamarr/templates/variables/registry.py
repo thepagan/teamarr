@@ -37,6 +37,8 @@ class Category(Enum):
     CONFERENCE = auto()  # college_conference, pro_division
     SOCCER = auto()  # soccer_match_league
     COMBAT = auto()  # fighter1, fighter2, card_segment
+    MOTORSPORTS = auto()  # race_name, session_name, grid, podium, results
+    SUMMARY = auto()  # game_recap, game_event_note (provider editorial/context copy)
 
 
 class SuffixRules(Enum):
@@ -53,6 +55,23 @@ class SuffixRules(Enum):
     LAST_ONLY = auto()  # .last only (deprecated - use ALL instead)
 
 
+class TemplateScope(Enum):
+    """Which template types a variable is valid in.
+
+    Team templates render from a specific team's perspective (the subscribed
+    team). Event templates are positional — they describe a matchup without an
+    "our team" anchor. A variable's scope determines which pickers expose it.
+
+    Mirrors SuffixRules: ALL is the default, TEAM_ONLY / EVENT_ONLY are
+    restrictions. Filtering is done at the API boundary by
+    VariableRegistry.filter_by_template_type().
+    """
+
+    ALL = auto()  # valid in both team and event templates (default)
+    TEAM_ONLY = auto()  # only team templates (requires "our team" perspective)
+    EVENT_ONLY = auto()  # only event templates (e.g. feed_team family)
+
+
 @dataclass(frozen=True)
 class VariableDefinition:
     """Complete definition of a template variable."""
@@ -62,6 +81,15 @@ class VariableDefinition:
     suffix_rules: SuffixRules
     extractor: Extractor
     description: str = ""
+    scope: TemplateScope = TemplateScope.ALL
+    sample: str | None = None
+    """Optional inline placeholder for the template preview.
+
+    When set, this value is used for the preview when no curated entry exists
+    in sample_data.SAMPLE_DATA for the variable. This lets a new variable carry
+    its own placeholder at the point of definition, so it is auto-adopted into
+    previews without a separate edit to sample_data.py. When omitted, the
+    preview falls back to a category-based default (see sample_data.py)."""
 
 
 class VariableRegistry:
@@ -87,6 +115,8 @@ class VariableRegistry:
         suffix_rules: SuffixRules,
         extractor: Extractor,
         description: str = "",
+        scope: TemplateScope = TemplateScope.ALL,
+        sample: str | None = None,
     ) -> None:
         """Register a variable definition."""
         self._variables[name] = VariableDefinition(
@@ -95,6 +125,8 @@ class VariableRegistry:
             suffix_rules=suffix_rules,
             extractor=extractor,
             description=description,
+            scope=scope,
+            sample=sample,
         )
 
     def get(self, name: str) -> VariableDefinition | None:
@@ -108,6 +140,35 @@ class VariableRegistry:
     def by_category(self, category: Category) -> list[VariableDefinition]:
         """Get all variables in a category."""
         return [v for v in self._variables.values() if v.category == category]
+
+    def filter_by_template_type(
+        self, template_type: str | None
+    ) -> list[VariableDefinition]:
+        """Return variables valid for the given template type.
+
+        Args:
+            template_type: 'team', 'event', or None. Unknown values and None
+                           return all variables (fail-open, matches the
+                           conditions endpoint's behavior).
+
+        Returns:
+            Variables whose scope is compatible with the requested template
+            type. ALL variables are always included. TEAM_ONLY variables are
+            included only for 'team'; EVENT_ONLY only for 'event'.
+        """
+        if template_type == "team":
+            return [
+                v
+                for v in self._variables.values()
+                if v.scope in (TemplateScope.ALL, TemplateScope.TEAM_ONLY)
+            ]
+        if template_type == "event":
+            return [
+                v
+                for v in self._variables.values()
+                if v.scope in (TemplateScope.ALL, TemplateScope.EVENT_ONLY)
+            ]
+        return list(self._variables.values())
 
     def count(self) -> int:
         """Get total number of registered variables."""
@@ -123,6 +184,8 @@ def register_variable(
     category: Category,
     suffix_rules: SuffixRules = SuffixRules.ALL,
     description: str = "",
+    scope: TemplateScope = TemplateScope.ALL,
+    sample: str | None = None,
 ) -> Callable[[Extractor], Extractor]:
     """Decorator to register a variable extractor.
 
@@ -132,16 +195,30 @@ def register_variable(
             category=Category.IDENTITY,
             suffix_rules=SuffixRules.ALL,
             description="Opponent team name",
+            scope=TemplateScope.TEAM_ONLY,
         )
         def extract_opponent(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
             if not game_ctx or not game_ctx.event:
                 return ""
             # ... extraction logic
             return opponent.name
+
+    scope defaults to TemplateScope.ALL (valid in both team and event
+    templates). Set TEAM_ONLY for "our team" perspective variables
+    (team/opponent/is_home/team_record/etc.) or EVENT_ONLY for variables
+    that only make sense on event templates (feed_team family).
+
+    sample is an optional inline placeholder for the template preview. Provide
+    it so a new variable is auto-adopted into previews with a sensible value
+    without editing sample_data.py. When omitted, the preview uses a
+    category-based default. Curated per-sport values in sample_data.SAMPLE_DATA
+    still take precedence over this inline sample.
     """
 
     def decorator(func: Extractor) -> Extractor:
-        VariableRegistry().register(name, category, suffix_rules, func, description)
+        VariableRegistry().register(
+            name, category, suffix_rules, func, description, scope, sample
+        )
         return func
 
     return decorator

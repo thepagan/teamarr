@@ -65,6 +65,58 @@ class TeamResponse(BaseModel):
     updated_at: datetime
 
 
+class TeamChannelStatusTeam(BaseModel):
+    """Team fields included in the channel status response."""
+
+    id: int
+    provider: str
+    provider_team_id: str
+    primary_league: str
+    leagues: list[str]
+    sport: str
+    team_name: str
+    team_abbrev: str | None = None
+    channel_id: str
+    active: bool
+
+
+class TeamChannelStatusDispatcharrChannel(BaseModel):
+    """Dispatcharr channel mapping for a Teamarr team channel."""
+
+    found: bool
+    id: int | None = None
+    uuid: str | None = None
+    name: str | None = None
+    channel_number: str | None = None
+    tvg_id: str | None = None
+    stream_count: int = 0
+    streams: list[int] = Field(default_factory=list)
+    error: str | None = None
+
+
+class TeamChannelStatusProgramme(BaseModel):
+    """Next live programme window for a Teamarr team channel."""
+
+    found: bool
+    start: datetime | None = None
+    stop: datetime | None = None
+    title: str | None = None
+    sub_title: str | None = None
+    is_live: bool = False
+    source: str = "team_epg_xmltv"
+
+
+class TeamChannelStatusResponse(BaseModel):
+    """Combined status for a static Teamarr team channel."""
+
+    team: TeamChannelStatusTeam
+    dispatcharr_channel: TeamChannelStatusDispatcharrChannel
+    next_live_window: TeamChannelStatusProgramme
+    status: str
+    missing: list[str] = Field(default_factory=list)
+    xmltv_updated_at: datetime | None = None
+
+
 # =============================================================================
 # Templates
 # =============================================================================
@@ -160,7 +212,7 @@ class TemplateCreate(BaseModel):
     xmltv_flags: dict | None = None
     xmltv_video: dict | None = None
     xmltv_categories: list[str] | None = None
-    categories_apply_to: str = "events"
+    xmltv_filler_categories: list[str] | None = None
 
     # Filler: Pregame
     pregame_enabled: bool = True
@@ -204,7 +256,7 @@ class TemplateUpdate(BaseModel):
     xmltv_flags: dict | None = None
     xmltv_video: dict | None = None
     xmltv_categories: list[str] | None = None
-    categories_apply_to: str | None = None
+    xmltv_filler_categories: list[str] | None = None
 
     # Filler toggles
     pregame_enabled: bool | None = None
@@ -256,7 +308,7 @@ class TemplateFullResponse(TemplateResponse):
     xmltv_flags: dict | None = None
     xmltv_video: dict | None = None
     xmltv_categories: list[str] | None = None
-    categories_apply_to: str | None = None
+    xmltv_filler_categories: list[str] | None = None
     pregame_periods: list[dict] | None = None
     pregame_fallback: dict | None = None
     postgame_periods: list[dict] | None = None
@@ -268,6 +320,29 @@ class TemplateFullResponse(TemplateResponse):
     conditional_descriptions: list[dict] | None = None
     event_channel_name: str | None = None
     event_channel_logo_url: str | None = None
+
+
+class TemplateValidationWarning(BaseModel):
+    """One advisory finding about a template field (mirrors the editor)."""
+
+    variable: str
+    message: str
+    type: str  # "invalid" | "suffix_not_allowed"
+
+
+class TemplateValidateRequest(BaseModel):
+    """Validate arbitrary template field strings without saving."""
+
+    template_type: str = "team"
+    fields: dict[str, str | None]
+    conditional_descriptions: list[dict] | None = None
+
+
+class TemplateValidateResponse(BaseModel):
+    """Per-field advisory warnings; ``valid`` is True when none were found."""
+
+    valid: bool
+    warnings: dict[str, list[TemplateValidationWarning]]
 
 
 # =============================================================================
@@ -303,68 +378,6 @@ class EPGGenerateResponse(BaseModel):
     duration_seconds: float
     run_id: int | None = None
     match_stats: MatchStats | None = None
-
-
-class EventEPGRequest(BaseModel):
-    """Request body for event-based EPG generation."""
-
-    leagues: list[str]
-    target_date: str | None = None
-    channel_prefix: str = "event"
-    pregame_minutes: int = 0
-    duration_hours: float = 3.0
-
-
-# =============================================================================
-# Stream Matching (with fingerprint cache)
-# =============================================================================
-
-
-class StreamInput(BaseModel):
-    """A stream to match."""
-
-    id: int
-    name: str
-
-
-class StreamBatchMatchRequest(BaseModel):
-    """Request for batch stream matching with cache."""
-
-    group_id: int
-    streams: list[StreamInput]
-    search_leagues: list[str]
-    include_leagues: list[str] | None = None
-    target_date: str | None = None  # YYYY-MM-DD, defaults to today
-
-
-class StreamMatchResultModel(BaseModel):
-    """Result of matching a single stream."""
-
-    stream_name: str
-    matched: bool
-    event_id: str | None = None
-    event_name: str | None = None
-    league: str | None = None
-    home_team: str | None = None
-    away_team: str | None = None
-    start_time: str | None = None
-    included: bool = False
-    exclusion_reason: str | None = None
-    from_cache: bool = False
-
-
-class StreamBatchMatchResponse(BaseModel):
-    """Response for batch stream matching."""
-
-    total: int
-    matched: int
-    included: int
-    unmatched: int
-    match_rate: float
-    cache_hits: int
-    cache_misses: int
-    cache_hit_rate: float
-    results: list[StreamMatchResultModel]
 
 
 # =============================================================================

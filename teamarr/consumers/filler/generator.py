@@ -57,9 +57,9 @@ class FillerGenerator:
         )
     """
 
-    def __init__(self, service: SportsDataService):
+    def __init__(self, service: SportsDataService, art_base_url: str = ""):
         self._service = service
-        self._resolver = TemplateResolver()
+        self._resolver = TemplateResolver(art_base_url)
         self._context_builder = ContextBuilder(service)
         self._options: FillerOptions | None = None  # Set during generate()
 
@@ -495,19 +495,22 @@ class FillerGenerator:
 
             # Resolve art URL if present
             # Unknown variables stay literal (e.g., {bad_var}) so user can identify issues
-            icon = self._resolver.resolve(template.art_url, context) if template.art_url else None
+            icon = (
+                self._resolver.resolve_art(template.art_url, context)
+                if template.art_url
+                else None
+            )
 
-            # Only include categories if categories_apply_to == "all"
-            # Filler never gets xmltv_flags (new/live/date are for live events only)
-            # Preserve user's original casing for custom categories
+            # Filler categories come from the template's xmltv_filler_categories
+            # (independent from event categories). Empty list = no <category> tags.
+            # Filler never gets xmltv_flags — new/live/date are live-event metadata.
+            # Preserve user's original casing for custom categories.
             filler_categories = []
-            if config.categories_apply_to == "all":
-                # Resolve any {sport} variables in categories
-                for cat in config.xmltv_categories:
-                    if "{" in cat:
-                        filler_categories.append(self._resolver.resolve(cat, context))
-                    else:
-                        filler_categories.append(cat)
+            for cat in config.xmltv_categories:
+                if "{" in cat:
+                    filler_categories.append(self._resolver.resolve(cat, context))
+                else:
+                    filler_categories.append(cat)
 
             programme = Programme(
                 channel_id=channel_id,

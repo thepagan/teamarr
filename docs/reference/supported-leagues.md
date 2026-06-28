@@ -7,7 +7,7 @@ docs_version: "2.3.1"
 
 # Supported Sports & Leagues
 
-Teamarr supports **81 pre-configured leagues** across 13 sports, plus **240+ dynamically discovered soccer leagues** from ESPN. Pre-configured leagues have full support (team import + event matching). Discovered leagues support event matching only.
+Teamarr supports **134 pre-configured leagues** across 14 sports, plus **~250 dynamically discovered soccer leagues** from ESPN. Pre-configured leagues have full support (team import + event matching). Discovered leagues support event matching only.
 
 ## Support Levels
 
@@ -26,9 +26,10 @@ Leagues have different levels of support:
 
 | Provider | Description |
 |----------|-------------|
-| **ESPN** | Primary provider for most US leagues and international soccer. Discovers 240+ soccer leagues dynamically. |
+| **ESPN** | Primary provider for most US leagues and international soccer. Discovers ~250 soccer leagues dynamically. |
 | **MLB Stats API** | Minor League Baseball (MiLB) — Triple-A, Double-A, High-A, Single-A, Rookie |
-| **TheSportsDB** | Australian sports, rugby, cricket, boxing, CFL, Scandinavian leagues. Free and [premium tiers](providers/tsdb.md). |
+| **Squiggle** | AFL (Australian Football League). Free, no API key required. See [provider docs](providers/squiggle.md). |
+| **TheSportsDB** | Rugby, cricket, boxing, CFL, Scandinavian leagues, and more. Free and [premium tiers](providers/tsdb.md). |
 | **HockeyTech** | Canadian and US junior/minor hockey leagues (CHL, AHL, ECHL, PWHL, USHL, Junior A) |
 
 ### TSDB Tier Legend
@@ -125,10 +126,10 @@ TSDB leagues are classified by tier. Most work on the free tier. Leagues marked 
 | League | ID | Provider |
 |--------|-----|----------|
 | Major League Baseball | `mlb` | ESPN |
-| Triple-A (MiLB) | `aaa` | MLB Stats |
-| Double-A (MiLB) | `aa` | MLB Stats |
-| High-A (MiLB) | `higha` | MLB Stats |
-| Single-A (MiLB) | `a` | MLB Stats |
+| Triple-A (MiLB) | `milb-aaa` | MLB Stats |
+| Double-A (MiLB) | `milb-aa` | MLB Stats |
+| High-A (MiLB) | `milb-high-a` | MLB Stats |
+| Single-A (MiLB) | `milb-a` | MLB Stats |
 | Rookie (MiLB) | `rookie` | MLB Stats |
 | World Baseball Classic | `wbc` | ESPN |
 | NCAA Baseball | `ncaabb` | ESPN |
@@ -139,7 +140,7 @@ TSDB leagues are classified by tier. Most work on the free tier. Leagues marked 
 ## Soccer
 
 {: .tip }
-Teamarr automatically discovers **240+ soccer leagues** from ESPN's API during cache refresh. The leagues listed below are the pre-configured ones with full support (team import + event matching). All discovered leagues are available for event matching in event groups — select them from the league picker under the Soccer sport.
+Teamarr automatically discovers **~250 soccer leagues** from ESPN's API during cache refresh. The leagues listed below are the pre-configured ones with full support (team import + event matching). All discovered leagues are available for event matching in event groups — select them from the league picker under the Soccer sport.
 
 ### North America
 
@@ -150,6 +151,7 @@ Teamarr automatically discovers **240+ soccer leagues** from ESPN's API during c
 | NCAA Men's Soccer | `ncaas` | ESPN |
 | NCAA Women's Soccer | `ncaaws` | ESPN |
 | Liga MX | `ligamx` | ESPN |
+| Canadian Premier League | `can.1` | TSDB **P** |
 
 ### England
 
@@ -179,9 +181,11 @@ Teamarr automatically discovers **240+ soccer leagues** from ESPN's API during c
 | Primeira Liga (Portugal) | `primeira` | ESPN |
 | Belgian Pro League | `jupiler` | ESPN |
 | Scottish Premiership | `spfl` | ESPN |
+| Swiss Super League | `swiss-super-league` | ESPN |
 | Turkish Süper Lig | `super-lig` | ESPN |
 | Greek Super League | `greek-super-league` | ESPN |
 | Saudi Pro League | `spl` | ESPN |
+| Northern Irish Premiership | `nifl.1` | TSDB **P** |
 
 ### UEFA Competitions
 
@@ -200,6 +204,7 @@ Teamarr automatically discovers **240+ soccer leagues** from ESPN's API during c
 | Colombian Primera A | `dimayor` | ESPN |
 | Copa Libertadores | `libertadores` | ESPN |
 | Copa Sudamericana | `sudamericana` | ESPN |
+| Venezuelan Segunda División | `ven.2` | TSDB **P** |
 
 ### International
 
@@ -217,6 +222,19 @@ Teamarr automatically discovers **240+ soccer leagues** from ESPN's API during c
 | League | ID | Provider |
 |--------|-----|----------|
 | Svenska Cupen (Sweden) | `svenska-cupen` | TSDB **P** |
+| Swedish Superettan | `swe.2` | TSDB **P** |
+| Swedish Division 1 North | `swe.3.n` | TSDB **P** |
+| Swedish Division 1 South | `swe.3.s` | TSDB **P** |
+| Icelandic Úrvalsdeild karla | `ice.1` | TSDB **P** |
+| Icelandic 1. deild karla | `ice.2` | TSDB **P** |
+| Uruguayan Segunda División | `uru.2` | TSDB **P** |
+
+### Other Regions
+
+| League | ID | Provider |
+|--------|-----|----------|
+| Gambia GFA League | `gam.1` | TSDB **P** |
+| Aruban Division di Honor | `arb.1` | TSDB **P** |
 
 ### Asia/Pacific
 
@@ -241,6 +259,37 @@ Combat sports use "Event Card" matching rather than team vs team matching.
 
 ---
 
+## Motorsports
+
+{: .warning }
+Motorsports are **Event Only** - no team import available.
+
+| League | ID | Provider | Type |
+|--------|-----|----------|------|
+| Formula 1 | `f1` | ESPN | Event |
+| NASCAR Cup Series | `nascar-cup` | ESPN | Event |
+| NASCAR Xfinity Series | `nascar-xfinity` | ESPN | Event |
+| NASCAR Craftsman Truck Series | `nascar-truck` | ESPN | Event |
+| IndyCar Series | `indycar` | ESPN | Event |
+| IMSA SportsCar Championship | `imsa` | TSDB | Event |
+| FIA World Endurance Championship | `wec` | TSDB **P** | Event |
+
+Motorsports events are race weekends made up of multiple sessions (Practice,
+Qualifying, Race). Each session is exposed as its own EPG program block. `f1`
+is the fully verified ESPN reference league; the other ESPN-backed series are
+configured against their ESPN scoreboard endpoints but session coverage may
+vary by series. `imsa` and `wec` are backed by TSDB, which groups its flat
+per-session events into the same multi-session shape — see the
+[TSDB provider docs](providers/tsdb.md) for details and the free-tier caveat
+for WEC.
+
+MotoGP (`motogp`) is currently disabled (`leagues.enabled = 0`) because ESPN's
+`racing/motogp` scoreboard endpoint returns no usable schedule or logo data.
+A TSDB-backed migration (idLeague 4407), similar to the IMSA/WEC session
+grouping above, is planned as a future enhancement.
+
+---
+
 ## Cricket
 
 | League | ID | Provider |
@@ -258,11 +307,25 @@ Cricket leagues are TSDB premium tier. A [premium API key](providers/tsdb.md) is
 
 | League | ID | Provider |
 |--------|-----|----------|
-| National Rugby League (Australia) | `nrl` | TSDB **P** |
-| Super Rugby Pacific | `super-rugby` | TSDB **P** |
-
-{: .note }
-Rugby leagues are TSDB premium tier. A [premium API key](providers/tsdb.md) is required for full event coverage.
+| Rugby World Cup | `rwc` | ESPN |
+| Women's Rugby World Cup | `wrwc` | ESPN |
+| Six Nations | `6n` | ESPN |
+| The Rugby Championship | `trc` | ESPN |
+| Super Rugby Pacific | `super-rugby` | ESPN |
+| United Rugby Championship | `urc` | ESPN |
+| Gallagher Premiership | `prem` | ESPN |
+| French Top 14 | `top14` | ESPN |
+| European Rugby Champions Cup | `ercc` | ESPN |
+| European Rugby Challenge Cup | `epcr` | ESPN |
+| Major League Rugby | `mlr` | ESPN |
+| Currie Cup | `cc` | ESPN |
+| National Provincial Championship | `npc` | ESPN |
+| URBA Primera A | `urba` | ESPN |
+| International Test Match | `itm` | ESPN |
+| British and Irish Lions Tour | `lions` | ESPN |
+| Olympic Men's Rugby Sevens | `om7s` | ESPN |
+| Olympic Women's Rugby Sevens | `ow7s` | ESPN |
+| National Rugby League (Australia) | `nrl` | ESPN |
 
 ---
 
@@ -270,10 +333,10 @@ Rugby leagues are TSDB premium tier. A [premium API key](providers/tsdb.md) is r
 
 | League | ID | Provider |
 |--------|-----|----------|
-| Australian Football League | `afl` | TSDB **P** |
+| Australian Football League | `afl` | [Squiggle](providers/squiggle.md) |
 
 {: .note }
-AFL is TSDB premium tier. A [premium API key](providers/tsdb.md) is required for full event coverage.
+AFL is served by the Squiggle provider — free, no API key required. Includes team records, ladder ranking, and team logos.
 
 ---
 

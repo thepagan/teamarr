@@ -89,10 +89,10 @@ def prepend_postponed_label(text: str | None, event: Event, enabled: bool) -> st
 class EventEPGGenerator:
     """Generates EPG programmes for events from data providers."""
 
-    def __init__(self, service: SportsDataService):
+    def __init__(self, service: SportsDataService, art_base_url: str = ""):
         self._service = service
         self._context_builder = ContextBuilder(service)
-        self._resolver = TemplateResolver()
+        self._resolver = TemplateResolver(art_base_url)
 
     def generate_for_leagues(
         self,
@@ -152,7 +152,7 @@ class EventEPGGenerator:
             # Resolve template variables in logo URL (e.g., {league_id}, {home_team_pascal})
             channel_icon = None
             if options.template.event_channel_logo_url:
-                channel_icon = self._resolver.resolve(
+                channel_icon = self._resolver.resolve_art(
                     options.template.event_channel_logo_url, context
                 )
 
@@ -274,7 +274,7 @@ class EventEPGGenerator:
         # Unknown variables stay literal (e.g., {bad_var}) so user can identify issues
         icon = None
         if template.program_art_url:
-            icon = self._resolver.resolve(template.program_art_url, context)
+            icon = self._resolver.resolve_art(template.program_art_url, context)
 
         # Resolve categories (may contain {sport} variable)
         # Preserve user's original casing for custom categories
@@ -402,7 +402,11 @@ class EventEPGGenerator:
             # Include exception_keyword so each keyword variant gets its own EPG programmes
             from teamarr.consumers.lifecycle import generate_event_tvg_id
 
-            tvg_id = generate_event_tvg_id(event.id, event.provider, segment, exception_keyword)
+            feed_team = match.get("feed_team")
+            feed_team_id = feed_team.id if feed_team else None
+            tvg_id = generate_event_tvg_id(
+                event.id, event.provider, segment, exception_keyword, feed_team_id
+            )
             stream_name = stream.get("name", "")
 
             # Build context using home team perspective
@@ -414,7 +418,7 @@ class EventEPGGenerator:
                 league=event.league,
                 card_segment=segment,
             )
-            context.feed_team = match.get("feed_team")
+            context.feed_team = feed_team
             context.extra_vars = {"exception_keyword": keyword_value}
 
             # Generate channel name from template
@@ -436,7 +440,7 @@ class EventEPGGenerator:
             # Resolve template variables in logo URL (e.g., {league_id}, {home_team_pascal})
             channel_icon = None
             if event_template.event_channel_logo_url:
-                channel_icon = self._resolver.resolve(
+                channel_icon = self._resolver.resolve_art(
                     event_template.event_channel_logo_url, context
                 )
 

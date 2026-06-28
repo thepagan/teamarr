@@ -9,6 +9,9 @@ import re
 from datetime import UTC, date, datetime
 
 from teamarr.core import (
+    SEASON_POSTSEASON,
+    SEASON_PRESEASON,
+    SEASON_REGULAR,
     Event,
     EventStatus,
     LeagueMappingSource,
@@ -27,6 +30,12 @@ class HockeyTechProvider(SportsProvider):
 
     Handles CHL leagues (OHL, WHL, QMJHL) plus AHL, PWHL, USHL.
     """
+
+    # HockeyTech's schedule feed leaves `game_type` empty. The `seasons` view
+    # is the only place where playoff/regular is distinguished — via the
+    # `playoff` flag on each season, plus season_name keywords for preseason.
+    # See HockeyTechClient.get_seasons_info().
+    _PRESEASON_NAME_KEYWORDS = ("preseason", "pre-season", "exhibition")
 
     def __init__(
         self,
@@ -157,6 +166,9 @@ class HockeyTechProvider(SportsProvider):
             # Parse broadcasts
             broadcasts = self._parse_broadcasts(game)
 
+            # Parse canonical season_type from the game's season_id
+            season_type = self._parse_season_type(game, league)
+
             # Build names
             event_name = f"{away_team.name} at {home_team.name}"
             short_name = f"{away_team.abbreviation} @ {home_team.abbreviation}"
@@ -176,6 +188,7 @@ class HockeyTechProvider(SportsProvider):
                 away_score=away_score,
                 venue=venue,
                 broadcasts=broadcasts,
+                season_type=season_type,
             )
 
         except Exception as e:
@@ -183,6 +196,38 @@ class HockeyTechProvider(SportsProvider):
                 "[HOCKEYTECH] Failed to parse game %s: %s", game.get("game_id", "unknown"), e
             )
             return None
+
+    def _parse_season_type(self, game: dict, league: str) -> str | None:
+        """Map a game's season_id to a canonical season_type.
+
+        HockeyTech's schedule feed has `season_id` but no explicit playoff
+        flag per game. The `seasons` view exposes the `playoff` bit plus a
+        human-readable season_name. We derive:
+          - `playoff == '1'`                                 → postseason
+          - season_name contains 'preseason' / 'exhibition'  → preseason
+          - anything else with a known season_id             → regular
+          - unknown season_id or no seasons metadata         → None
+
+        All-Star / showcase seasons (e.g. 'AHL 2026 All-Star Challenge',
+        'OHL Top Prospects') have playoff=0 and no preseason keyword, so
+        they fall into 'regular' — consistent with ESPN/MLB producers,
+        which don't invent a dedicated bucket for those either.
+        """
+        season_id = game.get("season_id")
+        if season_id is None:
+            return None
+        seasons = self._client.get_seasons_info(league)
+        if not seasons:
+            return None
+        season = seasons.get(str(season_id))
+        if not season:
+            return None
+        if str(season.get("playoff", "")).strip() == "1":
+            return SEASON_POSTSEASON
+        name = (season.get("season_name") or "").lower()
+        if any(kw in name for kw in self._PRESEASON_NAME_KEYWORDS):
+            return SEASON_PRESEASON
+        return SEASON_REGULAR
 
     def _parse_team_from_game(
         self,

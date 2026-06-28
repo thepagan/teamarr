@@ -7,6 +7,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -23,6 +24,7 @@ def _format_ppg(value: float | None) -> str:
     category=Category.STATISTICS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's points per game average",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_ppg(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats:
@@ -35,6 +37,7 @@ def extract_team_ppg(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     category=Category.STATISTICS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's points allowed per game average",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_papg(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats:
@@ -47,6 +50,7 @@ def extract_team_papg(ctx: TemplateContext, game_ctx: GameContext | None) -> str
     category=Category.STATISTICS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's points per game average",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_ppg(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:
@@ -59,6 +63,7 @@ def extract_opponent_ppg(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.STATISTICS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's points allowed per game average",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_papg(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats:

@@ -14,23 +14,27 @@ from teamarr.database import get_db
 
 from .channel_numbering import router as channel_numbering_router
 from .database import router as database_router
+from .channelsdvr import router as channelsdvr_router
 from .dispatcharr import router as dispatcharr_router
 from .display import router as display_router
 from .emby import router as emby_router
 from .epg import router as epg_router
 from .feed_separation import router as feed_separation_router
-from .nfhs import router as nfhs_router
+from .jellyfin import router as jellyfin_router
 from .lifecycle import router as lifecycle_router
+from .nfhs import router as nfhs_router
 from .models import (
     AllSettingsModel,
     ChannelNumberingSettingsModel,
     DatabaseSettingsModel,
+    ChannelsDVRSettingsModel,
     DispatcharrSettingsModel,
     DisplaySettingsModel,
     DurationSettingsModel,
     EmbySettingsModel,
     EPGSettingsModel,
     FeedSeparationSettingsModel,
+    JellyfinSettingsModel,
     LifecycleSettingsModel,
     NFHSSettingsModel,
     ReconciliationSettingsModel,
@@ -51,6 +55,8 @@ router = APIRouter()
 router.include_router(dispatcharr_router)
 router.include_router(database_router)
 router.include_router(emby_router)
+router.include_router(jellyfin_router)
+router.include_router(channelsdvr_router)
 router.include_router(lifecycle_router)
 router.include_router(epg_router)
 router.include_router(display_router)
@@ -121,6 +127,13 @@ def get_settings():
             include_final_events=settings.epg.include_final_events,
             midnight_crossover_mode=settings.epg.midnight_crossover_mode,
             cron_expression=settings.epg.cron_expression,
+            epg_xtream_fallback_enabled=settings.epg.epg_xtream_fallback_enabled,
+            epg_xtream_cache_hours=settings.epg.epg_xtream_cache_hours,
+            epg_channel_source_enabled=settings.epg.epg_channel_source_enabled,
+            epg_channel_source_groups=settings.epg.epg_channel_source_groups,
+            epg_stream_pre_buffer_minutes=settings.epg.epg_stream_pre_buffer_minutes,
+            epg_stream_post_buffer_minutes=settings.epg.epg_stream_post_buffer_minutes,
+            art_base_url=settings.epg.art_base_url,
         ),
         durations=asdict(settings.durations),
         display=DisplaySettingsModel(
@@ -186,6 +199,19 @@ def get_settings():
             password=settings.emby.password,
             api_key=settings.emby.api_key,
         ),
+        jellyfin=JellyfinSettingsModel(
+            enabled=settings.jellyfin.enabled,
+            url=settings.jellyfin.url,
+            username=settings.jellyfin.username,
+            password=settings.jellyfin.password,
+            api_key=settings.jellyfin.api_key,
+        ),
+        channelsdvr=ChannelsDVRSettingsModel(
+            enabled=settings.channelsdvr.enabled,
+            url=settings.channelsdvr.url,
+            source_name=settings.channelsdvr.source_name,
+            lineup_id=settings.channelsdvr.lineup_id,
+        ),
         epg_generation_counter=settings.epg_generation_counter,
         schema_version=settings.schema_version,
         # UI timezone info (read-only)
@@ -199,12 +225,14 @@ __all__ = [
     "router",
     "AllSettingsModel",
     "ChannelNumberingSettingsModel",
+    "ChannelsDVRSettingsModel",
     "DispatcharrSettingsModel",
     "DisplaySettingsModel",
     "DurationSettingsModel",
     "EmbySettingsModel",
     "EPGSettingsModel",
     "FeedSeparationSettingsModel",
+    "JellyfinSettingsModel",
     "LifecycleSettingsModel",
     "NFHSSettingsModel",
     "ReconciliationSettingsModel",

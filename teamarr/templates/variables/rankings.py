@@ -7,6 +7,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -16,6 +17,7 @@ from teamarr.templates.variables.registry import (
     category=Category.RANKINGS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's ranking (e.g., '5' for #5, empty if unranked)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_rank(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.rank:
@@ -28,6 +30,7 @@ def extract_team_rank(ctx: TemplateContext, game_ctx: GameContext | None) -> str
     category=Category.RANKINGS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="Team's ranking with # prefix (e.g., '#5')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_rank_display(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.rank:
@@ -40,6 +43,7 @@ def extract_team_rank_display(ctx: TemplateContext, game_ctx: GameContext | None
     category=Category.RANKINGS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's ranking",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_rank(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats and game_ctx.opponent_stats.rank:
@@ -52,6 +56,7 @@ def extract_opponent_rank(ctx: TemplateContext, game_ctx: GameContext | None) ->
     category=Category.RANKINGS,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's ranking with # prefix",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_rank_display(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats and game_ctx.opponent_stats.rank:
@@ -64,6 +69,7 @@ def extract_opponent_rank_display(ctx: TemplateContext, game_ctx: GameContext | 
     category=Category.RANKINGS,
     suffix_rules=SuffixRules.BASE_ONLY,
     description="'true' if team is ranked, empty otherwise",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_is_ranked(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if ctx.team_stats and ctx.team_stats.rank:
@@ -76,6 +82,7 @@ def extract_is_ranked(ctx: TemplateContext, game_ctx: GameContext | None) -> str
     category=Category.RANKINGS,
     suffix_rules=SuffixRules.ALL,
     description="'true' if opponent is ranked, empty otherwise",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_is_ranked(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if game_ctx and game_ctx.opponent_stats and game_ctx.opponent_stats.rank:
@@ -88,6 +95,7 @@ def extract_opponent_is_ranked(ctx: TemplateContext, game_ctx: GameContext | Non
     category=Category.RANKINGS,
     suffix_rules=SuffixRules.ALL,
     description="'true' if both teams are ranked",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_is_ranked_matchup(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     team_ranked = ctx.team_stats and ctx.team_stats.rank

@@ -8,12 +8,39 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from sqlite3 import Connection, Row
 from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
+
+# Art fields whose RELATIVE values are normalized to a leading slash (epic z02s),
+# so the game-thumbs base URL convention is consistent across create/edit.
+_ART_FIELDS = ("program_art_url", "event_channel_logo_url")
+_ART_JSON_FIELDS = ("pregame_fallback", "postgame_fallback", "idle_content")
+_ABSOLUTE_URL = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+
+
+def _normalize_art_path(value: Any) -> Any:
+    """Ensure a relative art path starts with '/'. Absolute URLs and empty/non-str
+    values pass through unchanged."""
+    if not isinstance(value, str) or not value or _ABSOLUTE_URL.match(value):
+        return value
+    return value if value.startswith("/") else "/" + value
+
+
+def _normalize_art_in_kwargs(kwargs: dict[str, Any]) -> None:
+    """Normalize art fields in a create/update kwargs dict in place: the direct
+    art columns and the art_url nested inside the filler-fallback dicts."""
+    for field_name in _ART_FIELDS:
+        if field_name in kwargs:
+            kwargs[field_name] = _normalize_art_path(kwargs[field_name])
+    for field_name in _ART_JSON_FIELDS:
+        blob = kwargs.get(field_name)
+        if isinstance(blob, dict) and "art_url" in blob:
+            blob["art_url"] = _normalize_art_path(blob["art_url"])
 
 if TYPE_CHECKING:
     from teamarr.core import TemplateConfig
@@ -55,7 +82,9 @@ class Template:
     xmltv_flags: dict = field(default_factory=lambda: {"new": True, "live": False, "date": False})
     xmltv_video: dict = field(default_factory=lambda: {"enabled": False, "quality": "HDTV"})
     xmltv_categories: list[str] = field(default_factory=lambda: ["Sports"])
-    categories_apply_to: str = "events"  # 'all' or 'events'
+    # Independent category list applied to filler programmes only. Empty = no
+    # categories on filler. Replaced the v71 categories_apply_to gate (#199).
+    xmltv_filler_categories: list[str] = field(default_factory=list)
 
     # Filler: Pregame
     pregame_enabled: bool = True
@@ -118,6 +147,8 @@ class EventTemplateConfig:
     xmltv_flags: dict = field(default_factory=lambda: {"new": True, "live": False, "date": False})
     xmltv_video: dict = field(default_factory=lambda: {"enabled": False, "quality": "HDTV"})
     xmltv_categories: list[str] = field(default_factory=lambda: ["Sports"])
+    # Independent category list applied to filler programmes only.
+    xmltv_filler_categories: list[str] = field(default_factory=list)
 
     # Conditional descriptions (evaluated against single event)
     conditional_descriptions: list[dict] = field(default_factory=list)
@@ -155,7 +186,7 @@ def _row_to_template(row: Row) -> Template:
         xmltv_flags=_parse_json(row["xmltv_flags"], {"new": True, "live": False, "date": False}),
         xmltv_video=_parse_json(row["xmltv_video"], {"enabled": False, "quality": "HDTV"}),
         xmltv_categories=_parse_json(row["xmltv_categories"], ["Sports"]),
-        categories_apply_to=row["categories_apply_to"] or "events",
+        xmltv_filler_categories=_parse_json(row["xmltv_filler_categories"], []),
         pregame_enabled=bool(row["pregame_enabled"]),
         pregame_periods=_parse_json(row["pregame_periods"], []),
         pregame_fallback=_parse_json(row["pregame_fallback"], {}),
@@ -366,6 +397,9 @@ def create_template(
     Returns:
         New template ID
     """
+    # Normalize relative art paths to leading-slash form (z02s consistency).
+    _normalize_art_in_kwargs(kwargs)
+
     # Build column list and values
     columns = ["name", "template_type"]
     values: list[Any] = [name, template_type]
@@ -375,6 +409,7 @@ def create_template(
         "xmltv_flags",
         "xmltv_video",
         "xmltv_categories",
+        "xmltv_filler_categories",
         "pregame_periods",
         "pregame_fallback",
         "postgame_periods",
@@ -423,11 +458,15 @@ def update_template(conn: Connection, template_id: int, **kwargs) -> bool:
     if not kwargs:
         return False
 
+    # Normalize relative art paths to leading-slash form (z02s consistency).
+    _normalize_art_in_kwargs(kwargs)
+
     # JSON fields need serialization
     json_fields = {
         "xmltv_flags",
         "xmltv_video",
         "xmltv_categories",
+        "xmltv_filler_categories",
         "pregame_periods",
         "pregame_fallback",
         "postgame_periods",
@@ -568,8 +607,8 @@ def template_to_filler_config(template: Template) -> FillerConfig:
         description=idle_off.get("description"),
     )
 
-    # Get categories from template
-    categories = template.xmltv_categories or []
+    # Filler categories are independent from event categories (#199).
+    filler_categories = template.xmltv_filler_categories or []
 
     return FillerConfig(
         pregame_enabled=template.pregame_enabled,
@@ -581,8 +620,7 @@ def template_to_filler_config(template: Template) -> FillerConfig:
         idle_template=idle_template,
         idle_conditional=idle_conditional,
         idle_offseason=idle_offseason,
-        xmltv_categories=categories,
-        categories_apply_to=template.categories_apply_to or "events",
+        xmltv_categories=filler_categories,
     )
 
 
@@ -616,7 +654,6 @@ def template_to_programme_config(template: Template) -> TemplateConfig:
         xmltv_flags=template.xmltv_flags or {},
         xmltv_video=template.xmltv_video or {},
         xmltv_categories=categories,
-        categories_apply_to=template.categories_apply_to or "events",
     )
 
 
@@ -680,7 +717,7 @@ def seed_default_templates(conn: Connection) -> None:
         xmltv_flags={"new": True, "live": True, "date": True},
         xmltv_video={"enabled": False, "quality": "HDTV"},
         xmltv_categories=["Sports", "{sport}", "Sports Event"],
-        categories_apply_to="events",
+        xmltv_filler_categories=[],
         pregame_periods=[],
         pregame_fallback={
             "title": "Coming up: {gracenote_category} starting at {game_time.next}",
@@ -747,7 +784,7 @@ def seed_default_templates(conn: Connection) -> None:
         xmltv_flags={"new": True, "live": True, "date": True},
         xmltv_video={"enabled": False, "quality": "HDTV"},
         xmltv_categories=["Sports", "{sport}", "Sporting Event"],
-        categories_apply_to="events",
+        xmltv_filler_categories=[],
         pregame_periods=[],
         pregame_fallback={
             "title": "Coming up: {gracenote_category} starting at {game_time}",

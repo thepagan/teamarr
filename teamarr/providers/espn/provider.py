@@ -5,9 +5,14 @@ Pure fetch + normalize - no caching (caching is in service layer).
 """
 
 import logging
+import re
 from datetime import UTC, date, datetime, timedelta
 
 from teamarr.core import (
+    SEASON_OFFSEASON,
+    SEASON_POSTSEASON,
+    SEASON_PRESEASON,
+    SEASON_REGULAR,
     Event,
     EventStatus,
     LeagueMappingSource,
@@ -21,6 +26,7 @@ from teamarr.providers.espn.client import ESPN_TEAM_ID_CORRECTIONS, ESPNClient
 from teamarr.providers.espn.constants import STATUS_MAP, TOURNAMENT_SPORTS
 from teamarr.providers.espn.tournament import TournamentParserMixin
 from teamarr.providers.espn.ufc import UFCParserMixin
+from teamarr.utilities.event_status import is_event_final
 from teamarr.utilities.tz import to_user_tz
 
 logger = logging.getLogger(__name__)
@@ -49,6 +55,13 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
         if self._league_mapping_source:
             if self._league_mapping_source.supports_league(league, "espn"):
                 return True
+            # If the league is configured in the leagues table for a DIFFERENT
+            # provider, honor that — don't let the dotted-soccer heuristic below
+            # override an explicit assignment (e.g. uru.2 → tsdb, whose ESPN data
+            # is stale). Discovered soccer leagues aren't in the leagues table, so
+            # this guard never blocks genuine dynamic discovery (#218).
+            if self._league_mapping_source.get_mapping_by_league(league) is not None:
+                return False
         # Soccer leagues use dot notation - can be discovered dynamically
         if "." in league:
             return True
@@ -93,7 +106,8 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
         Resolution chain:
         1. leagues table mapping (authoritative)
         2. league_cache sport (discovered leagues)
-        3. 'unknown' fallback
+        3. dot-notation inference (ESPN soccer slugs, e.g. 'bra.carioca.groupa')
+        4. 'unknown' fallback
         """
         display = self._get_display_sport(league)
         sport = display.lower() if display else "unknown"
@@ -102,6 +116,11 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
             cached_sport = self._league_mapping_source.get_league_sport(league)
             if cached_sport:
                 sport = cached_sport
+        # ESPN soccer leagues use dot notation (eng.1, bra.carioca.groupa); mirror
+        # the API-path inference in client._resolve_sport_league so discovered
+        # soccer leagues cache as 'soccer' instead of 'unknown'.
+        if sport == "unknown" and "." in league:
+            sport = "soccer"
         return sport
 
     def _capture_league_name(self, data: dict, league: str) -> None:
@@ -157,7 +176,7 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
         # Check if this is a tournament sport
         sport = self._get_sport(league)
         if sport in TOURNAMENT_SPORTS:
-            return self._get_tournament_events(league, target_date, sport)
+            return self._get_tournament_events(league, target_date, sport, sport_league)
 
         date_str = target_date.strftime("%Y%m%d")
         data = self._client.get_scoreboard(league, date_str, sport_league)
@@ -174,6 +193,68 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
                 events.append(event)
 
         return events
+
+    def get_sample_candidates(self, league: str) -> list[Event]:
+        """Recent + upcoming events for a sample preview, in ≤2 calls.
+
+        Uses ESPN's **default scoreboard** (no date) — which returns the
+        most-recent-relevant slate, i.e. the last completed game even deep in the
+        offseason — plus **yesterday's** scoreboard to surface recent finals
+        during the season. The caller prefers a final game so postgame vars
+        populate. Avoids the sparse fixed-date scan that misses spaced-out
+        schedules (NBA Finals, weekly NFL).
+        """
+        sport = self._get_sport(league)
+        if league == "ufc" or sport in TOURNAMENT_SPORTS:
+            # Special endpoints — reuse the per-date path over a few days.
+            out: list[Event] = []
+            for d in (date.today(), date.today() - timedelta(days=1)):
+                out.extend(self.get_events(league, d))
+            return out
+
+        sport_league = self._get_sport_league_from_db(league)
+        yesterday = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
+        by_id: dict[str, Event] = {}
+        for date_str in (None, yesterday):  # None = ESPN default (most recent) slate
+            data = self._client.get_scoreboard(league, date_str, sport_league)
+            if not data:
+                continue
+            self._capture_league_name(data, league)
+            for event_data in data.get("events", []):
+                event = self._parse_event(event_data, league)
+                if event:
+                    by_id[event.id] = event
+        return list(by_id.values())
+
+    def get_recent_final(self, league: str) -> Event | None:
+        """The single most-recent FINAL game, however long ago it was.
+
+        ESPN's default scoreboard jumps to the *next* season in the deep
+        offseason, so a between-seasons league (NFL in June) otherwise yields
+        only empty upcoming games. This walks back in ~35-day windows (well
+        under ESPN's ~100-event range cap) until it finds a window with finals,
+        then returns the most recent one — e.g. NFL in June → the Super Bowl.
+        Best sample, since a finished game populates every postgame variable.
+        """
+        if league == "ufc" or self._get_sport(league) in TOURNAMENT_SPORTS:
+            return None
+        sport_league = self._get_sport_league_from_db(league)
+        window = timedelta(days=35)
+        end = date.today()
+        for _ in range(9):  # ~9 months back
+            start = end - window
+            data = self._client.get_scoreboard(
+                league, f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}", sport_league
+            )
+            finals = []
+            for event_data in (data or {}).get("events", []):
+                event = self._parse_event(event_data, league)
+                if event and event.home_team and event.away_team and is_event_final(event):
+                    finals.append(event)
+            if finals:
+                return max(finals, key=lambda e: e.start_time)
+            end = start
+        return None
 
     def get_team_schedule(
         self,
@@ -350,7 +431,7 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
             id=team_data.get("id", team_id),
             provider=self.name,
             name=team_data.get("displayName", ""),
-            short_name=team_data.get("shortDisplayName", ""),
+            short_name=team_data.get("shortDisplayName") or team_data.get("name") or "",
             abbreviation=team_data.get("abbreviation", ""),
             league=league,
             sport=sport,
@@ -426,15 +507,31 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
             # Convert pickcenter format to scoreboard odds format
             competition["odds"] = pickcenter
 
+        # Summary endpoint nests season under header (vs scoreboard's top level).
+        # Pass it through so _parse_event sees the same shape either way.
+        # Note: summary's header.season typically lacks the 'slug' field, so
+        # soccer leagues fall back to type-number mapping (int 13xxx → None).
+        # refresh_event_status preserves season_type from the cached event when
+        # the refresh returns None, so soccer postseason still survives.
         event_data = {
             "id": event_id,
             "name": header.get("gameNote", ""),
             "shortName": self._build_short_name(competition),
             "date": competition.get("date"),
             "competitions": [competition],
+            "season": header.get("season"),
         }
 
-        return self._parse_event(event_data, league)
+        event = self._parse_event(event_data, league)
+        if event:
+            # Per-event editorial copy lives at the summary top level (not in the
+            # competition), so attach it here. Raw passthrough, empty when absent.
+            article = data.get("article") or {}
+            if article.get("type") == "Preview":
+                event.game_preview = self._editorial_text(article)
+            series = data.get("seasonseries") or []
+            event.series_summary = (series[0].get("summary") if series else "") or ""
+        return event
 
     def _build_short_name(self, competition: dict) -> str:
         """Build short name from competitors."""
@@ -496,14 +593,18 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
             broadcasts = self._parse_broadcasts(competition.get("broadcasts", []))
             odds_data = self._parse_odds(competition.get("odds", []))
 
+            # Editorial/context copy — straight from the scoreboard, no per-event call.
+            game_recap = self._headline_of_type(competition, "Recap")
+            notes = competition.get("notes") or []
+            game_event_note = (notes[0].get("headline") if notes else "") or ""
+            soccer_match_note = competition.get("altGameNote") or ""
+
             home_score = self._parse_score(home_data.get("score"))
             away_score = self._parse_score(away_data.get("score"))
 
-            # Parse season type from ESPN data
-            # ESPN uses: 1=preseason, 2=regular, 3=postseason/playoffs
-            season_data = data.get("season", {})
-            season_type_num = season_data.get("type")
-            season_type = self._parse_season_type(season_type_num)
+            # Parse season type from ESPN data (slug-first, type-number fallback)
+            season_data = data.get("season") or {}
+            season_type = self._parse_season_type(season_data)
             season_year = season_data.get("year")
 
             return Event(
@@ -524,19 +625,61 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
                 odds_data=odds_data,
                 season_type=season_type,
                 season_year=season_year,
+                game_recap=game_recap,
+                game_event_note=game_event_note,
+                soccer_match_note=soccer_match_note,
             )
         except Exception as e:
             logger.warning("[ESPN] Failed to parse event %s: %s", data.get("id", "unknown"), e)
             return None
 
+    @staticmethod
+    def _editorial_text(obj: dict) -> str:
+        """EPG-friendly editorial copy from an ESPN headline/article object.
+
+        Prefer `shortLinkText` — a clean, self-contained headline that carries
+        the result/score and fits a guide-grid cell ('Mets beat Reds 9-1 to
+        avoid sweep'). Fall back to the long `description` body, stripping the
+        leftover AP-dateline em dash ('— Bo Bichette continued…' → 'Bo
+        Bichette continued…'). US wire copy carries the dash; soccer does not,
+        so the strip is conditional by construction. Empty when neither field
+        is present.
+        """
+        short = (obj.get("shortLinkText") or "").strip()
+        if short:
+            return short
+        desc = obj.get("description") or ""
+        return re.sub(r"^\s*[—–-]\s+", "", desc).strip()
+
+    @classmethod
+    def _headline_of_type(cls, competition: dict, want_type: str) -> str:
+        """Return EPG-friendly copy from the first headline matching want_type.
+
+        ESPN tags scoreboard headlines by type ('Recap', 'Preview'); we select
+        by tag rather than infer from game state. Empty when none present.
+        """
+        for headline in competition.get("headlines") or []:
+            if headline.get("type") == want_type:
+                return cls._editorial_text(headline)
+        return ""
+
     def _parse_team(self, competitor: dict, league: str, sport: str) -> Team:
         """Parse competitor data into Team."""
         team_data = competitor.get("team", {})
+        # Summary endpoint omits `shortDisplayName` (returns null) but always has
+        # `name` populated with the short form ("Rays", "Blue Jays"). Scoreboard
+        # has both. Fall back to `name` so the field stays populated regardless
+        # of which endpoint the team came from. (#201)
+        short_name = (
+            team_data.get("shortDisplayName")
+            or team_data.get("name")
+            or ""
+        )
         return Team(
             id=team_data.get("id", competitor.get("id", "")),
             provider=self.name,
             name=team_data.get("displayName", ""),
-            short_name=team_data.get("shortDisplayName", ""),
+            short_name=short_name,
             abbreviation=team_data.get("abbreviation", ""),
             league=league,
             sport=sport,
@@ -614,27 +757,53 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
         except (ValueError, TypeError):
             return None
 
-    def _parse_season_type(self, type_num: int | None) -> str | None:
-        """Parse ESPN season type number to string.
+    # ESPN league-agnostic season slug → canonical value.
+    # Slugs come from scoreboard per-event season dicts. Soccer knockout
+    # rounds also expose slugs like semifinals/final/group-stage.
+    _SEASON_SLUG_MAP = {
+        "pre-season": SEASON_PRESEASON,
+        "preseason": SEASON_PRESEASON,
+        "regular-season": SEASON_REGULAR,
+        "regular": SEASON_REGULAR,
+        "post-season": SEASON_POSTSEASON,
+        "postseason": SEASON_POSTSEASON,
+        "off-season": SEASON_OFFSEASON,
+        "offseason": SEASON_OFFSEASON,
+        # Soccer knockouts
+        "round-of-16": SEASON_POSTSEASON,
+        "quarterfinals": SEASON_POSTSEASON,
+        "semifinals": SEASON_POSTSEASON,
+        "final": SEASON_POSTSEASON,
+        "group-stage": SEASON_REGULAR,
+    }
 
-        ESPN uses:
-            1 = preseason
-            2 = regular
-            3 = postseason (playoffs)
-            4 = offseason (rare)
+    # ESPN integer season_type values (US sports only; soccer uses opaque IDs).
+    _SEASON_TYPE_NUM_MAP = {
+        1: SEASON_PRESEASON,
+        2: SEASON_REGULAR,
+        3: SEASON_POSTSEASON,
+        4: SEASON_OFFSEASON,
+    }
 
-        Returns:
-            String season type or None if unknown
+    def _parse_season_type(self, season_data: dict | None) -> str | None:
+        """Parse ESPN season data to a canonical season_type string.
+
+        ESPN emits two signals — a slug (strings like 'post-season' or
+        'semifinals') and a type number (1–4 for US sports, opaque IDs for
+        soccer). Slug is preferred because it's meaningful across all leagues
+        including soccer. Type number is the fallback — works for US sports
+        but not for soccer (summary endpoint often omits slug, so soccer
+        summary-path refresh returns None; refresh_event_status preserves
+        the cached season_type in that case).
+
+        Returns one of the SEASON_* canonical constants or None.
         """
-        if type_num is None:
+        if not season_data:
             return None
-        season_map = {
-            1: "preseason",
-            2: "regular",
-            3: "postseason",
-            4: "offseason",
-        }
-        return season_map.get(type_num)
+        slug = (season_data.get("slug") or "").lower()
+        if slug in self._SEASON_SLUG_MAP:
+            return self._SEASON_SLUG_MAP[slug]
+        return self._SEASON_TYPE_NUM_MAP.get(season_data.get("type"))
 
     def _parse_odds(self, odds_list: list) -> dict | None:
         """Parse ESPN odds data into structured dict.
@@ -778,7 +947,7 @@ class ESPNProvider(UFCParserMixin, TournamentParserMixin, SportsProvider):
             id=str(team_id),
             provider=self.name,
             name=team_data.get("displayName", ""),
-            short_name=team_data.get("shortDisplayName", ""),
+            short_name=team_data.get("shortDisplayName") or team_data.get("name") or "",
             abbreviation=team_data.get("abbreviation", ""),
             league=league,
             sport=sport,

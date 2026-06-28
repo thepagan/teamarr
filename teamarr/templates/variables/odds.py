@@ -8,6 +8,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -77,6 +78,7 @@ def extract_odds_details(ctx: TemplateContext, game_ctx: GameContext | None) -> 
     category=Category.ODDS,
     suffix_rules=SuffixRules.BASE_NEXT_ONLY,
     description="Team's moneyline (e.g., '-150' or '+130')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_odds_moneyline(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if _has_odds(game_ctx) and game_ctx.odds.team_moneyline:
@@ -92,6 +94,7 @@ def extract_odds_moneyline(ctx: TemplateContext, game_ctx: GameContext | None) -
     category=Category.ODDS,
     suffix_rules=SuffixRules.BASE_NEXT_ONLY,
     description="Opponent's moneyline",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_odds_opponent_moneyline(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if _has_odds(game_ctx) and game_ctx.odds.opponent_moneyline:

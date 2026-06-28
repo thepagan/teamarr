@@ -44,6 +44,14 @@ import {
   getEmbySettings,
   updateEmbySettings,
   testEmbyConnection,
+  getJellyfinSettings,
+  updateJellyfinSettings,
+  testJellyfinConnection,
+  getChannelsDVRSettings,
+  updateChannelsDVRSettings,
+  testChannelsDVRConnection,
+  getChannelsDVRSources,
+  getChannelsDVRLineups,
 } from "@/api/settings"
 import type {
   DispatcharrSettings,
@@ -61,6 +69,8 @@ import type {
   FeedSeparationSettingsUpdate,
   NFHSSettingsUpdate,
   EmbySettings,
+  JellyfinSettings,
+  ChannelsDVRSettings,
 } from "@/api/settings"
 
 export function useSettings() {
@@ -485,5 +495,81 @@ export function useTestEmbyConnection() {
   return useMutation({
     mutationFn: (data?: { url?: string; username?: string; password?: string; api_key?: string }) =>
       testEmbyConnection(data),
+  })
+}
+
+// Jellyfin Settings Hooks
+export function useJellyfinSettings() {
+  return useQuery({
+    queryKey: ["settings", "jellyfin"],
+    queryFn: getJellyfinSettings,
+  })
+}
+
+export function useUpdateJellyfinSettings() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Partial<JellyfinSettings>) =>
+      updateJellyfinSettings(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+    },
+  })
+}
+
+export function useTestJellyfinConnection() {
+  return useMutation({
+    mutationFn: (data?: { url?: string; username?: string; password?: string; api_key?: string }) =>
+      testJellyfinConnection(data),
+  })
+}
+
+// Channels DVR Settings Hooks
+export function useChannelsDVRSettings() {
+  return useQuery({
+    queryKey: ["settings", "channelsdvr"],
+    queryFn: getChannelsDVRSettings,
+  })
+}
+
+export function useUpdateChannelsDVRSettings() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data: Partial<ChannelsDVRSettings>) =>
+      updateChannelsDVRSettings(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+      queryClient.invalidateQueries({ queryKey: ["channelsdvr", "sources"] })
+      queryClient.invalidateQueries({ queryKey: ["channelsdvr", "lineups"] })
+    },
+  })
+}
+
+export function useTestChannelsDVRConnection() {
+  return useMutation({
+    mutationFn: (data?: { url?: string; source_name?: string }) =>
+      testChannelsDVRConnection(data),
+  })
+}
+
+export function useChannelsDVRSources(url: string | null | undefined) {
+  return useQuery({
+    queryKey: ["channelsdvr", "sources", url ?? ""],
+    queryFn: () => getChannelsDVRSources(url ?? undefined),
+    enabled: !!url,
+    retry: false,
+    staleTime: 30_000,
+  })
+}
+
+export function useChannelsDVRLineups(url: string | null | undefined) {
+  return useQuery({
+    queryKey: ["channelsdvr", "lineups", url ?? ""],
+    queryFn: () => getChannelsDVRLineups(url ?? undefined),
+    enabled: !!url,
+    retry: false,
+    staleTime: 30_000,
   })
 }

@@ -8,14 +8,14 @@ docs_version: "2.3.1"
 
 # Template Engine
 
-The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 197 variables across 17 categories, 20 condition evaluators, and suffix rules for multi-game context.
+The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 226 variables across 19 categories, 23 condition evaluators, suffix rules for multi-game context, and template-type scoping for the variable picker.
 
 ## Architecture
 
 ```
 TemplateResolver
-  ├── VariableRegistry (197 variables, 17 categories)
-  ├── ConditionEvaluator (20 evaluators)
+  ├── VariableRegistry (226 variables, 19 categories)
+  ├── ConditionEvaluator (23 evaluators)
   └── ContextBuilder (Event + Team → TemplateContext)
 ```
 
@@ -44,6 +44,30 @@ Each variable declares which game contexts it supports:
 | `BASE_ONLY` | Yes | No | No | Team constants (team_name, league, sport) |
 | `BASE_NEXT_ONLY` | Yes | Yes | No | Odds (no odds for past games) |
 
+## Template Scope
+
+Orthogonal to suffix rules. Each variable also declares which template type(s) it is valid in, mirroring the existing `template_type` concept (`'team'` / `'event'`) used on the templates table and the conditions endpoint. This gates variable picker availability per template.
+
+| Scope | Team picker | Event picker | Used By |
+|-------|-------------|--------------|---------|
+| `ALL` (default) | Yes | Yes | Positional and game-level variables (home_team, venue, odds_spread, is_playoff, etc.) |
+| `TEAM_ONLY` | Yes | No | "Our team" perspective (team_name, opponent, is_home, team_record, win_streak, result, odds_moneyline, etc.) |
+| `EVENT_ONLY` | No | Yes | Feed separation (feed_team, feed_team_short, is_home_feed, feed_home_away, etc.) |
+
+The registry exposes `filter_by_template_type(template_type)` which returns the valid subset. Unknown values and `None` return all variables (fail-open, matches the conditions endpoint's behavior). Today the filter only applies to the picker via `GET /variables?template_type=…`; hand-typed out-of-scope variables still resolve at render time (backward compatibility).
+
+Declare scope on the decorator:
+
+```python
+@register_variable(
+    name="opponent",
+    category=Category.IDENTITY,
+    suffix_rules=SuffixRules.ALL,
+    description="Opponent team name",
+    scope=TemplateScope.TEAM_ONLY,
+)
+```
+
 ## Variable Categories
 
 | Category | Count | Key Variables |
@@ -70,7 +94,7 @@ Variables are registered via decorator in `teamarr/templates/variables/` (one fi
 
 ## Condition Evaluators
 
-20 evaluators for conditional descriptions. Lower priority number = evaluated first. Priority 100 is the default (always matches).
+23 evaluators for conditional descriptions. Lower priority number = evaluated first. Priority 100 is the default (always matches).
 
 | Condition | Description | Value Param |
 |-----------|-------------|-------------|
@@ -136,14 +160,60 @@ Template resolution happens in three places that **must stay in sync**:
 
 When adding new template variables, all three paths must be updated.
 
+## Art URL Reconstruction (game-thumbs base URL)
+
+Art/icon fields (`program_art_url`, `event_channel_logo_url`, and filler
+`art_url`) can store **relative paths** (e.g. `/{league_id}/{away_team_pascal}/{home_team_pascal}/cover.png`).
+A single configured **base URL** (`settings.art_base_url`, set in EPG → Output →
+Game Thumbs) is prefixed onto them at resolution time so the deployment-specific
+host:port lives in one place. See [Game Thumbs](../../guide/epg/game-thumbs) and the
+[Gracenote-modeled template design](gracenote-template-design).
+
+The reconstruction is centralized so it reaches **every** consumer identically:
+
+| Piece | Role |
+|-------|------|
+| `utilities/art_url.py` → `apply_art_base_url(value, base)` | the single join helper — prefixes the base onto relative values; absolute URLs (`scheme://…`) pass through unchanged; **idempotent** |
+| `TemplateResolver.resolve_art(template, ctx)` | the one art entry point — `resolve()` then `apply_art_base_url()`; `art_base_url` injected via the resolver constructor |
+| `utilities/art_url.py` → `read_art_base_url(db_factory)` | reads the setting once; processors inject it into each resolver |
+
+Every art sink calls `resolve_art` (or the shared helper): EPG programme `<icon>`
+and channel `<icon>` (event/team EPG + `xmltv.py` as an idempotent safety net),
+Dispatcharr channel logos (`lifecycle/service._resolve_logo_url`), and fillers.
+This guarantees the EPG icon and the Dispatcharr channel logo never diverge.
+
+**Migrations:** v75 deduces the most-frequent art origin from existing templates
+and relativizes them; v76 normalizes relative paths to a leading slash;
+`create_template`/`update_template` keep new art relative on write.
+
+## Sample Data & Live Preview
+
+The variable picker previews each `{variable}` against sample values. Two sources, with live preferred by default:
+
+**Static sample — three shapes.** Every league resolves (by sport, via `resolve_shape`) to one of three generic, **fictitious** shapes rather than a per-league profile:
+
+| Shape | Sport(s) | Sample identity |
+|-------|----------|-----------------|
+| `team` | all team sports (incl. soccer) | Greenwich Mean Time @ Flint Tropics |
+| `combat` | boxing, MMA | Little Mac vs Super Macho Man (WVBA) |
+| `racing` | motorsport | Ricky Bobby / Lightning McQueen (Piston Cup) |
+
+Each shape is a kitchen-sink: every variable that applies to it is filled (the `team` shape carries both pro *and* college fields so either template type previews fully). Identities are invented on purpose, so a sample never looks like a real (and likely wrong-league) event — a regression test guards against any real franchise/RSN leaking in.
+
+**Live preview.** When live is on, the picker fetches a real recent/upcoming event (`get_sample_event`, provider-aware, cached) and shows its actual values. A variable the real event can't fill is **surfaced as a gap** — left empty and counted — rather than masked with the fictitious sample, so users don't get a false sense of availability. Gaps are scoped to **categories relevant to the event's shape** (a basketball preview doesn't flag empty combat/racing variables), and the picker shows live coverage (`live_populated`/`live_total`). Any failure (no event, provider down) falls back silently to the static sample.
+
+See `GET /variables/samples` (`live`, `gaps`, `live_populated`, `live_total`).
+
 ## File Locations
 
 | File | Purpose |
 |------|---------|
 | `templates/resolver.py` | Variable resolution pipeline |
-| `templates/conditions.py` | 20 condition evaluators |
+| `templates/conditions.py` | 23 condition evaluators |
 | `templates/context.py` | Context dataclasses (Odds, GameContext, TemplateContext) |
 | `templates/context_builder.py` | Build TemplateContext from Event + Team |
-| `templates/variables/` | 17 category modules with 197 variable definitions |
+| `templates/variables/` | 19 category modules with 226 variable definitions |
 | `templates/variables/registry.py` | VariableRegistry singleton |
-| `templates/sample_data.py` | Test fixtures for UI preview |
+| `templates/sample_data.py` | 3-shape fictitious sample values + `resolve_shape` for UI preview |
+| `utilities/art_url.py` | Game-thumbs base URL join helper + reader (`apply_art_base_url`, `read_art_base_url`) |
+| `utilities/xmltv.py` | XMLTV serialization (applies art base as an idempotent safety net) |

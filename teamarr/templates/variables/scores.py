@@ -7,6 +7,7 @@ from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
     SuffixRules,
+    TemplateScope,
     register_variable,
 )
 
@@ -23,6 +24,7 @@ def _is_team_home(ctx: TemplateContext, game_ctx: GameContext | None) -> bool | 
     category=Category.SCORES,
     suffix_rules=SuffixRules.ALL,
     description="Team's score (empty if game not started)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_team_score(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_team_home(ctx, game_ctx)
@@ -38,6 +40,7 @@ def extract_team_score(ctx: TemplateContext, game_ctx: GameContext | None) -> st
     category=Category.SCORES,
     suffix_rules=SuffixRules.ALL,
     description="Opponent's score (empty if game not started)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_opponent_score(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_team_home(ctx, game_ctx)
@@ -89,6 +92,7 @@ def extract_final_score(ctx: TemplateContext, game_ctx: GameContext | None) -> s
     category=Category.SCORES,
     suffix_rules=SuffixRules.ALL,
     description="Score differential (positive=won by, negative=lost by)",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_score_diff(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_team_home(ctx, game_ctx)
@@ -111,6 +115,7 @@ def extract_score_diff(ctx: TemplateContext, game_ctx: GameContext | None) -> st
     category=Category.SCORES,
     suffix_rules=SuffixRules.ALL,
     description="Score differential as absolute value (e.g., '7')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_score_differential(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_team_home(ctx, game_ctx)
@@ -130,6 +135,7 @@ def extract_score_differential(ctx: TemplateContext, game_ctx: GameContext | Non
     category=Category.SCORES,
     suffix_rules=SuffixRules.ALL,
     description="Score differential as text (e.g., 'by 7' or 'by 3')",
+    scope=TemplateScope.TEAM_ONLY,
 )
 def extract_score_diff_text(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_team_home(ctx, game_ctx)

@@ -5,11 +5,60 @@ Provides CRUD operations for the event_epg_groups table.
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from sqlite3 import Connection
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class _UpdateBuilder:
+    """Accumulate UPDATE assignments for partial-update SQL.
+
+    Pattern: each field is either set (value provided) or cleared (clear flag),
+    or skipped (None and no clear). Centralizes the boilerplate so update_group
+    reads as a list of declarative field bindings rather than 30 if/elif blocks.
+    """
+
+    def __init__(self) -> None:
+        self._sets: list[str] = []
+        self._values: list[Any] = []
+
+    def set_(
+        self,
+        column: str,
+        value: Any,
+        *,
+        clear: bool = False,
+        encoder: Callable[[Any], Any] = lambda v: v,
+    ) -> None:
+        if value is not None:
+            self._sets.append(f"{column} = ?")
+            self._values.append(encoder(value))
+        elif clear:
+            self._sets.append(f"{column} = NULL")
+
+    def set_list_or_clear(self, column: str, value: list | None, *, clear: bool = False) -> None:
+        """Set a JSON-encoded list, treating empty list as 'clear to NULL'."""
+        if value is not None:
+            if value:
+                self._sets.append(f"{column} = ?")
+                self._values.append(json.dumps(value))
+            else:
+                self._sets.append(f"{column} = NULL")
+        elif clear:
+            self._sets.append(f"{column} = NULL")
+
+    def has_changes(self) -> bool:
+        return bool(self._sets)
+
+    def build_query(self, table: str, *, where: str = "id = ?") -> str:
+        return f"UPDATE {table} SET {', '.join(self._sets)} WHERE {where}"
+
+    def params(self, *where_values: Any) -> list[Any]:
+        return [*self._values, *where_values]
 
 
 @dataclass
@@ -38,7 +87,8 @@ class EventEPGGroup:
     # Processing stats
     last_refresh: datetime | None = None
     stream_count: int = 0
-    matched_count: int = 0
+    matched_count: int = 0  # Distinct streams matched (coverage)
+    match_result_count: int = 0  # Total matched results produced (volume; EPG fans out)
     # Stream filtering (Phase 2)
     stream_include_regex: str | None = None
     stream_include_regex_enabled: bool = False
@@ -67,6 +117,11 @@ class EventEPGGroup:
     exclude_teams: list[dict] | None = None
     team_filter_mode: str = "include"
     bypass_filter_for_playoffs: bool | None = None  # NULL=use default, True/False=override
+    name_match_enabled: bool = True  # (ahow) match streams that name a specific event
+    team_streams_enabled: bool = False
+    epg_match_enabled: bool = False  # (183.6) opt this group into EPG program-data matching
+    # (183.9) system group sourcing candidates from curated Dispatcharr channels
+    is_channel_source: bool = False
     # Per-group subscription overrides (NULL = inherit global)
     subscription_leagues: list[str] | None = None
     subscription_soccer_mode: str | None = None
@@ -142,6 +197,7 @@ def _row_to_group(row) -> EventEPGGroup:
         last_refresh=last_refresh,
         stream_count=row["stream_count"] or 0,
         matched_count=row["matched_count"] or 0,
+        match_result_count=row["match_result_count"] if "match_result_count" in row.keys() else 0,
         # Stream filtering
         stream_include_regex=row["stream_include_regex"],
         stream_include_regex_enabled=bool(row["stream_include_regex_enabled"]),
@@ -196,6 +252,18 @@ def _row_to_group(row) -> EventEPGGroup:
             if "bypass_filter_for_playoffs" in row.keys()
             and row["bypass_filter_for_playoffs"] is not None
             else None
+        ),
+        name_match_enabled=(
+            bool(row["name_match_enabled"]) if "name_match_enabled" in row.keys() else True
+        ),
+        team_streams_enabled=(
+            bool(row["team_streams_enabled"]) if "team_streams_enabled" in row.keys() else False
+        ),
+        epg_match_enabled=(
+            bool(row["epg_match_enabled"]) if "epg_match_enabled" in row.keys() else False
+        ),
+        is_channel_source=(
+            bool(row["is_channel_source"]) if "is_channel_source" in row.keys() else False
         ),
         # Per-group subscription overrides
         subscription_leagues=(
@@ -255,24 +323,78 @@ def _row_to_group(row) -> EventEPGGroup:
 # =============================================================================
 
 
-def get_all_groups(conn: Connection, include_disabled: bool = False) -> list[EventEPGGroup]:
+def get_all_groups(
+    conn: Connection,
+    include_disabled: bool = False,
+    exclude_channel_source: bool = False,
+) -> list[EventEPGGroup]:
     """Get all event EPG groups.
 
     Args:
         conn: Database connection
         include_disabled: Include disabled groups
+        exclude_channel_source: Omit the system-managed channel-source group (183.9)
+            from the result. The UI list uses this so the auto-managed source does
+            not appear as a user-editable Event Group; processing leaves it False.
 
     Returns:
         List of EventEPGGroup objects
     """
-    if include_disabled:
-        cursor = conn.execute("SELECT * FROM event_epg_groups ORDER BY sort_order, name")
-    else:
-        cursor = conn.execute(
-            "SELECT * FROM event_epg_groups WHERE enabled = TRUE ORDER BY sort_order, name"
-        )
+    clauses = []
+    if not include_disabled:
+        clauses.append("enabled = TRUE")
+    if exclude_channel_source:
+        clauses.append("COALESCE(is_channel_source, FALSE) = FALSE")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    cursor = conn.execute(
+        f"SELECT * FROM event_epg_groups {where} ORDER BY sort_order, name"
+    )
 
     return [_row_to_group(row) for row in cursor.fetchall()]
+
+
+def ensure_channel_source_group(conn: Connection, enabled: bool) -> int:
+    """Idempotently create/sync the system-managed "Dispatcharr Channels" source group.
+
+    Epic 183.9: when the global ``epg_channel_source_enabled`` setting is on, EPG
+    matching also runs over streams curated onto Dispatcharr channels. That source
+    is modeled as a real (but hidden) event group so it reuses the full per-group
+    pipeline — matching, channel creation, XMLTV, and stats — with no FK hazards.
+
+    The group's ``enabled`` flag mirrors the setting, so disabling the toggle lets
+    the normal disabled-group cleanup remove its channels on the next run. Returns
+    the group id.
+    """
+    row = conn.execute(
+        "SELECT id FROM event_epg_groups WHERE is_channel_source = 1 LIMIT 1"
+    ).fetchone()
+
+    if row:
+        group_id = row["id"]
+        conn.execute(
+            "UPDATE event_epg_groups SET enabled = ?, epg_match_enabled = 1, "
+            "skip_builtin_filter = 1, team_streams_enabled = 1, name_match_enabled = 0 "
+            "WHERE id = ?",
+            (int(enabled), group_id),
+        )
+        conn.commit()
+        return group_id
+
+    group_id = create_group(
+        conn,
+        name="Dispatcharr Channels",
+        display_name="Dispatcharr Channels (EPG source)",
+        leagues=[],
+        duplicate_event_handling="consolidate",
+        name_match_enabled=False,  # (ahow.7) EPG-source group: matched via EPG/team, not name
+        epg_match_enabled=True,
+        team_streams_enabled=True,
+        skip_builtin_filter=True,
+        is_channel_source=True,
+        enabled=enabled,
+    )
+    conn.commit()
+    return group_id
 
 
 def get_group(conn: Connection, group_id: int) -> EventEPGGroup | None:
@@ -399,6 +521,10 @@ def create_group(
     custom_regex_event_name: str | None = None,
     custom_regex_event_name_enabled: bool = False,
     skip_builtin_filter: bool = False,
+    name_match_enabled: bool = True,
+    team_streams_enabled: bool = False,
+    epg_match_enabled: bool = False,
+    is_channel_source: bool = False,
     # Team filtering
     include_teams: list[dict] | None = None,
     exclude_teams: list[dict] | None = None,
@@ -458,11 +584,12 @@ def create_group(
             custom_regex_league, custom_regex_league_enabled,
             custom_regex_fighters, custom_regex_fighters_enabled,
             custom_regex_event_name, custom_regex_event_name_enabled,
-            skip_builtin_filter,
+            skip_builtin_filter, name_match_enabled, team_streams_enabled, epg_match_enabled,
+            is_channel_source,
             include_teams, exclude_teams, team_filter_mode,
             channel_sort_order, overlap_handling, enabled,
             subscription_leagues, subscription_soccer_mode, subscription_soccer_followed_teams
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",  # noqa: E501
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",  # noqa: E501
         (
             name,
             display_name,
@@ -501,6 +628,10 @@ def create_group(
             custom_regex_event_name,
             int(custom_regex_event_name_enabled),
             int(skip_builtin_filter),
+            int(name_match_enabled),
+            int(team_streams_enabled),
+            int(epg_match_enabled),
+            int(is_channel_source),
             json.dumps(include_teams) if include_teams else None,
             json.dumps(exclude_teams) if exclude_teams else None,
             team_filter_mode,
@@ -564,6 +695,9 @@ def update_group(
     custom_regex_event_name: str | None = None,
     custom_regex_event_name_enabled: bool | None = None,
     skip_builtin_filter: bool | None = None,
+    name_match_enabled: bool | None = None,
+    team_streams_enabled: bool | None = None,
+    epg_match_enabled: bool | None = None,
     # Team filtering
     include_teams: list[dict] | None = None,
     exclude_teams: list[dict] | None = None,
@@ -618,260 +752,99 @@ def update_group(
     Returns:
         True if updated
     """
-    updates = []
-    values = []
+    builder = _UpdateBuilder()
 
-    if name is not None:
-        updates.append("name = ?")
-        values.append(name)
+    # Identity / basics
+    builder.set_("name", name)
+    builder.set_("display_name", display_name, clear=clear_display_name)
+    builder.set_("leagues", leagues, encoder=json.dumps)
+    builder.set_("soccer_mode", soccer_mode, clear=clear_soccer_mode)
+    builder.set_(
+        "soccer_followed_teams",
+        soccer_followed_teams,
+        clear=clear_soccer_followed_teams,
+        encoder=json.dumps,
+    )
+    builder.set_("channel_start_number", channel_start_number, clear=clear_channel_start_number)
+    builder.set_("stream_timezone", stream_timezone, clear=clear_stream_timezone)
+    builder.set_("duplicate_event_handling", duplicate_event_handling)
+    builder.set_("channel_assignment_mode", channel_assignment_mode)
+    builder.set_("sort_order", sort_order)
+    builder.set_("total_stream_count", total_stream_count)
 
-    if display_name is not None:
-        updates.append("display_name = ?")
-        values.append(display_name)
-    elif clear_display_name:
-        updates.append("display_name = NULL")
+    # M3U binding
+    builder.set_("m3u_group_id", m3u_group_id, clear=clear_m3u_group_id)
+    builder.set_("m3u_group_name", m3u_group_name, clear=clear_m3u_group_name)
+    builder.set_("m3u_account_id", m3u_account_id, clear=clear_m3u_account_id)
+    builder.set_("m3u_account_name", m3u_account_name, clear=clear_m3u_account_name)
 
-    if leagues is not None:
-        updates.append("leagues = ?")
-        values.append(json.dumps(leagues))
+    # Stream filtering
+    builder.set_("stream_include_regex", stream_include_regex, clear=clear_stream_include_regex)
+    builder.set_("stream_include_regex_enabled", stream_include_regex_enabled, encoder=int)
+    builder.set_("stream_exclude_regex", stream_exclude_regex, clear=clear_stream_exclude_regex)
+    builder.set_("stream_exclude_regex_enabled", stream_exclude_regex_enabled, encoder=int)
+    builder.set_("custom_regex_teams", custom_regex_teams, clear=clear_custom_regex_teams)
+    builder.set_("custom_regex_teams_enabled", custom_regex_teams_enabled, encoder=int)
+    builder.set_("custom_regex_date", custom_regex_date, clear=clear_custom_regex_date)
+    builder.set_("custom_regex_date_enabled", custom_regex_date_enabled, encoder=int)
+    builder.set_("custom_regex_month", custom_regex_month, clear=clear_custom_regex_month)
+    builder.set_("custom_regex_month_enabled", custom_regex_month_enabled, encoder=int)
+    builder.set_("custom_regex_day", custom_regex_day, clear=clear_custom_regex_day)
+    builder.set_("custom_regex_day_enabled", custom_regex_day_enabled, encoder=int)
+    builder.set_("custom_regex_time", custom_regex_time, clear=clear_custom_regex_time)
+    builder.set_("custom_regex_time_enabled", custom_regex_time_enabled, encoder=int)
+    builder.set_("custom_regex_league", custom_regex_league, clear=clear_custom_regex_league)
+    builder.set_("custom_regex_league_enabled", custom_regex_league_enabled, encoder=int)
+    builder.set_("custom_regex_fighters", custom_regex_fighters, clear=clear_custom_regex_fighters)
+    builder.set_("custom_regex_fighters_enabled", custom_regex_fighters_enabled, encoder=int)
+    builder.set_(
+        "custom_regex_event_name", custom_regex_event_name, clear=clear_custom_regex_event_name
+    )
+    builder.set_("custom_regex_event_name_enabled", custom_regex_event_name_enabled, encoder=int)
+    builder.set_("skip_builtin_filter", skip_builtin_filter, encoder=int)
+    builder.set_("name_match_enabled", name_match_enabled, encoder=int)
+    builder.set_("team_streams_enabled", team_streams_enabled, encoder=int)
+    builder.set_("epg_match_enabled", epg_match_enabled, encoder=int)
 
-    if soccer_mode is not None:
-        updates.append("soccer_mode = ?")
-        values.append(soccer_mode)
-    elif clear_soccer_mode:
-        updates.append("soccer_mode = NULL")
-
-    if soccer_followed_teams is not None:
-        updates.append("soccer_followed_teams = ?")
-        values.append(json.dumps(soccer_followed_teams))
-    elif clear_soccer_followed_teams:
-        updates.append("soccer_followed_teams = NULL")
-
-    if channel_start_number is not None:
-        updates.append("channel_start_number = ?")
-        values.append(channel_start_number)
-    elif clear_channel_start_number:
-        updates.append("channel_start_number = NULL")
-
-    if stream_timezone is not None:
-        updates.append("stream_timezone = ?")
-        values.append(stream_timezone)
-    elif clear_stream_timezone:
-        updates.append("stream_timezone = NULL")
-
-    if duplicate_event_handling is not None:
-        updates.append("duplicate_event_handling = ?")
-        values.append(duplicate_event_handling)
-
-    if channel_assignment_mode is not None:
-        updates.append("channel_assignment_mode = ?")
-        values.append(channel_assignment_mode)
-
-    if sort_order is not None:
-        updates.append("sort_order = ?")
-        values.append(sort_order)
-
-    if total_stream_count is not None:
-        updates.append("total_stream_count = ?")
-        values.append(total_stream_count)
-
-    if m3u_group_id is not None:
-        updates.append("m3u_group_id = ?")
-        values.append(m3u_group_id)
-    elif clear_m3u_group_id:
-        updates.append("m3u_group_id = NULL")
-
-    if m3u_group_name is not None:
-        updates.append("m3u_group_name = ?")
-        values.append(m3u_group_name)
-    elif clear_m3u_group_name:
-        updates.append("m3u_group_name = NULL")
-
-    if m3u_account_id is not None:
-        updates.append("m3u_account_id = ?")
-        values.append(m3u_account_id)
-    elif clear_m3u_account_id:
-        updates.append("m3u_account_id = NULL")
-
-    if m3u_account_name is not None:
-        updates.append("m3u_account_name = ?")
-        values.append(m3u_account_name)
-    elif clear_m3u_account_name:
-        updates.append("m3u_account_name = NULL")
-
-    # Stream filtering fields
-    if stream_include_regex is not None:
-        updates.append("stream_include_regex = ?")
-        values.append(stream_include_regex)
-    elif clear_stream_include_regex:
-        updates.append("stream_include_regex = NULL")
-
-    if stream_include_regex_enabled is not None:
-        updates.append("stream_include_regex_enabled = ?")
-        values.append(int(stream_include_regex_enabled))
-
-    if stream_exclude_regex is not None:
-        updates.append("stream_exclude_regex = ?")
-        values.append(stream_exclude_regex)
-    elif clear_stream_exclude_regex:
-        updates.append("stream_exclude_regex = NULL")
-
-    if stream_exclude_regex_enabled is not None:
-        updates.append("stream_exclude_regex_enabled = ?")
-        values.append(int(stream_exclude_regex_enabled))
-
-    if custom_regex_teams is not None:
-        updates.append("custom_regex_teams = ?")
-        values.append(custom_regex_teams)
-    elif clear_custom_regex_teams:
-        updates.append("custom_regex_teams = NULL")
-
-    if custom_regex_teams_enabled is not None:
-        updates.append("custom_regex_teams_enabled = ?")
-        values.append(int(custom_regex_teams_enabled))
-
-    if custom_regex_date is not None:
-        updates.append("custom_regex_date = ?")
-        values.append(custom_regex_date)
-    elif clear_custom_regex_date:
-        updates.append("custom_regex_date = NULL")
-
-    if custom_regex_date_enabled is not None:
-        updates.append("custom_regex_date_enabled = ?")
-        values.append(int(custom_regex_date_enabled))
-
-    if custom_regex_month is not None:
-        updates.append("custom_regex_month = ?")
-        values.append(custom_regex_month)
-    elif clear_custom_regex_month:
-        updates.append("custom_regex_month = NULL")
-
-    if custom_regex_month_enabled is not None:
-        updates.append("custom_regex_month_enabled = ?")
-        values.append(int(custom_regex_month_enabled))
-
-    if custom_regex_day is not None:
-        updates.append("custom_regex_day = ?")
-        values.append(custom_regex_day)
-    elif clear_custom_regex_day:
-        updates.append("custom_regex_day = NULL")
-
-    if custom_regex_day_enabled is not None:
-        updates.append("custom_regex_day_enabled = ?")
-        values.append(int(custom_regex_day_enabled))
-
-    if custom_regex_time is not None:
-        updates.append("custom_regex_time = ?")
-        values.append(custom_regex_time)
-    elif clear_custom_regex_time:
-        updates.append("custom_regex_time = NULL")
-
-    if custom_regex_time_enabled is not None:
-        updates.append("custom_regex_time_enabled = ?")
-        values.append(int(custom_regex_time_enabled))
-
-    if custom_regex_league is not None:
-        updates.append("custom_regex_league = ?")
-        values.append(custom_regex_league)
-    elif clear_custom_regex_league:
-        updates.append("custom_regex_league = NULL")
-
-    if custom_regex_league_enabled is not None:
-        updates.append("custom_regex_league_enabled = ?")
-        values.append(int(custom_regex_league_enabled))
-
-    # EVENT_CARD specific regex
-    if custom_regex_fighters is not None:
-        updates.append("custom_regex_fighters = ?")
-        values.append(custom_regex_fighters)
-    elif clear_custom_regex_fighters:
-        updates.append("custom_regex_fighters = NULL")
-
-    if custom_regex_fighters_enabled is not None:
-        updates.append("custom_regex_fighters_enabled = ?")
-        values.append(int(custom_regex_fighters_enabled))
-
-    if custom_regex_event_name is not None:
-        updates.append("custom_regex_event_name = ?")
-        values.append(custom_regex_event_name)
-    elif clear_custom_regex_event_name:
-        updates.append("custom_regex_event_name = NULL")
-
-    if custom_regex_event_name_enabled is not None:
-        updates.append("custom_regex_event_name_enabled = ?")
-        values.append(int(custom_regex_event_name_enabled))
-
-    if skip_builtin_filter is not None:
-        updates.append("skip_builtin_filter = ?")
-        values.append(int(skip_builtin_filter))
-
-    # Team filtering - treat empty list as clear (NULL)
-    if include_teams is not None:
-        if include_teams:  # Non-empty list
-            updates.append("include_teams = ?")
-            values.append(json.dumps(include_teams))
-        else:  # Empty list - clear to NULL
-            updates.append("include_teams = NULL")
-    elif clear_include_teams:
-        updates.append("include_teams = NULL")
-
-    if exclude_teams is not None:
-        if exclude_teams:  # Non-empty list
-            updates.append("exclude_teams = ?")
-            values.append(json.dumps(exclude_teams))
-        else:  # Empty list - clear to NULL
-            updates.append("exclude_teams = NULL")
-    elif clear_exclude_teams:
-        updates.append("exclude_teams = NULL")
-
-    if team_filter_mode is not None:
-        updates.append("team_filter_mode = ?")
-        values.append(team_filter_mode)
-
-    if bypass_filter_for_playoffs is not None:
-        updates.append("bypass_filter_for_playoffs = ?")
-        values.append(int(bypass_filter_for_playoffs))
-    elif clear_bypass_filter_for_playoffs:
-        updates.append("bypass_filter_for_playoffs = NULL")
+    # Team filtering — empty list semantics: empty list also means "clear".
+    builder.set_list_or_clear("include_teams", include_teams, clear=clear_include_teams)
+    builder.set_list_or_clear("exclude_teams", exclude_teams, clear=clear_exclude_teams)
+    builder.set_("team_filter_mode", team_filter_mode)
+    builder.set_(
+        "bypass_filter_for_playoffs",
+        bypass_filter_for_playoffs,
+        clear=clear_bypass_filter_for_playoffs,
+        encoder=int,
+    )
 
     # Multi-sport enhancements (Phase 3)
-    if channel_sort_order is not None:
-        updates.append("channel_sort_order = ?")
-        values.append(channel_sort_order)
-
-    if overlap_handling is not None:
-        updates.append("overlap_handling = ?")
-        values.append(overlap_handling)
-
-    if enabled is not None:
-        updates.append("enabled = ?")
-        values.append(int(enabled))
+    builder.set_("channel_sort_order", channel_sort_order)
+    builder.set_("overlap_handling", overlap_handling)
+    builder.set_("enabled", enabled, encoder=int)
 
     # Per-group subscription overrides
-    if subscription_leagues is not None:
-        updates.append("subscription_leagues = ?")
-        values.append(json.dumps(subscription_leagues))
-    elif clear_subscription_leagues:
-        updates.append("subscription_leagues = NULL")
+    builder.set_(
+        "subscription_leagues",
+        subscription_leagues,
+        clear=clear_subscription_leagues,
+        encoder=json.dumps,
+    )
+    builder.set_(
+        "subscription_soccer_mode",
+        subscription_soccer_mode,
+        clear=clear_subscription_soccer_mode,
+    )
+    builder.set_(
+        "subscription_soccer_followed_teams",
+        subscription_soccer_followed_teams,
+        clear=clear_subscription_soccer_followed_teams,
+        encoder=json.dumps,
+    )
 
-    if subscription_soccer_mode is not None:
-        updates.append("subscription_soccer_mode = ?")
-        values.append(subscription_soccer_mode)
-    elif clear_subscription_soccer_mode:
-        updates.append("subscription_soccer_mode = NULL")
-
-    if subscription_soccer_followed_teams is not None:
-        updates.append("subscription_soccer_followed_teams = ?")
-        values.append(json.dumps(subscription_soccer_followed_teams))
-    elif clear_subscription_soccer_followed_teams:
-        updates.append("subscription_soccer_followed_teams = NULL")
-
-    if not updates:
+    if not builder.has_changes():
         return False
 
-    values.append(group_id)
-    query = f"UPDATE event_epg_groups SET {', '.join(updates)} WHERE id = ?"
-    cursor = conn.execute(query, values)
+    cursor = conn.execute(builder.build_query("event_epg_groups"), builder.params(group_id))
     if cursor.rowcount > 0:
         logger.info("[UPDATED] Event group id=%d", group_id)
         return True
@@ -903,6 +876,7 @@ def update_group_stats(
     group_id: int,
     stream_count: int,
     matched_count: int,
+    match_result_count: int = 0,
     filtered_stale: int = 0,
     filtered_include_regex: int = 0,
     filtered_exclude_regex: int = 0,
@@ -928,7 +902,8 @@ def update_group_stats(
         conn: Database connection
         group_id: Group ID
         stream_count: Number of streams after filtering (eligible for matching)
-        matched_count: Number of streams successfully matched to events
+        matched_count: Distinct streams matched to ≥1 event (coverage numerator)
+        match_result_count: Total matched results produced (volume; EPG fans out)
         filtered_stale: FILTERED - Stream marked as stale in Dispatcharr
         filtered_include_regex: FILTERED - Didn't match include regex
         filtered_exclude_regex: FILTERED - Matched exclude regex
@@ -951,6 +926,7 @@ def update_group_stats(
                SET last_refresh = CURRENT_TIMESTAMP,
                    stream_count = ?,
                    matched_count = ?,
+                   match_result_count = ?,
                    filtered_stale = ?,
                    filtered_include_regex = ?,
                    filtered_exclude_regex = ?,
@@ -967,6 +943,7 @@ def update_group_stats(
             (
                 stream_count,
                 matched_count,
+                match_result_count,
                 filtered_stale,
                 filtered_include_regex,
                 filtered_exclude_regex,
@@ -988,6 +965,7 @@ def update_group_stats(
                SET last_refresh = CURRENT_TIMESTAMP,
                    stream_count = ?,
                    matched_count = ?,
+                   match_result_count = ?,
                    filtered_stale = ?,
                    filtered_include_regex = ?,
                    filtered_exclude_regex = ?,
@@ -1003,6 +981,7 @@ def update_group_stats(
             (
                 stream_count,
                 matched_count,
+                match_result_count,
                 filtered_stale,
                 filtered_include_regex,
                 filtered_exclude_regex,
@@ -1018,6 +997,52 @@ def update_group_stats(
             ),
         )
     return cursor.rowcount > 0
+
+
+# =============================================================================
+# STALE SOURCE TRACKING (lylt)
+# =============================================================================
+
+
+def mark_group_source_seen(conn: Connection, group_id: int) -> None:
+    """Mark a group's M3U source as present (found in Dispatcharr this run).
+
+    Refreshes source_last_seen and clears the stale flag.
+    """
+    conn.execute(
+        """
+        UPDATE event_epg_groups
+        SET source_last_seen = datetime('now'), source_missing = 0
+        WHERE id = ?
+        """,
+        (group_id,),
+    )
+
+
+def mark_group_source_missing(conn: Connection, group_id: int) -> None:
+    """Mark a group's M3U source as missing (no longer exists in Dispatcharr)."""
+    conn.execute(
+        "UPDATE event_epg_groups SET source_missing = 1 WHERE id = ?",
+        (group_id,),
+    )
+
+
+def get_stale_groups(conn: Connection) -> list[dict]:
+    """Return enabled groups whose M3U source channel-group is gone (stale).
+
+    See the stale-source detection note in schema.sql. Excludes the
+    system channel-source group.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, name, display_name, m3u_group_id, m3u_group_name,
+               m3u_account_name, source_last_seen, total_stream_count
+        FROM event_epg_groups
+        WHERE enabled = 1 AND source_missing = 1 AND COALESCE(is_channel_source, 0) = 0
+        ORDER BY name
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # =============================================================================
@@ -1088,6 +1113,22 @@ def get_existing_group_ids(conn: Connection, group_ids: list[int]) -> set[int]:
         group_ids,
     ).fetchall()
     return {row["id"] for row in rows}
+
+
+def get_group_names_by_ids(conn: Connection, group_ids: list[int]) -> dict[int, str]:
+    """Resolve a batch of group IDs to their names in one query.
+
+    Returns:
+        ``{group_id: name}`` for the IDs that exist (missing IDs are omitted).
+    """
+    if not group_ids:
+        return {}
+    placeholders = ",".join("?" * len(group_ids))
+    rows = conn.execute(
+        f"SELECT id, name FROM event_epg_groups WHERE id IN ({placeholders})",
+        list(group_ids),
+    ).fetchall()
+    return {row["id"]: row["name"] for row in rows}
 
 
 def get_group_channel_count(conn: Connection, group_id: int) -> int:
