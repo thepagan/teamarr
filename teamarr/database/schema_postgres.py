@@ -126,27 +126,99 @@ def _translate_schema_upserts(sql: str) -> str:
                 "fallback_provider",
                 "fallback_league_id",
                 "tsdb_tier",
+                "enabled",
             ],
-            ["import_enabled"],
+            ["import_enabled", "enabled"],
         ),
     }
 
     for table_name, (conflict_target, update_columns, boolean_columns) in replacements.items():
-        sql = re.sub(
-            rf"INSERT\s+OR\s+REPLACE\s+INTO\s+{table_name}\s*\((?P<columns>.*?)\)\s*VALUES\s*(?P<values>.*?);",
-            lambda match: _build_upsert_sql(
-                table_name,
-                match.group("columns"),
-                match.group("values"),
-                conflict_target,
-                update_columns,
-                boolean_columns,
-            ),
+        sql = _translate_table_upserts(
             sql,
-            flags=re.IGNORECASE | re.DOTALL,
+            table_name,
+            conflict_target,
+            update_columns,
+            boolean_columns,
         )
 
     return sql
+
+
+def _translate_table_upserts(
+    sql: str,
+    table_name: str,
+    conflict_target: str,
+    update_columns: list[str],
+    boolean_columns: list[str],
+) -> str:
+    pattern = re.compile(
+        rf"INSERT\s+OR\s+REPLACE\s+INTO\s+{table_name}\s*"
+        r"\((?P<columns>.*?)\)\s*VALUES",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    output: list[str] = []
+    cursor = 0
+
+    while match := pattern.search(sql, cursor):
+        values_start = match.end()
+        statement_end = _find_sql_statement_end(sql, values_start)
+        values_sql = sql[values_start:statement_end].strip()
+        replacement = _build_upsert_sql(
+            table_name,
+            match.group("columns"),
+            values_sql,
+            conflict_target,
+            update_columns,
+            boolean_columns,
+        )
+        output.append(sql[cursor:match.start()])
+        output.append(replacement)
+        cursor = statement_end + 1
+
+    output.append(sql[cursor:])
+    return "".join(output)
+
+
+def _find_sql_statement_end(sql: str, start: int) -> int:
+    in_single = False
+    in_double = False
+    in_line_comment = False
+    i = start
+
+    while i < len(sql):
+        char = sql[i]
+        next_char = sql[i + 1] if i + 1 < len(sql) else ""
+
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if not in_single and not in_double and char == "-" and next_char == "-":
+            in_line_comment = True
+            i += 2
+            continue
+
+        if char == "'" and not in_double:
+            if in_single and next_char == "'":
+                i += 2
+                continue
+            in_single = not in_single
+            i += 1
+            continue
+
+        if char == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+
+        if char == ";" and not in_single and not in_double:
+            return i
+
+        i += 1
+
+    raise ValueError("Unterminated INSERT OR REPLACE statement in schema.sql")
 
 
 def _build_upsert_sql(
