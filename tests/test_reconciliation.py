@@ -4,7 +4,11 @@ import sqlite3
 
 import pytest
 
-from teamarr.database.reconciliation import reconcile_schema
+from teamarr.database.reconciliation import (
+    _quote_identifier,
+    _translate_column_definition,
+    reconcile_schema,
+)
 
 # Minimal schema.sql for testing — defines expected column state
 MINI_SCHEMA = """
@@ -238,6 +242,38 @@ class TestReconcileSchema:
         result = reconcile_schema(conn, MINI_SCHEMA)
         assert result.columns_added == 0
         assert "_settings_v65_backup" not in result.columns_by_table
+
+
+class TestPostgresReconciliationSql:
+    """Tests for PostgreSQL reconciliation SQL translation."""
+
+    def test_postgres_identifiers_use_double_quotes(self):
+        conn = type("PostgresConn", (), {"dialect": "postgres"})()
+
+        assert _quote_identifier(conn, "settings") == '"settings"'
+        assert _quote_identifier(conn, 'bad"name') == '"bad""name"'
+
+    def test_postgres_column_definition_translates_sqlite_defaults(self):
+        conn = type("PostgresConn", (), {"dialect": "postgres"})()
+
+        assert (
+            _translate_column_definition(
+                conn,
+                "BOOLEAN",
+                "0",
+                "BOOLEAN DEFAULT 0",
+            )
+            == "BOOLEAN DEFAULT FALSE"
+        )
+        assert (
+            _translate_column_definition(
+                conn,
+                "JSON",
+                "'[]'",
+                "JSON DEFAULT '[]'",
+            )
+            == "JSONB DEFAULT '[]'"
+        )
 
 
 class TestV65SchemaVersionCorrection:

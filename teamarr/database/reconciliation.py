@@ -110,9 +110,10 @@ def _reconcile_table(
 
     Returns list of column names that were added.
     """
+    table_ident = _quote_identifier(conn, table)
     # Get actual columns
     actual_cols = {
-        row["name"] for row in conn.execute(f"PRAGMA table_info([{table}])").fetchall()
+        row["name"] for row in conn.execute(f"PRAGMA table_info({table_ident})").fetchall()
     }
     if not actual_cols:
         return []  # Table exists but has no columns (shouldn't happen)
@@ -135,8 +136,10 @@ def _reconcile_table(
             col_def += f" DEFAULT {default}"
 
         try:
+            col_ident = _quote_identifier(conn, col_name)
+            col_def = _translate_column_definition(conn, col_type, default, col_def)
             conn.execute(
-                f"ALTER TABLE [{table}] ADD COLUMN [{col_name}] {col_def}"
+                f"ALTER TABLE {table_ident} ADD COLUMN {col_ident} {col_def}"
             )
             added.append(col_name)
             logger.info(
@@ -148,3 +151,38 @@ def _reconcile_table(
             logger.warning("[RECONCILE] %s", msg)
 
     return added
+
+
+def _quote_identifier(conn: sqlite3.Connection, name: str) -> str:
+    """Quote identifiers in the style accepted by the active database."""
+    if getattr(conn, "dialect", None) == "postgres":
+        escaped = name.replace('"', '""')
+        return f'"{escaped}"'
+    escaped = name.replace("]", "]]")
+    return f"[{escaped}]"
+
+
+def _translate_column_definition(
+    conn: sqlite3.Connection,
+    col_type: str,
+    default: str | None,
+    fallback: str,
+) -> str:
+    """Translate SQLite reference column definitions for PostgreSQL ALTERs."""
+    if getattr(conn, "dialect", None) != "postgres":
+        return fallback
+
+    pg_type = col_type or ""
+    if pg_type.upper() == "JSON":
+        pg_type = "JSONB"
+
+    col_def = pg_type
+    if default is not None:
+        translated_default = default
+        if pg_type.upper() == "BOOLEAN":
+            if default == "0":
+                translated_default = "FALSE"
+            elif default == "1":
+                translated_default = "TRUE"
+        col_def += f" DEFAULT {translated_default}"
+    return col_def
