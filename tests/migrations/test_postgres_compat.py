@@ -1,4 +1,4 @@
-from teamarr.database.postgres_compat import PostgresConnectionWrapper
+from teamarr.database.postgres_compat import DBRow, PostgresConnectionWrapper, StaticCursorWrapper
 
 
 def _wrapper_with_columns(columns: dict[str, dict[str, str]]) -> PostgresConnectionWrapper:
@@ -37,3 +37,17 @@ def test_insert_literal_boolean_values_are_translated_for_postgres():
     assert "VALUES (%s, %s, 'fuzzy', FALSE)" in translated
     assert "user_corrected = TRUE" in translated
     assert "WHERE user_corrected = FALSE" in translated
+
+
+def test_static_cursor_wrapper_supports_sqlite_style_iteration():
+    cursor = StaticCursorWrapper(
+        [
+            DBRow(["cid", "name"], [0, "id"]),
+            DBRow(["cid", "name"], [1, "channel_number_locked"]),
+        ]
+    )
+
+    cols = {row[1] for row in cursor}
+
+    assert cols == {"id", "channel_number_locked"}
+    assert cursor.fetchone() is None

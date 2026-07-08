@@ -88,6 +88,15 @@ class StaticCursorWrapper:
     def close(self) -> None:
         return None
 
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> DBRow:
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
     def __enter__(self):
         return self
 
