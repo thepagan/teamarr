@@ -257,7 +257,7 @@ class StreamMatchCache:
                         last_seen_generation = excluded.last_seen_generation,
                         match_method = excluded.match_method,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE user_corrected = 0  -- Don't overwrite user corrections
+                    WHERE stream_match_cache.user_corrected = 0  -- Don't overwrite user corrections
                     """,
                     (
                         fingerprint,
@@ -322,7 +322,7 @@ class StreamMatchCache:
                     DO UPDATE SET
                         last_seen_generation = excluded.last_seen_generation,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE user_corrected = 0  -- Don't overwrite user corrections
+                    WHERE stream_match_cache.user_corrected = 0  -- Don't overwrite user corrections
                     """,
                     (
                         fingerprint,
