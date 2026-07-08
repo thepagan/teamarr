@@ -102,3 +102,30 @@ def test_boolean_coalesce_literals_are_translated_for_postgres():
     assert "enabled = TRUE" in translated
     assert "source_missing = 1" in translated
     assert "COALESCE(is_channel_source, FALSE) = FALSE" in translated
+
+
+def test_qualified_upsert_boolean_guard_is_translated_for_postgres():
+    wrapper = _wrapper_with_columns(
+        {
+            "stream_match_cache": {
+                "fingerprint": "text",
+                "event_id": "text",
+                "user_corrected": "boolean",
+            }
+        }
+    )
+
+    translated = wrapper._translate_query(
+        """
+        INSERT INTO stream_match_cache
+            (fingerprint, event_id, user_corrected)
+        VALUES (?, ?, 0)
+        ON CONFLICT (fingerprint)
+        DO UPDATE SET
+            event_id = excluded.event_id
+        WHERE stream_match_cache.user_corrected = 0
+        """
+    )
+
+    assert "VALUES (%s, %s, FALSE)" in translated
+    assert "WHERE stream_match_cache.user_corrected = FALSE" in translated
