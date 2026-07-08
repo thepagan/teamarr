@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 
 _TRIGGER_RE = re.compile(
@@ -250,8 +251,7 @@ def _translate_upsert_boolean_values(
     if not boolean_indexes:
         return values_sql
 
-    def replace_tuple(match: re.Match[str]) -> str:
-        inner = match.group("inner")
+    def translate_tuple(inner: str) -> str:
         parts = _split_sql_csv(inner)
         for index in boolean_indexes:
             if index >= len(parts):
@@ -263,7 +263,60 @@ def _translate_upsert_boolean_values(
                 parts[index] = "FALSE"
         return "(" + ", ".join(parts) + ")"
 
-    return re.sub(r"\((?P<inner>[^()]*)\)", replace_tuple, values_sql)
+    return _rewrite_top_level_value_tuples(values_sql, translate_tuple)
+
+
+def _rewrite_top_level_value_tuples(
+    values_sql: str,
+    translate_tuple: Callable[[str], str],
+) -> str:
+    output: list[str] = []
+    i = 0
+
+    while i < len(values_sql):
+        if values_sql[i] != "(":
+            output.append(values_sql[i])
+            i += 1
+            continue
+
+        start = i
+        depth = 0
+        in_single = False
+        in_double = False
+
+        while i < len(values_sql):
+            char = values_sql[i]
+            next_char = values_sql[i + 1] if i + 1 < len(values_sql) else ""
+
+            if char == "'" and not in_double:
+                if in_single and next_char == "'":
+                    i += 2
+                    continue
+                in_single = not in_single
+                i += 1
+                continue
+
+            if char == '"' and not in_single:
+                in_double = not in_double
+                i += 1
+                continue
+
+            if not in_single and not in_double:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        output.append(translate_tuple(values_sql[start + 1 : i]))
+                        i += 1
+                        break
+
+            i += 1
+        else:
+            output.append(values_sql[start:])
+            break
+
+    return "".join(output)
 
 
 def _split_sql_csv(sql: str) -> list[str]:
