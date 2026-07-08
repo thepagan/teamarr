@@ -18,6 +18,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from teamarr.database.connection import resolve_db_path
+from teamarr.database.settings import get_backup_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,9 +89,8 @@ class BackupService:
 
     def _get_db_path(self) -> Path:
         """Get the current database file path."""
-        from teamarr.database.connection import DEFAULT_DB_PATH
 
-        return DEFAULT_DB_PATH
+        return resolve_db_path(None)
 
     def _is_postgres(self) -> bool:
         """Return whether the active backend is PostgreSQL."""
@@ -609,6 +611,43 @@ class BackupService:
             str(pre_restore_path) if pre_restore_path else None,
         )
 
+    def import_sqlite_database(self, sqlite_path: Path, target_conn: Any | None = None) -> int:
+        """Import a SQLite Teamarr database into PostgreSQL and return copied row count.
+
+        Used during first PostgreSQL startup after the schema has been created.
+        """
+        source_conn = sqlite3.connect(str(sqlite_path))
+        source_conn.row_factory = sqlite3.Row
+        try:
+            settings_row = source_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
+            ).fetchone()
+            if not settings_row:
+                raise RuntimeError("Invalid SQLite database: missing required Teamarr tables")
+
+            def copy_into(conn: Any) -> int:
+                source_tables = self._get_sqlite_tables(source_conn)
+                target_tables = self._get_postgres_tables(conn)
+                common_tables = [table for table in source_tables if table in target_tables]
+
+                self._truncate_postgres_tables(conn, target_tables)
+
+                row_count = 0
+                import_order = self._toposort_sqlite_tables(source_conn, common_tables)
+                for table_name in import_order:
+                    row_count += self._copy_sqlite_table_to_postgres(source_conn, conn, table_name)
+
+                self._reset_postgres_sequences(conn, common_tables)
+                return row_count
+
+            if target_conn is not None:
+                return copy_into(target_conn)
+
+            with self._db_factory() as conn:
+                return copy_into(conn)
+        finally:
+            source_conn.close()
+
     def _get_sqlite_tables(self, conn: sqlite3.Connection) -> list[str]:
         """Return user tables from a SQLite backup in stable schema order."""
         rows = conn.execute(
@@ -682,7 +721,7 @@ class BackupService:
         source_conn: sqlite3.Connection,
         target_conn: Any,
         table_name: str,
-    ) -> None:
+    ) -> int:
         """Copy all rows from a SQLite table into PostgreSQL."""
         pragma_table = table_name.replace('"', '""')
         columns = [
@@ -690,14 +729,14 @@ class BackupService:
             for row in source_conn.execute(f'PRAGMA table_info("{pragma_table}")').fetchall()
         ]
         if not columns:
-            return
+            return 0
 
         selected_columns = ", ".join(self._quote_ident(column_name) for column_name in columns)
         source_rows = source_conn.execute(
             f'SELECT {selected_columns} FROM "{pragma_table}"'
         ).fetchall()
         if not source_rows:
-            return
+            return 0
 
         insert_columns = ", ".join(self._quote_ident(column_name) for column_name in columns)
         placeholders = ", ".join("?" for _ in columns)
@@ -706,6 +745,7 @@ class BackupService:
             f"VALUES ({placeholders})"
         )
         target_conn.executemany(insert_sql, [tuple(row[column] for column in columns) for row in source_rows])
+        return len(source_rows)
 
     def _reset_postgres_sequences(self, conn: Any, table_names: list[str]) -> None:
         """Reset PostgreSQL sequences to match imported explicit IDs."""
@@ -774,7 +814,6 @@ def create_backup_service(
     """
     if backup_path is None:
         # Get path from settings
-        from teamarr.database.settings import get_backup_settings
 
         with db_factory() as conn:
             settings = get_backup_settings(conn)

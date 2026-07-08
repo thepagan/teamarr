@@ -7,7 +7,7 @@ docs_version: "2.3.1"
 
 # Supported Sports & Leagues
 
-Teamarr supports **134 pre-configured leagues** across 14 sports, plus **~250 dynamically discovered soccer leagues** from ESPN. Pre-configured leagues have full support (team import + event matching). Discovered leagues support event matching only.
+Teamarr supports **140 pre-configured leagues** across 15 sports, plus **~250 dynamically discovered soccer leagues** from ESPN. Pre-configured leagues have full support (team import + event matching). Discovered leagues support event matching only.
 
 ## Support Levels
 
@@ -63,6 +63,9 @@ TSDB leagues are classified by tier. Most work on the free tier. Leagues marked 
 | Women's National Basketball Association | `wnba` | ESPN |
 | NCAA Men's Basketball | `ncaam` | ESPN |
 | NCAA Women's Basketball | `ncaaw` | ESPN |
+| National Basketball League (Australia) | `nbl` | ESPN |
+| FIBA Basketball World Cup | `fiba` | TSDB (premium) |
+| FIBA Women's Basketball World Cup | `fiba-women` | TSDB (premium) |
 | Unrivaled | `unrivaled` | TSDB |
 
 ---
@@ -267,9 +270,9 @@ Motorsports are **Event Only** - no team import available.
 | League | ID | Provider | Type |
 |--------|-----|----------|------|
 | Formula 1 | `f1` | ESPN | Event |
-| NASCAR Cup Series | `nascar-cup` | ESPN | Event |
-| NASCAR Xfinity Series | `nascar-xfinity` | ESPN | Event |
-| NASCAR Craftsman Truck Series | `nascar-truck` | ESPN | Event |
+| NASCAR Cup Series | `nascar-cup` | NASCAR API | Event |
+| NASCAR O'Reilly Auto Parts Series | `nascar-xfinity` | NASCAR API | Event |
+| NASCAR Craftsman Truck Series | `nascar-truck` | NASCAR API | Event |
 | IndyCar Series | `indycar` | ESPN | Event |
 | IMSA SportsCar Championship | `imsa` | TSDB | Event |
 | FIA World Endurance Championship | `wec` | TSDB **P** | Event |
@@ -287,6 +290,40 @@ MotoGP (`motogp`) is currently disabled (`leagues.enabled = 0`) because ESPN's
 `racing/motogp` scoreboard endpoint returns no usable schedule or logo data.
 A TSDB-backed migration (idLeague 4407), similar to the IMSA/WEC session
 grouping above, is planned as a future enhancement.
+
+---
+
+## Tennis
+
+{: .warning }
+Tennis is **Event Only** - no team import available (players, not teams).
+
+| League | ID | Provider | Type |
+|--------|-----|----------|------|
+| ATP Tour | `atp` | ESPN | Event |
+| WTA Tour | `wta` | ESPN | Event |
+
+Tennis is matched **per match**: one channel per match, with the two players
+filling the standard home/away variables (`{home_team}`, `{away_team_abbrev}`
+= surname). Stream names like "Wimbledon: Zheng vs Norrie @ Jun 29 12:30 PM"
+match by player surname + date. Tennis-specific template variables cover the
+players (`{player1}`, `{player2}`, `{player1_last}`, `{player2_last}` — the
+combat `{fighter1}`/`{fighter2}` pattern) and the tournament context
+(`{tournament_name}`, `{tennis_round}`, `{tennis_court}`, `{tennis_draw}`).
+
+Grand slams are served by ESPN on both tour endpoints; Teamarr splits the
+draws so subscribing both leagues never duplicates a match — `atp` carries
+Men's Singles/Doubles and Mixed Doubles, `wta` carries Women's
+Singles/Doubles.
+
+Court day-feeds ("Wimbledon Day #6 No 1 Court", including multi-court names
+like "Court 4 AND Court 12") and round feeds ("Wimbledon Second Round") fan
+out to **every match on that court/round for the day** — ESPN's per-match
+court assignments provide the join. Each match gets its own channel, and the
+feed stream attaches to each channel around that match's time slot (the same
+attach/detach windowing EPG matching uses, honoring the global stream
+buffers). Ambient content (press conferences, highlight shows) is recognized
+and deliberately left unmatched.
 
 ---
 

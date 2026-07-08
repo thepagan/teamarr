@@ -25,8 +25,8 @@ import hashlib
 import json
 import logging
 import sqlite3
-import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
@@ -34,13 +34,6 @@ from typing import Any
 from teamarr.core import Event
 
 logger = logging.getLogger(__name__)
-
-try:
-    import psycopg2
-except Exception:  # pragma: no cover - optional dependency
-    psycopg2 = None
-
-DB_EXCEPTIONS = (sqlite3.Error, *( (psycopg2.Error,) if psycopg2 else () ))
 
 
 def compute_fingerprint(group_id: int, stream_id: int, stream_name: str) -> str:
@@ -98,6 +91,7 @@ class StreamMatchCache:
             get_connection: Function that returns a database connection
         """
         self._get_connection = get_connection
+        self._session_conn = None
         self._stats = {
             "hits": 0,
             "misses": 0,
@@ -105,11 +99,32 @@ class StreamMatchCache:
             "purged": 0,
             "failed_cached": 0,
             "user_corrections": 0,
-            "touch_flushes": 0,
         }
-        self._memory_entries: dict[str, StreamCacheEntry | None] = {}
-        self._pending_touches: dict[str, int] = {}
-        self._memory_lock = threading.Lock()
+
+    @contextmanager
+    def session(self):
+        """Reuse a single connection for a batch of cache operations.
+
+        The matcher does 2-3 cache round-trips per stream; without this each
+        one opens a fresh SQLite connection (+3 PRAGMAs). Writes commit once
+        at session end (the factory's context exit). Not re-entrant and not
+        thread-safe — the match loop runs on one thread.
+        """
+        with self._get_connection() as conn:
+            self._session_conn = conn
+            try:
+                yield
+            finally:
+                self._session_conn = None
+
+    @contextmanager
+    def _conn(self):
+        """Yield the session connection if one is pinned, else a fresh one."""
+        if self._session_conn is not None:
+            yield self._session_conn
+        else:
+            with self._get_connection() as conn:
+                yield conn
 
     def get(
         self,
@@ -131,20 +146,7 @@ class StreamMatchCache:
         """
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
 
-        with self._memory_lock:
-            if fingerprint in self._memory_entries:
-                cached_entry = self._memory_entries[fingerprint]
-                if cached_entry is None:
-                    self._stats["misses"] += 1
-                    return None
-                if cached_entry.event_id == FAILED_MATCH_EVENT_ID and not include_failed:
-                    self._stats["misses"] += 1
-                    return None
-
-                self._stats["hits"] += 1
-                return cached_entry
-
-        with self._get_connection() as conn:
+        with self._conn() as conn:
             cursor = conn.execute(
                 """
                 SELECT event_id, league, cached_event_data, match_method, user_corrected
@@ -174,78 +176,16 @@ class StreamMatchCache:
                     except json.JSONDecodeError:
                         cached_data = {}
 
-                entry = StreamCacheEntry(
+                return StreamCacheEntry(
                     event_id=row["event_id"],
                     league=row["league"],
                     cached_data=cached_data,
                     match_method=row["match_method"],
                     user_corrected=bool(row["user_corrected"]),
                 )
-                with self._memory_lock:
-                    self._memory_entries[fingerprint] = entry
-                return entry
 
             self._stats["misses"] += 1
-            with self._memory_lock:
-                self._memory_entries[fingerprint] = None
             return None
-
-    def preload_streams(self, group_id: int, streams: list[dict[str, Any]]) -> int:
-        """Bulk-load cache rows for a group's streams into the in-memory mirror."""
-        fingerprint_map = {
-            compute_fingerprint(group_id, stream.get("id", 0), stream.get("name", "")): (
-                stream.get("id", 0),
-                stream.get("name", ""),
-            )
-            for stream in streams
-            if stream.get("name") is not None
-        }
-        fingerprints = list(fingerprint_map.keys())
-        if not fingerprints:
-            return 0
-
-        loaded = 0
-        try:
-            with self._get_connection() as conn:
-                for start in range(0, len(fingerprints), 500):
-                    chunk = fingerprints[start : start + 500]
-                    placeholders = ",".join("?" for _ in chunk)
-                    rows = conn.execute(
-                        f"""
-                        SELECT fingerprint, event_id, league, cached_event_data,
-                               match_method, user_corrected
-                        FROM stream_match_cache
-                        WHERE fingerprint IN ({placeholders})
-                        """,
-                        chunk,
-                    ).fetchall()
-
-                    found: set[str] = set()
-                    with self._memory_lock:
-                        for row in rows:
-                            cached_data = {}
-                            if row["cached_event_data"]:
-                                try:
-                                    cached_data = json.loads(row["cached_event_data"])
-                                except json.JSONDecodeError:
-                                    cached_data = {}
-                            self._memory_entries[row["fingerprint"]] = StreamCacheEntry(
-                                event_id=row["event_id"],
-                                league=row["league"],
-                                cached_data=cached_data,
-                                match_method=row["match_method"],
-                                user_corrected=bool(row["user_corrected"]),
-                            )
-                            found.add(row["fingerprint"])
-                            loaded += 1
-
-                        for fingerprint in chunk:
-                            if fingerprint not in found and fingerprint not in self._memory_entries:
-                                self._memory_entries[fingerprint] = None
-            return loaded
-        except DB_EXCEPTIONS as e:
-            logger.warning("[STREAM_CACHE_ERROR] Preload failed: %s", e)
-            return 0
 
     def is_user_corrected(
         self,
@@ -300,7 +240,7 @@ class StreamMatchCache:
         cached_json = json.dumps(cached_data, default=_json_serializer)
 
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 conn.execute(
                     """
                     INSERT INTO stream_match_cache
@@ -308,7 +248,7 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
                         event_id = excluded.event_id,
@@ -317,7 +257,7 @@ class StreamMatchCache:
                         last_seen_generation = excluded.last_seen_generation,
                         match_method = excluded.match_method,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE stream_match_cache.user_corrected = FALSE  -- Don't overwrite user corrections
+                    WHERE user_corrected = 0  -- Don't overwrite user corrections
                     """,
                     (
                         fingerprint,
@@ -333,15 +273,6 @@ class StreamMatchCache:
                 )
                 conn.commit()
                 self._stats["sets"] += 1
-                with self._memory_lock:
-                    self._memory_entries[fingerprint] = StreamCacheEntry(
-                        event_id=event_id,
-                        league=league,
-                        cached_data=cached_data,
-                        match_method=match_method,
-                        user_corrected=False,
-                    )
-                    self._pending_touches.pop(fingerprint, None)
                 logger.debug(
                     "[STREAM_CACHE_SET] stream_id=%d event_id=%s method=%s",
                     stream_id,
@@ -349,7 +280,7 @@ class StreamMatchCache:
                     match_method,
                 )
                 return True
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.error("[STREAM_CACHE_ERROR] Set failed: %s", e)
             return False
 
@@ -377,7 +308,7 @@ class StreamMatchCache:
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
 
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 conn.execute(
                     """
                     INSERT INTO stream_match_cache
@@ -385,13 +316,13 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, '', NULL, ?, 'no_match', FALSE,
+                    VALUES (?, ?, ?, ?, ?, '', NULL, ?, 'no_match', 0,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
                         last_seen_generation = excluded.last_seen_generation,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE stream_match_cache.user_corrected = FALSE  -- Don't overwrite user corrections
+                    WHERE user_corrected = 0  -- Don't overwrite user corrections
                     """,
                     (
                         fingerprint,
@@ -404,18 +335,9 @@ class StreamMatchCache:
                 )
                 conn.commit()
                 self._stats["failed_cached"] += 1
-                with self._memory_lock:
-                    self._memory_entries[fingerprint] = StreamCacheEntry(
-                        event_id=FAILED_MATCH_EVENT_ID,
-                        league="",
-                        cached_data={},
-                        match_method="no_match",
-                        user_corrected=False,
-                    )
-                    self._pending_touches.pop(fingerprint, None)
                 logger.debug("[STREAM_CACHE_FAILED] stream_id=%d (no match)", stream_id)
                 return True
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.error("[STREAM_CACHE_ERROR] Set failed match: %s", e)
             return False
 
@@ -443,10 +365,9 @@ class StreamMatchCache:
         """
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
         cached_json = json.dumps(cached_data, default=_json_serializer)
-        generation = get_generation_counter(self._get_connection)
 
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 conn.execute(
                     """
                     INSERT INTO stream_match_cache
@@ -454,7 +375,7 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected, corrected_at,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user_corrected', TRUE, CURRENT_TIMESTAMP,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'user_corrected', 1, CURRENT_TIMESTAMP,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
@@ -462,7 +383,7 @@ class StreamMatchCache:
                         league = excluded.league,
                         cached_event_data = excluded.cached_event_data,
                         match_method = 'user_corrected',
-                        user_corrected = TRUE,
+                        user_corrected = 1,
                         corrected_at = CURRENT_TIMESTAMP,
                         updated_at = CURRENT_TIMESTAMP
                     """,
@@ -474,25 +395,15 @@ class StreamMatchCache:
                         event_id,
                         league,
                         cached_json,
-                        generation,
                     ),
                 )
                 conn.commit()
                 self._stats["user_corrections"] += 1
-                with self._memory_lock:
-                    self._memory_entries[fingerprint] = StreamCacheEntry(
-                        event_id=event_id,
-                        league=league,
-                        cached_data=cached_data,
-                        match_method="user_corrected",
-                        user_corrected=True,
-                    )
-                    self._pending_touches.pop(fingerprint, None)
                 logger.info(
                     "[STREAM_CACHE_CORRECTED] stream_id=%d event_id=%s", stream_id, event_id
                 )
                 return True
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.error("[STREAM_CACHE_ERROR] Set user correction: %s", e)
             return False
 
@@ -510,20 +421,17 @@ class StreamMatchCache:
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
 
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 cursor = conn.execute(
                     """
                     DELETE FROM stream_match_cache
-                    WHERE fingerprint = ? AND user_corrected = TRUE
+                    WHERE fingerprint = ? AND user_corrected = 1
                     """,
                     (fingerprint,),
                 )
                 conn.commit()
-                with self._memory_lock:
-                    self._memory_entries.pop(fingerprint, None)
-                    self._pending_touches.pop(fingerprint, None)
                 return cursor.rowcount > 0
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Remove user correction: %s", e)
             return False
 
@@ -548,48 +456,22 @@ class StreamMatchCache:
             True if updated
         """
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
-        with self._memory_lock:
-            if fingerprint not in self._memory_entries:
-                return False
-            pending = self._pending_touches.get(fingerprint)
-            if pending is None or generation > pending:
-                self._pending_touches[fingerprint] = generation
-        return True
 
-    def flush_pending_touches(self) -> int:
-        """Flush deferred touch updates in bulk."""
-        with self._memory_lock:
-            pending_touches = self._pending_touches.copy()
-            self._pending_touches.clear()
-
-        if not pending_touches:
-            return 0
-
-        updated = 0
         try:
-            with self._get_connection() as conn:
-                for fingerprint, generation in pending_touches.items():
-                    cursor = conn.execute(
-                        """
-                        UPDATE stream_match_cache
-                        SET last_seen_generation = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE fingerprint = ?
-                        """,
-                        (generation, fingerprint),
-                    )
-                    updated += cursor.rowcount
+            with self._conn() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE stream_match_cache
+                    SET last_seen_generation = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE fingerprint = ?
+                    """,
+                    (generation, fingerprint),
+                )
                 conn.commit()
-            if updated:
-                self._stats["touch_flushes"] += 1
-            return updated
-        except DB_EXCEPTIONS as e:
-            with self._memory_lock:
-                for fingerprint, generation in pending_touches.items():
-                    existing = self._pending_touches.get(fingerprint)
-                    if existing is None or generation > existing:
-                        self._pending_touches[fingerprint] = generation
-            logger.warning("[STREAM_CACHE_ERROR] Flush touches failed: %s", e)
-            return 0
+                return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logger.warning("[STREAM_CACHE_ERROR] Touch failed: %s", e)
+            return False
 
     def purge_stale(self, current_generation: int) -> int:
         """Remove stale entries not seen recently.
@@ -604,10 +486,9 @@ class StreamMatchCache:
             Number of entries purged
         """
         purged_total = 0
-        self.flush_pending_touches()
 
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 # Purge stale failed matches (shorter TTL)
                 # Never purge user corrections
                 failed_threshold = current_generation - self.PURGE_FAILED_AFTER_GENERATIONS
@@ -617,7 +498,7 @@ class StreamMatchCache:
                         DELETE FROM stream_match_cache
                         WHERE last_seen_generation < ?
                           AND event_id = ?
-                          AND user_corrected = FALSE
+                          AND user_corrected = 0
                         """,
                         (failed_threshold, FAILED_MATCH_EVENT_ID),
                     )
@@ -635,7 +516,7 @@ class StreamMatchCache:
                         DELETE FROM stream_match_cache
                         WHERE last_seen_generation < ?
                           AND event_id != ?
-                          AND user_corrected = FALSE
+                          AND user_corrected = 0
                         """,
                         (success_threshold, FAILED_MATCH_EVENT_ID),
                     )
@@ -652,12 +533,8 @@ class StreamMatchCache:
                     self._stats["purged"] += purged_total
                     logger.info("[STREAM_CACHE_PURGE] Removed %d total stale entries", purged_total)
 
-                with self._memory_lock:
-                    self._memory_entries.clear()
-                    self._pending_touches.clear()
-
                 return purged_total
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Purge failed: %s", e)
             return 0
 
@@ -682,20 +559,17 @@ class StreamMatchCache:
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
 
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 cursor = conn.execute(
                     "DELETE FROM stream_match_cache WHERE fingerprint = ?",
                     (fingerprint,),
                 )
                 conn.commit()
                 deleted = cursor.rowcount > 0
-                with self._memory_lock:
-                    self._memory_entries.pop(fingerprint, None)
-                    self._pending_touches.pop(fingerprint, None)
                 if deleted:
                     logger.debug("[STREAM_CACHE_DELETE] stream_id=%d", stream_id)
                 return deleted
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Delete failed: %s", e)
             return False
 
@@ -711,19 +585,16 @@ class StreamMatchCache:
             Number of entries cleared
         """
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 cursor = conn.execute(
                     "DELETE FROM stream_match_cache WHERE group_id = ?",
                     (group_id,),
                 )
                 cleared = cursor.rowcount
                 conn.commit()
-                with self._memory_lock:
-                    self._memory_entries.clear()
-                    self._pending_touches.clear()
                 logger.info("[STREAM_CACHE_CLEAR] group=%d entries=%d", group_id, cleared)
                 return cleared
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Clear group failed: %s", e)
             return 0
 
@@ -734,16 +605,13 @@ class StreamMatchCache:
             Number of entries cleared
         """
         try:
-            with self._get_connection() as conn:
+            with self._conn() as conn:
                 cursor = conn.execute("DELETE FROM stream_match_cache")
                 cleared = cursor.rowcount
                 conn.commit()
-                with self._memory_lock:
-                    self._memory_entries.clear()
-                    self._pending_touches.clear()
                 logger.info("[STREAM_CACHE_CLEAR] All entries cleared: %d", cleared)
                 return cleared
-        except DB_EXCEPTIONS as e:
+        except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Clear all failed: %s", e)
             return 0
 
@@ -753,7 +621,7 @@ class StreamMatchCache:
 
     def get_size(self) -> int:
         """Get total number of cached entries."""
-        with self._get_connection() as conn:
+        with self._conn() as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM stream_match_cache")
             return cursor.fetchone()[0]
 
@@ -797,7 +665,7 @@ def get_generation_counter(get_connection: Callable) -> int:
             cursor = conn.execute("SELECT epg_generation_counter FROM settings WHERE id = 1")
             row = cursor.fetchone()
             return row["epg_generation_counter"] if row else 0
-    except DB_EXCEPTIONS:
+    except sqlite3.Error:
         return 0
 
 
@@ -849,28 +717,3 @@ def _json_serializer(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-
-def get_user_corrections(
-    conn: sqlite3.Connection,
-    group_id: int | None = None,
-    limit: int = 100,
-) -> list[dict]:
-    """Get user-corrected stream matches from the cache."""
-    query = """
-        SELECT fingerprint, group_id, stream_id, stream_name,
-               event_id, league, match_method, corrected_at
-        FROM stream_match_cache
-        WHERE user_corrected = TRUE
-    """
-    params: list = []
-
-    if group_id is not None:
-        query += " AND group_id = ?"
-        params.append(group_id)
-
-    query += " ORDER BY corrected_at DESC LIMIT ?"
-    params.append(limit)
-
-    rows = conn.execute(query, params).fetchall()
-    return [dict(row) for row in rows]

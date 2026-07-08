@@ -388,6 +388,29 @@ CREATE TABLE IF NOT EXISTS settings (
     global_consolidation_mode TEXT DEFAULT 'consolidate'
         CHECK(global_consolidation_mode IN ('consolidate', 'separate')),
 
+    -- Channel Numbering Stability Mode (how existing channel numbers behave across runs)
+    -- 'compact': Re-sort all channels into contiguous priority order every run (legacy default).
+    --            Tidy guide, but a live channel's number can shift when events start/end.
+    -- 'gap':     Sticky + gap-aware. Existing channels keep their number for their whole
+    --            lifecycle; new channels slot into a free number in their sorted neighborhood
+    --            (using channel_gap_size spacing) or append. Deleted slots are reused.
+    -- 'strict':  Sticky + no-drift. Existing channels never move; new channels that would
+    --            displace others are appended to the end of the used range. Gaps are reclaimed
+    --            only at the daily reset.
+    -- For 'gap'/'strict', a full re-layout (the only time existing channels move) runs on the
+    -- first generation at/after channel_daily_reset_time each day, if channel_daily_reset_enabled.
+    channel_stability_mode TEXT DEFAULT 'compact'
+        CHECK(channel_stability_mode IN ('compact', 'gap', 'strict')),
+    channel_gap_size INTEGER DEFAULT 3,                 -- Spacing between channels in 'gap' mode (1 = none)
+    channel_daily_reset_enabled BOOLEAN DEFAULT 1,      -- Run the periodic full re-layout (gap/strict only)
+    channel_daily_reset_time TEXT DEFAULT '04:00',      -- Local HH:MM low-traffic window for the reset
+    last_channel_reset_at TEXT,                          -- Internal: timestamp of last full reset
+    -- Internal: one-shot "re-grid on the next generation" flag. Set by the manual
+    -- "Re-grid now" action and auto-armed when a setting that only takes effect at
+    -- re-layout changes (gap size, stability mode, sort priority). Bypasses the
+    -- daily time gate and reset_enabled; cleared once the re-layout runs.
+    force_channel_relayout_pending BOOLEAN DEFAULT 0,
+
     -- Feed Separation (HOME/AWAY stream detection)
     -- When enabled, detects feed indicators in stream names and creates separate channels per feed
     feed_separation_enabled BOOLEAN DEFAULT 0,          -- Master toggle (off by default)
@@ -433,7 +456,7 @@ CREATE TABLE IF NOT EXISTS settings (
     channelsdvr_lineup_id TEXT,
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 76
+    schema_version INTEGER DEFAULT 78
 );
 
 -- Insert default settings
@@ -689,6 +712,10 @@ CREATE TABLE IF NOT EXISTS managed_channels (
     tvg_id TEXT NOT NULL,  -- Not UNIQUE: soft-deleted records can share tvg_id with active
     channel_name TEXT NOT NULL,
     channel_number TEXT,
+    -- Stability lock (gap/strict modes only; ignored in compact mode):
+    -- 0 = not yet placed by the stability allocator (newly created, or mode just enabled)
+    -- 1 = number finalized and sticky — never moved except by the daily reset re-layout
+    channel_number_locked INTEGER DEFAULT 0,
     logo_url TEXT,
 
     -- Dispatcharr Integration
@@ -736,7 +763,6 @@ CREATE TABLE IF NOT EXISTS managed_channels (
 
     -- Legacy (for backwards compatibility)
     expires_at TIMESTAMP,
-    external_channel_id INTEGER,             -- Alias for dispatcharr_channel_id
 
     FOREIGN KEY (event_epg_group_id) REFERENCES event_epg_groups(id) ON DELETE SET NULL
     -- Note: No table-level UNIQUE on (event_id, event_provider) - use partial index instead
@@ -948,8 +974,13 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('wnba', 'espn', 'basketball/wnba', NULL, 'Women''s National Basketball Association', 'basketball', 'https://a.espncdn.com/i/teamlogos/leagues/500/wnba.png', NULL, 1, 'WNBA', 'wnba', 'team_vs_team', 'WNBA Basketball', NULL, NULL, NULL, 1),
     ('mens-college-basketball', 'espn', 'basketball/mens-college-basketball', NULL, 'NCAA Men''s Basketball', 'basketball', 'https://www.ncaa.com/modules/custom/casablanca_core/img/sportbanners/basketball.png', NULL, 1, 'NCAAM', 'ncaam', 'team_vs_team', 'College Basketball', NULL, NULL, NULL, 1),
     ('womens-college-basketball', 'espn', 'basketball/womens-college-basketball', NULL, 'NCAA Women''s Basketball', 'basketball', 'https://www.ncaa.com/modules/custom/casablanca_core/img/sportbanners/basketball.png', NULL, 1, 'NCAAW', 'ncaaw', 'team_vs_team', 'Women''s College Basketball', NULL, NULL, NULL, 1),
+    ('nbl', 'espn', 'basketball/nbl', NULL, 'National Basketball League (Australia)', 'basketball', 'https://a.espncdn.com/i/teamlogos/leagues/500/nbl.png', 'https://a.espncdn.com/i/teamlogos/leagues/500-dark/nbl.png', 1, 'NBL', 'nbl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
 
     -- Basketball (TSDB) - Leagues not on ESPN
+    -- FIBA World Cups: ESPN's basketball/fiba only tracks the World Cup final
+    -- event itself (dead between tournaments); TSDB tracks qualifiers year-round.
+    ('fiba', 'tsdb', '4549', 'FIBA Basketball World Cup', 'FIBA Basketball World Cup', 'basketball', 'https://r2.thesportsdb.com/images/media/league/badge/x45gjq1764423537.png', NULL, 1, 'FIBA', 'fiba', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('fiba-women', 'tsdb', '4891', 'FIBA Womens World Cup', 'FIBA Women''s Basketball World Cup', 'basketball', 'https://r2.thesportsdb.com/images/media/league/badge/tlkdaq1726930250.png', NULL, 1, 'FIBA W', 'fibaw', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
     ('unrivaled', 'tsdb', '5622', 'Unrivaled Basketball', 'Unrivaled', 'basketball', 'https://r2.thesportsdb.com/images/media/league/badge/71mier1746291561.png', NULL, 1, NULL, 'unrivaled', 'team_vs_team', 'Unrivaled Basketball', NULL, NULL, 'free', 1),
 
     -- Hockey (ESPN)
@@ -1164,14 +1195,16 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
 
 
     -- Motorsports (ESPN) - Race weekends with multi-driver sessions, no home/away
-    -- 'f1' is the fully-implemented reference league; the others are seeded
-    -- against their ESPN scoreboard slugs but not yet verified end-to-end
-    -- (NASCAR exposes only a single race-session competition; IndyCar/MotoGP
-    -- session structure needs confirmation in a follow-up).
+    -- 'f1' is the fully-implemented reference league; IndyCar/MotoGP session
+    -- structure needs confirmation in a follow-up.
     ('f1', 'espn', 'racing/f1', NULL, 'Formula 1', 'racing', 'https://a.espncdn.com/i/teamlogos/leagues/500/f1.png', NULL, 0, 'F1', 'f1', 'event', 'Formula 1 Racing', NULL, NULL, NULL, 1),
-    ('nascar-cup', 'espn', 'racing/nascar-premier', NULL, 'NASCAR Cup Series', 'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Cup', 'nascar-cup', 'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
-    ('nascar-xfinity', 'espn', 'racing/nascar-secondary', NULL, 'NASCAR Xfinity Series', 'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Xfinity', 'nascar-xfinity', 'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
-    ('nascar-truck', 'espn', 'racing/nascar-truck', NULL, 'NASCAR Craftsman Truck Series', 'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Trucks', 'nascar-truck', 'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
+
+    -- Motorsports (NASCAR API) - authoritative session schedules from cf.nascar.com.
+    -- provider_league_id encodes the NASCAR series number (1=Cup, 2=ORAP, 3=Trucks).
+    -- The NASCAR provider uses hardcoded URL patterns; this field is for reference only.
+    ('nascar-cup',      'nascar', '1', NULL, 'NASCAR Cup Series',                    'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Cup',   'nascar-cup',      'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
+    ('nascar-xfinity',  'nascar', '2', NULL, 'NASCAR O''Reilly Auto Parts Series',   'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR ORAP',  'nascar-xfinity',  'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
+    ('nascar-truck',    'nascar', '3', NULL, 'NASCAR Craftsman Truck Series',         'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Trucks','nascar-truck',    'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
     ('indycar', 'espn', 'racing/irl', NULL, 'IndyCar Series', 'racing', 'https://a.espncdn.com/combiner/i?img=/i/espn/teamlogos/500/indycar_series.png', NULL, 0, 'IndyCar', 'indycar', 'event', 'IndyCar Racing', NULL, NULL, NULL, 1),
     -- Disabled: ESPN's racing/motogp scoreboard endpoint returns HTTP 400 (no usable schedule/logo data).
     -- Re-enable once migrated to TSDB (idLeague 4407) - planned v2 feature alongside IMSA/WEC session grouping.
@@ -1180,7 +1213,15 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     -- Motorsports (TSDB) - session schedules grouped from TheSportsDB's flat
     -- per-event-per-session season data (teamarr/providers/tsdb/racing.py).
     ('imsa', 'tsdb', '4488', 'IMSA SportsCar Championship', 'IMSA WeatherTech SportsCar Championship', 'racing', 'https://r2.thesportsdb.com/images/media/league/badge/t3fpd41536244390.png', NULL, 0, 'IMSA', 'imsa', 'event', 'Motor Racing', NULL, NULL, 'premium', 1),
-    ('wec', 'tsdb', '4413', 'WEC', 'FIA World Endurance Championship', 'racing', 'https://r2.thesportsdb.com/images/media/league/badge/2fjrko1705526433.png', NULL, 0, 'WEC', 'wec', 'event', 'Motor Racing', NULL, NULL, 'premium', 1);
+    ('wec', 'tsdb', '4413', 'WEC', 'FIA World Endurance Championship', 'racing', 'https://r2.thesportsdb.com/images/media/league/badge/2fjrko1705526433.png', NULL, 0, 'WEC', 'wec', 'event', 'Motor Racing', NULL, NULL, 'premium', 1),
+
+    -- Tennis (ESPN) - One Event per MATCH (players as home/away), parsed from
+    -- tournament groupings (teamarr/providers/espn/tennis.py). Grand slams are
+    -- served on both endpoints; each league keeps only its own draw types
+    -- (atp: men's + mixed doubles, wta: women's) so subscribing both never
+    -- duplicates a match. import_enabled=0: players aren't importable teams.
+    ('atp', 'espn', 'tennis/atp', NULL, 'ATP Tour', 'tennis', 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/42/Letters_ATP.svg/500px-Letters_ATP.svg.png', NULL, 0, 'ATP', 'atp', 'event', 'Tennis', NULL, NULL, NULL, 1),
+    ('wta', 'espn', 'tennis/wta', NULL, 'WTA Tour', 'tennis', 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0a/WTA_2025.svg/500px-WTA_2025.svg.png', NULL, 0, 'WTA', 'wta', 'event', 'Tennis', NULL, NULL, NULL, 1);
 
 -- =============================================================================
 -- STREAM_MATCH_CACHE TABLE
@@ -1220,8 +1261,10 @@ CREATE TABLE IF NOT EXISTS stream_match_cache (
     -- fuzzy: matched via fuzzy string matching
     -- keyword: matched via keyword (UFC, boxing event cards)
     -- no_match: failed to match (short TTL)
+    -- direct: unambiguous non-fuzzy match (racing single-event, tennis surname pair)
+    -- epg: matched via EPG program title (epic 183)
     match_method TEXT DEFAULT 'fuzzy'
-        CHECK(match_method IN ('cache', 'user_corrected', 'alias', 'pattern', 'fuzzy', 'keyword', 'no_match')),
+        CHECK(match_method IN ('cache', 'user_corrected', 'alias', 'pattern', 'fuzzy', 'keyword', 'no_match', 'direct', 'epg')),
 
     -- User correction tracking
     user_corrected BOOLEAN DEFAULT 0,
@@ -1733,6 +1776,35 @@ CREATE INDEX IF NOT EXISTS idx_processing_runs_group ON processing_runs(group_id
 CREATE INDEX IF NOT EXISTS idx_processing_runs_status ON processing_runs(status);
 -- Composite index for filtering by type and ordering by date
 CREATE INDEX IF NOT EXISTS idx_processing_runs_type_created ON processing_runs(run_type, created_at DESC);
+
+
+-- =============================================================================
+-- LIFETIME_STATS TABLE
+-- Singleton accumulator for all-time full-EPG generation totals.
+-- processing_runs is pruned to a rolling window (cleanup_old_runs) and can be
+-- cleared from the UI, so lifetime totals cannot be derived from it. Instead,
+-- cleanup_old_runs/clear_all_runs fold the sums of full_epg rows into this row
+-- BEFORE deleting them; get_current_stats reports lifetime + live.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS lifetime_stats (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    runs INTEGER DEFAULT 0,
+    successful_runs INTEGER DEFAULT 0,
+    failed_runs INTEGER DEFAULT 0,
+    streams_matched INTEGER DEFAULT 0,
+    streams_unmatched INTEGER DEFAULT 0,
+    streams_cached INTEGER DEFAULT 0,
+    channels_created INTEGER DEFAULT 0,
+    channels_deleted INTEGER DEFAULT 0,
+    programmes_total INTEGER DEFAULT 0,
+    programmes_events INTEGER DEFAULT 0,
+    programmes_pregame INTEGER DEFAULT 0,
+    programmes_postgame INTEGER DEFAULT 0,
+    programmes_idle INTEGER DEFAULT 0
+);
+
+INSERT OR IGNORE INTO lifetime_stats (id) VALUES (1);
 
 
 -- =============================================================================

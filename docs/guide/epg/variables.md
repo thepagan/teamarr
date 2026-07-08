@@ -11,7 +11,7 @@ redirect_from:
 
 # Template Variables
 
-Templates use variables enclosed in curly braces that get replaced with real data when EPG is generated. Teamarr provides 226 variables across 19 categories.
+Templates use variables enclosed in curly braces that get replaced with real data when EPG is generated. Teamarr provides 240 variables across 20 categories.
 
 ## Team vs Event Templates
 
@@ -517,6 +517,19 @@ F1, NASCAR, IndyCar, and MotoGP-specific variables for event templates. These ar
 | `{next_session_name}` | Display name of the next session | `Qualifying` |
 | `{next_session_time}` | Start time of the next session | `9:00 AM` |
 
+### Race Format
+
+NASCAR-style scheduled race format (lap counts and stages). Empty for series whose provider doesn't supply them (e.g. F1).
+
+| Variable | Description | Sample |
+|----------|-------------|--------|
+| `{race_laps}` | Scheduled lap count | `200` |
+| `{race_distance}` | Scheduled distance in miles | `500` |
+| `{stage_1_laps}` | Cumulative lap where stage 1 ends | `60` |
+| `{stage_2_laps}` | Cumulative lap where stage 2 ends | `125` |
+| `{stage_3_laps}` | Cumulative lap where stage 3 ends | `200` |
+| `{stage_summary}` | All stage endpoints joined | `60/125/200` |
+
 ### Grid & Qualifying
 
 | Variable | Description | Sample |
@@ -538,6 +551,29 @@ F1, NASCAR, IndyCar, and MotoGP-specific variables for event templates. These ar
 
 {: .note }
 Race weekends are split into per-session channels (Practice 1/2/3, Qualifying, Sprint, Race). Each channel gets a `{session_type}`/`{session_name}` value indicating which session it covers. Grid and results variables read from the qualifying and race sessions respectively, and are empty until those sessions have data.
+
+---
+
+## Tennis
+
+ATP/WTA-specific variables for event templates. Tennis is matched **per
+match** — one channel per match with the players filling the standard
+home/away variables (`{home_team}` = full name, `{home_team_abbrev}` =
+surname). These variables add the tournament context and are **event-only**.
+
+| Variable | Description | Sample |
+|----------|-------------|--------|
+| `{player1}` | First player/pair in the matchup (no home player in tennis) | `Flavio Cobolli` |
+| `{player2}` | Second player/pair in the matchup | `Alex de Minaur` |
+| `{player1_last}` | First player's surname (multi-word preserved) | `Cobolli` |
+| `{player2_last}` | Second player's surname | `de Minaur` |
+| `{tournament_name}` | Tournament name | `Wimbledon` |
+| `{tennis_round}` | Round within the draw | `Round 4`, `Quarterfinals` |
+| `{tennis_court}` | Assigned court | `Centre Court`, `No. 1 Court` |
+| `{tennis_draw}` | Draw type | `Men's Singles`, `Mixed Doubles` |
+
+{: .note }
+Example: `{tournament_name} {tennis_draw}: {player1_last} vs {player2_last}` renders as `Wimbledon Men's Singles: Cobolli vs de Minaur`. Like combat's `{fighter1}`/`{fighter2}`, the player variables are the idiomatic choice — the underlying home/away team variables also resolve, but tennis has no real home player.
 
 ---
 

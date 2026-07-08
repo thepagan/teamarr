@@ -64,7 +64,7 @@ bd sync                               # Sync beads data
 4. **Review docs impact** (MANDATORY consideration — not every change needs doc updates, but every change must be *evaluated* against the Documentation Updates table below). If the change touches user-visible behavior, template variables, schema, providers, config, API endpoints, or changes a count/version referenced in docs, update the relevant page(s) in the same commit or a paired commit. Do not wait for the user to prompt.
 5. **Run quality gates** (MANDATORY when shipping):
    ```bash
-   ruff check teamarr/
+   ruff check teamarr/ tests/
    pytest tests/ -v
    cd frontend && npm run build
    ```
@@ -103,7 +103,7 @@ When the user says **"release"**, **"/release"**, or **"version bump"**, execute
 3. **Quality gates** (MANDATORY):
    ```bash
    source .venv/bin/activate
-   ruff check teamarr/
+   ruff check teamarr/ tests/
    pytest tests/ -v
    cd frontend && npm run build
    ```
@@ -116,7 +116,7 @@ When the user says **"release"**, **"/release"**, or **"version bump"**, execute
    git push origin main
    git checkout dev
    ```
-7. **Create GitHub release** — `gh release create v<version> --repo Pharaoh-Labs/teamarr --target main` with summarized release notes (not commit-by-commit — group into categories)
+7. **Create GitHub release** — `gh release create v<version> --repo Pharaoh-Labs/teamarr --target main` with summarized release notes (not commit-by-commit — group into categories). CI notes: the tag push triggers `release.yml`, which sees the release already exists and skips (it only auto-creates releases for raw tag pushes); Docker publish and release are gated on the Tests workflow and on the tag matching `pyproject.toml`'s version — a mismatched tag will not publish.
 8. **Generate Discord changelog** — use the Release Template below, output ready to paste
 9. **Update plans/STATUS.md** — add release to changelog, update version
 
@@ -224,7 +224,7 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Version | `pyproject.toml` line 7 |
 | Dependencies | `pyproject.toml` (ranges) + `uv.lock` (pinned, used by the Docker build) — run `uv lock` after any dependency change or `--frozen` builds fail |
 | League configs | `teamarr/database/schema.sql` |
-| Schema version | `teamarr/database/schema.sql` (v76) |
+| Schema version | `teamarr/database/schema.sql` (v78) |
 | Schema reconciliation | `teamarr/database/reconciliation.py` |
 | Provider registration | `teamarr/providers/__init__.py` |
 
@@ -232,14 +232,15 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 
 ```
 API Layer        → teamarr/api/routes/ (18 modules)
-Consumer Layer   → teamarr/consumers/ (orchestrator, team_epg, event_epg, cache/, lifecycle/, matching/)
+Consumer Layer   → teamarr/consumers/ (generation, team_epg, event_epg, event_group_processor/, cache/, lifecycle/, matching/)
 Service Layer    → teamarr/services/sports_data.py
-Provider Layer   → teamarr/providers/ (espn, hockeytech, mlbstats, tsdb)
+Provider Layer   → teamarr/providers/ (espn, hockeytech, mlbstats, nascar, tsdb)
 ```
 
 **Providers** (lower priority = tried first):
 - ESPN (0) - Primary, most leagues
 - Squiggle (30) - AFL (Australian Football League); free, no key required
+- NASCAR (35) - NASCAR Cup/O'Reilly (Xfinity)/Trucks; official cf.nascar.com schedule API, full weekend sessions, no key
 - MLB Stats (40) - MiLB (Triple-A through Rookie)
 - HockeyTech (50) - CHL, AHL, PWHL, USHL
 - TSDB (100) - Cricket, rugby, boxing, Scandinavian leagues, uru.2
@@ -250,10 +251,15 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 ## Key Subsystems
 
 **Template Engine** (`teamarr/templates/`):
-- 226 variables in `variables/` (19 categories)
+- 240 variables in `variables/` (20 categories)
 - 23 condition evaluators in `conditions.py`
 - Suffix rules: `.next`, `.last` for multi-game scenarios
 - Template scope: each variable is tagged `TemplateScope.ALL` / `TEAM_ONLY` / `EVENT_ONLY` — gates variable picker by template type via `GET /variables?template_type=…`
+
+**Settings Registry** (`teamarr/database/settings/`, bead `teamarrv2-iua3.8`):
+- Each setting is declared once: a typed dataclass field in `types.py` plus a column/JSON/hook binding in `registry.py` (`GROUPS`). `read.py` and `update.py` are generic (registry-driven); group-specific behavior (validation, relayout arming, clear-to-NULL, `_NOT_PROVIDED` sentinels) lives in the update wrappers — public signatures are stable, don't change them without auditing callers.
+- Adding a setting: add the column to `schema.sql` + the field to its dataclass; touch `registry.py` only if the column name differs from the field name or it needs JSON/custom parse/dump hooks. Parity tests (`tests/test_settings_registry.py`) enforce schema ↔ registry ↔ dataclass ↔ Pydantic alignment.
+- API routes build responses with `to_model(Model, dataclass)` from `api/routes/settings/models.py`; frontend hooks are factory-generated with scoped cache invalidation (`frontend/src/hooks/useSettings.ts`).
 
 **Dynamic Groups** (`teamarr/consumers/lifecycle/dynamic_resolver.py`):
 - `{sport}` and `{league}` wildcards
@@ -343,7 +349,7 @@ Add to `INSERT OR REPLACE INTO leagues` in `teamarr/database/schema.sql`. Restar
 
 **Adding a new column:** Just add it to the `CREATE TABLE` in `schema.sql`. Schema reconciliation (`teamarr/database/reconciliation.py`) automatically detects and adds missing columns on startup by comparing the real database against an in-memory reference built from `schema.sql`. No migration block needed.
 
-**Data migration (transforming existing data):** Add a versioned `if current_version < N:` block in `_run_migrations()` in `connection.py`. Bump the `schema_version DEFAULT` in `schema.sql`. Column additions in mixed blocks should use `_add_column_if_not_exists` as a safety net for tests that call `_run_migrations` directly.
+**Data migration (transforming existing data):** Add a versioned `if current_version < N:` block in `_run_migrations()` in `database/migrations/versioned.py`. Bump the `schema_version DEFAULT` in `schema.sql`. Column additions in mixed blocks should use `_add_column_if_not_exists` as a safety net for tests that call `_run_migrations` directly.
 
 **Table rebuild (CHECK constraint changes):** Add a pre-migration function in `init_db()` that backs up the table, drops it, and lets `executescript` recreate it. Add a restore block in `_run_migrations` keyed on the backup table's existence. See `_migrate_settings_for_v65` as the pattern.
 
@@ -355,7 +361,7 @@ Add to `INSERT OR REPLACE INTO leagues` in `teamarr/database/schema.sql`. Restar
 source .venv/bin/activate
 python3 app.py                    # Run on port 9195
 pytest tests/ -v                  # Run tests
-ruff check teamarr/               # Lint
+ruff check teamarr/ tests/        # Lint
 ruff format teamarr/              # Format
 cd frontend && npm run build      # Build frontend
 ```

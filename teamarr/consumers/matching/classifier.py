@@ -26,6 +26,7 @@ class StreamCategory(Enum):
     TEAM_VS_TEAM = "team_vs_team"  # Standard team matchup (vs/@/at)
     EVENT_CARD = "event_card"  # Combat sports (UFC, Boxing)
     RACING_EVENT = "racing_event"  # Racing race weekends (F1, NASCAR, etc.)
+    TENNIS_MATCH = "tennis_match"  # Tennis matches ("Wimbledon: Zheng vs Norrie")
     TEAM_ONLY = "team_only"  # Single-team branded stream (e.g., "NHL | Toronto Maple Leafs")
     PLACEHOLDER = "placeholder"  # No event info, skip
 
@@ -1029,20 +1030,110 @@ def is_event_card(text: str, league_event_type: str | None = None) -> bool:
     return detected == "EVENT_CARD"
 
 
-def is_racing(league_event_type: str | None = None) -> bool:
+# Known racing league codes — a hardcoded mirror of the sport='racing' leagues
+# in schema.sql (this module is pure text classification, no DB access).
+# Kept in sync by test_racing_league_hints_cover_all_schema_racing_leagues.
+# Used as a secondary trigger so streams in mixed-sport groups (where
+# team_vs_team dominates the league_event_type vote) still reach the
+# RACING_EVENT path when detect_league_hint() already identified them as
+# motorsports.
+_RACING_LEAGUE_HINTS: frozenset[str] = frozenset(
+    {"f1", "nascar-cup", "nascar-xfinity", "nascar-truck", "indycar", "motogp", "imsa", "wec"}
+)
+
+
+def is_racing(
+    league_event_type: str | None = None,
+    league_hint: str | list[str] | None = None,
+    sport_hint: str | list[str] | None = None,
+    event_league_sport: str | None = None,
+) -> bool:
     """Check if a stream's league is a racing/motorsports league.
 
-    Unlike combat sports, racing has no reliable text keywords (stream names
-    are typically "F1: Monaco Grand Prix" or "NASCAR Cup - Race"), so this
-    relies entirely on the league's configured `event_type`.
+    Three independent triggers (mirrors is_event_card() pattern):
+    1. league_event_type == "event" — dominant league type gate. The "event"
+       type is shared by all tournament sports (racing, tennis, golf), so
+       when the caller knows the dominant SPORT of the group's event-type
+       leagues (event_league_sport), a non-racing sport disables this
+       trigger — a tennis-only group must not classify streams as racing.
+       None preserves legacy behavior (racing owns "event").
+    2. league_hint is a known racing league code — league keyword fallback
+    3. sport_hint == "Racing" — sport keyword fallback
+
+    Triggers 2 and 3 let streams in mixed-sport groups (where team_vs_team
+    dominates) still reach the RACING_EVENT path when text-based detection
+    already identifies them as motorsports.
 
     Args:
         league_event_type: event_type from leagues table (e.g., "event" for racing)
+        league_hint: Detected league hint from stream text
+        sport_hint: Detected sport hint from stream text
+        event_league_sport: Dominant sport of the group's event-type leagues
 
     Returns:
         True if the league is configured as an "event" (racing) league
     """
-    return league_event_type == "event"
+    if league_event_type == "event" and event_league_sport in (None, "racing"):
+        return True
+    if isinstance(league_hint, str) and league_hint in _RACING_LEAGUE_HINTS:
+        return True
+    if isinstance(sport_hint, str) and sport_hint.lower() == "racing":
+        return True
+    return False
+
+
+# Motorsports series names — text evidence that a string is actually about
+# racing. Used by the EPG racing fallback, which re-classifies arbitrary
+# programme titles with league_event_type="event": racing is the classifier's
+# default bucket there, so without this gate any documentary or movie title
+# reaches the racing matcher and can bind to "the race happening today" by
+# date coverage ("Brimstone" fuzzy-matched Silverstone at 62). Series names
+# only — venue words like "Silverstone" are places, not proof of a broadcast.
+# Deliberately NOT in SPORT_HINT_PATTERNS: a global Racing sport hint would
+# make is_racing trigger 3 fire during primary classification and reroute
+# team-group streams (see test_racing_only_applies_for_event_league_type).
+RACING_TEXT_EVIDENCE: Pattern[str] = re.compile(
+    r"\b(?:"
+    r"formula\s*[123e]|f1|nascar|indycar|indy\s*(?:500|nxt)|"
+    r"motogp|moto\s*[23]|grand\s+prix|imsa|supercross|motocross"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def has_racing_text_evidence(text: str) -> bool:
+    """True when the text names a motorsports series (or 'grand prix')."""
+    return bool(text) and RACING_TEXT_EVIDENCE.search(text) is not None
+
+
+# Known tennis league codes — mirror of the sport='tennis' leagues in
+# schema.sql (this module is pure text classification, no DB access).
+_TENNIS_LEAGUE_HINTS: frozenset[str] = frozenset({"atp", "wta"})
+
+
+def is_tennis(
+    league_event_type: str | None = None,
+    league_hint: str | list[str] | None = None,
+    sport_hint: str | list[str] | None = None,
+    event_league_sport: str | None = None,
+) -> bool:
+    """Check if a stream belongs to a tennis league.
+
+    Mirrors is_racing()'s trigger structure:
+    1. league_event_type == "event" AND the group's event-type leagues are
+       tennis — the tennis-group gate (requires the caller to resolve
+       event_league_sport; "event" alone is ambiguous with racing/golf)
+    2. league_hint is a known tennis league code (atp/wta)
+    3. sport_hint == "Tennis" — sport keyword fallback (real streams often
+       carry a literal "Tennis" token, e.g. "... :Tennis 13")
+    """
+    if league_event_type == "event" and event_league_sport == "tennis":
+        return True
+    if isinstance(league_hint, str) and league_hint in _TENNIS_LEAGUE_HINTS:
+        return True
+    if isinstance(sport_hint, str) and sport_hint.lower() == "tennis":
+        return True
+    return False
 
 
 def extract_event_card_hint(text: str) -> str | None:
@@ -1257,19 +1348,346 @@ def detect_and_strip_feed_hint(
     return text, None
 
 
+@dataclass
+class _ClassifyContext:
+    """Shared inputs threaded through the classification step cascade."""
+
+    stream_name: str  # Original raw name (custom regex matches against this)
+    text: str  # Normalized text with feed hint stripped
+    normalized: NormalizedStream
+    league_event_type: str | None
+    event_league_sport: str | None
+    custom_regex: CustomRegexConfig | None
+    league_hint: str | list[str] | None
+    sport_hint: str | list[str] | None
+    feed_hint: str | None
+
+    def make(self, category: StreamCategory, **extra) -> ClassifiedStream:
+        """Build a ClassifiedStream with the shared hint fields pre-filled."""
+        return ClassifiedStream(
+            category=category,
+            normalized=self.normalized,
+            league_hint=self.league_hint,
+            sport_hint=self.sport_hint,
+            feed_hint=self.feed_hint,
+            **extra,
+        )
+
+
+def _apply_custom_datetime_regex(
+    stream_name: str,
+    custom_regex: CustomRegexConfig,
+    normalized: NormalizedStream,
+) -> None:
+    """Step 1b: Apply custom date/time regex to override built-in extraction.
+
+    Uses ORIGINAL stream name (not normalized) for more flexible matching.
+    Mutates ``normalized`` in place.
+    """
+    if custom_regex.date_enabled:
+        custom_date = extract_date_with_custom_regex(stream_name, custom_regex)
+        if custom_date:
+            normalized.extracted_date = custom_date
+            logger.debug(
+                "[CLASSIFY] Custom date regex extracted: %s from '%s'",
+                custom_date,
+                stream_name[:50],
+            )
+
+    if custom_regex.time_enabled:
+        custom_time = extract_time_with_custom_regex(stream_name, custom_regex)
+        if custom_time:
+            normalized.extracted_time = custom_time
+            logger.debug(
+                "[CLASSIFY] Custom time regex extracted: %s from '%s'",
+                custom_time,
+                stream_name[:50],
+            )
+
+
+def _resolve_hints(
+    text: str,
+    stream_name: str,
+    custom_regex: CustomRegexConfig | None,
+) -> tuple[str | list[str] | None, str | list[str] | None]:
+    """Detect league and sport hints (useful for all categories).
+
+    Includes step 1c: a custom league regex (matched against the ORIGINAL
+    stream name for more flexible matching) overrides built-in detection.
+
+    Returns:
+        Tuple of (league_hint, sport_hint)
+    """
+    league_hint = detect_league_hint(text)
+    sport_hint = detect_sport_hint(text)
+
+    # Narrow umbrella hints using gender markers (W)/(M)
+    # e.g., NCAAB with (W) → womens-college-basketball only
+    if isinstance(league_hint, list) and len(league_hint) > 1:
+        league_hint = _narrow_by_gender(league_hint, stream_name)
+
+    if custom_regex and custom_regex.league_enabled:
+        custom_league = extract_league_with_custom_regex(stream_name, custom_regex)
+        if custom_league:
+            league_hint = custom_league
+            logger.debug(
+                "[CLASSIFY] Custom league regex extracted: %s from '%s'",
+                custom_league,
+                stream_name[:50],
+            )
+
+    return league_hint, sport_hint
+
+
+def _classify_event_card(ctx: _ClassifyContext) -> ClassifiedStream | None:
+    """Step 2: Check for event card (combat sports).
+
+    Guard: if sport hint identifies a non-combat sport, skip keyword-
+    based event_card detection. This prevents user-defined EVENT_CARD
+    keywords (e.g., "card", "main") from stealing team sports streams
+    like "(Baseball)". The league_event_type override still takes
+    priority — if the league is explicitly configured as event_card,
+    the sport hint won't block it.
+    """
+    _event_card_sports = {"mma", "boxing"}
+    sport_blocks_keywords = False
+    if ctx.sport_hint is not None and ctx.league_event_type != "event_card":
+        if isinstance(ctx.sport_hint, list):
+            sport_blocks_keywords = not any(
+                s.lower() in _event_card_sports for s in ctx.sport_hint
+            )
+        else:
+            sport_blocks_keywords = ctx.sport_hint.lower() not in _event_card_sports
+        if sport_blocks_keywords:
+            logger.debug(
+                "[CLASSIFY] Sport hint '%s' blocks event_card classification",
+                ctx.sport_hint,
+            )
+
+    if sport_blocks_keywords or not is_event_card(ctx.text, ctx.league_event_type):
+        return None
+
+    event_hint = extract_event_card_hint(ctx.text)
+
+    # Detect card segment (early_prelims, prelims, main_card, combined)
+    # Use original stream name for more accurate pattern matching
+    card_segment = detect_card_segment(ctx.stream_name)
+
+    # Try custom regex for fighters first (if configured)
+    custom_regex_used = False
+    fighter1, fighter2 = None, None
+    if ctx.custom_regex and ctx.custom_regex.fighters_enabled:
+        fighter1, fighter2, success = extract_fighters_with_custom_regex(
+            ctx.stream_name, ctx.custom_regex
+        )
+        if success:
+            custom_regex_used = True
+            logger.debug(
+                "[CLASSIFY] Custom fighters regex matched: %s vs %s",
+                fighter1,
+                fighter2,
+            )
+
+    # Fallback to builtin extraction if custom regex didn't match
+    if not fighter1 and not fighter2:
+        fighter1, fighter2 = extract_fighters_from_event_card(ctx.text)
+
+    # Try custom regex for event name (if configured)
+    if ctx.custom_regex and ctx.custom_regex.event_name_enabled:
+        custom_event_name = extract_event_name_with_custom_regex(
+            ctx.stream_name, ctx.custom_regex
+        )
+        if custom_event_name:
+            event_hint = custom_event_name
+            custom_regex_used = True
+            logger.debug(
+                "[CLASSIFY] Custom event_name regex matched: %s", custom_event_name
+            )
+
+    return ctx.make(
+        StreamCategory.EVENT_CARD,
+        team1=fighter1,  # Fighter 1 (treated as team for matching)
+        team2=fighter2,  # Fighter 2 (treated as team for matching)
+        event_hint=event_hint,
+        card_segment=card_segment,
+        custom_regex_used=custom_regex_used,
+    )
+
+
+def _classify_racing_event(ctx: _ClassifyContext) -> ClassifiedStream | None:
+    """Step 2.5: Check for racing events (F1, NASCAR, etc.).
+
+    Racing leagues are configured with event_type="event" - there's no
+    reliable text keyword, so this is purely a league_event_type check.
+    The full normalized text becomes the event_hint for fuzzy matching
+    against the race weekend's name/circuit (e.g., "Monaco Grand Prix").
+
+    Racing streams don't follow "Team A vs Team B" naming. If the stream
+    has a game separator (vs/@/at) with extractable team names (e.g.
+    "SD at BAL"), it's a team-sport stream that's leaked into a
+    racing-only league set - let it fall through to Step 4 instead.
+    """
+    if not is_racing(
+        ctx.league_event_type, ctx.league_hint, ctx.sport_hint, ctx.event_league_sport
+    ):
+        return None
+
+    sep, sep_position = find_game_separator(ctx.text)
+    has_team_pattern = False
+    if sep:
+        sep_team1, sep_team2 = extract_teams_from_separator(ctx.text, sep, sep_position)
+        if sep_team1 or sep_team2:
+            # For "at"/"@" separators, a multi-word left part is a series
+            # or race name (e.g. "NASCAR Cup Series at San Diego", or a
+            # stream with "@ Jun 20" as a date marker), not a team abbrev.
+            # Single-word left parts (e.g. "SD", "NYY") are real team codes.
+            if sep.strip() in ("at", "@") and sep_team1 and len(sep_team1.split()) > 1:
+                has_team_pattern = False
+            else:
+                has_team_pattern = True
+
+    # Guard against hijacking a team-sport stream that leaked into a
+    # racing-dominant group. A bare team name ("Maple Leafs") has no
+    # separator, so the has_team_pattern check alone wouldn't catch it;
+    # but if it carries a positive NON-racing sport hint (e.g. "NHL |
+    # Maple Leafs" → "hockey"), that's strong evidence it isn't a race —
+    # let it fall through to team matching. Racing has no reliable text
+    # keyword, so we can't require positive racing evidence; we only veto
+    # on a hint that actively disagrees (None never vetoes).
+    hint_disagrees = ctx.sport_hint is not None and str(ctx.sport_hint).lower() != "racing"
+
+    if has_team_pattern or hint_disagrees:
+        return None
+
+    return ctx.make(StreamCategory.RACING_EVENT, event_hint=ctx.text)
+
+
+def _classify_tennis_match(ctx: _ClassifyContext) -> ClassifiedStream | None:
+    """Step 2.6: Check for tennis matches ("Wimbledon: Zheng vs Norrie").
+
+    Tennis leagues share event_type="event" with racing, so the racing
+    step above is disabled for tennis groups via event_league_sport and
+    this step catches the streams instead. Match streams carry a
+    player-vs-player separator; the players are extracted with the same
+    separator logic as team sports (surname-based matching happens in
+    TennisMatcher). Court/round/day feeds ("Wimbledon Day #6 No 1
+    Court") have no separator — they still classify TENNIS_MATCH with
+    only an event_hint so the matcher can report a precise reason
+    (court-feed matching is a planned phase 2).
+    """
+    if not is_tennis(
+        ctx.league_event_type, ctx.league_hint, ctx.sport_hint, ctx.event_league_sport
+    ):
+        return None
+
+    separator, sep_position = find_game_separator(ctx.text)
+    if separator:
+        team1, team2 = extract_teams_from_separator(ctx.text, separator, sep_position)
+        # "at"/"@" with a multi-word left part is a tournament/day
+        # label ("Wimbledon Second Round @ Jul 2"), not a player pair.
+        if (
+            team1
+            and team2
+            and not (separator.strip() in ("at", "@") and len(team1.split()) > 1)
+        ):
+            return ctx.make(
+                StreamCategory.TENNIS_MATCH,
+                team1=team1,
+                team2=team2,
+                separator_found=separator,
+            )
+
+    return ctx.make(StreamCategory.TENNIS_MATCH, event_hint=ctx.text)
+
+
+def _classify_teams_custom_regex(ctx: _ClassifyContext) -> ClassifiedStream | None:
+    """Step 3: Try custom regex for team extraction (if configured).
+
+    Uses ORIGINAL stream name (not normalized) for intuitive pattern matching.
+    """
+    if not (ctx.custom_regex and ctx.custom_regex.teams_enabled):
+        return None
+
+    team1, team2, success = extract_teams_with_custom_regex(ctx.stream_name, ctx.custom_regex)
+    if not success:
+        return None
+
+    return ctx.make(
+        StreamCategory.TEAM_VS_TEAM,
+        team1=team1,
+        team2=team2,
+        separator_found="custom_regex",
+        custom_regex_used=True,
+    )
+
+
+def _classify_team_vs_team(ctx: _ClassifyContext) -> ClassifiedStream | None:
+    """Step 4: Check for game separator (builtin fallback)."""
+    separator, sep_position = find_game_separator(ctx.text)
+    if not separator:
+        return None
+
+    team1, team2 = extract_teams_from_separator(ctx.text, separator, sep_position)
+
+    # Only classify as TEAM_VS_TEAM if we got at least one team
+    if not (team1 or team2):
+        return None
+
+    return ctx.make(
+        StreamCategory.TEAM_VS_TEAM,
+        team1=team1,
+        team2=team2,
+        separator_found=separator,
+    )
+
+
+def _classify_team_only(ctx: _ClassifyContext) -> ClassifiedStream | None:
+    """Step 4.5: Check for single-team stream (TEAM_ONLY).
+
+    Applies when no separator was found (would otherwise be PLACEHOLDER).
+    A stream qualifies as TEAM_ONLY when:
+      - No date or time was extracted (stream is not event-specific)
+      - After stripping league/sport/noise prefixes, a non-trivial candidate remains
+    The matcher validates the candidate against the team cache; a miss → NO_MATCH.
+    """
+    if ctx.normalized.extracted_date is not None or ctx.normalized.extracted_time is not None:
+        return None
+
+    candidate = _clean_team_name(ctx.text)
+    if not candidate or len(candidate) < 3:
+        return None
+
+    return ctx.make(StreamCategory.TEAM_ONLY, team1=candidate)
+
+
+# Ordered cascade: first step to return a result wins.
+_CLASSIFY_STEPS = (
+    _classify_event_card,
+    _classify_racing_event,
+    _classify_tennis_match,
+    _classify_teams_custom_regex,
+    _classify_team_vs_team,
+    _classify_team_only,
+)
+
+
 def classify_stream(
     stream_name: str,
     league_event_type: str | None = None,
     custom_regex: CustomRegexConfig | None = None,
     feed_home_terms: list[str] | None = None,
     feed_away_terms: list[str] | None = None,
+    event_league_sport: str | None = None,
 ) -> ClassifiedStream:
     """Classify a stream for matching strategy selection.
 
-    Classification order:
+    Classification order (see the _classify_* step functions):
     1. Normalize stream name
     1b. Apply custom date/time regex (if configured) to override extracted values
+    1c. Detect league/sport hints; custom league regex overrides detection
     2. Check for event card keywords/type → EVENT_CARD
+    2.5. Racing group check → RACING_EVENT
+    2.6. Tennis group check → TENNIS_MATCH
     3. Try custom regex for team extraction (if configured) → TEAM_VS_TEAM
     4. Check for game separator (vs/@/at) → TEAM_VS_TEAM
     4.5. Check for single-team content (no separator, no date/time) → TEAM_ONLY
@@ -1283,36 +1701,18 @@ def classify_stream(
         stream_name: Raw stream name to classify
         league_event_type: Optional event_type from leagues table (e.g., "fight" for UFC)
         custom_regex: Optional custom regex configuration for team/date/time extraction
+        event_league_sport: Dominant sport of the group's event-type leagues
+            ("racing" | "tennis" | ...). Disambiguates the shared "event"
+            league_event_type between the racing and tennis paths.
 
     Returns:
         ClassifiedStream with category and extracted info
     """
     # Step 1: Normalize
     normalized = normalize_stream(stream_name)
-    result: ClassifiedStream | None = None
 
-    # Step 1b: Apply custom date/time regex to override built-in extraction
-    # Uses ORIGINAL stream name (not normalized) for more flexible matching
     if custom_regex:
-        if custom_regex.date_enabled:
-            custom_date = extract_date_with_custom_regex(stream_name, custom_regex)
-            if custom_date:
-                normalized.extracted_date = custom_date
-                logger.debug(
-                    "[CLASSIFY] Custom date regex extracted: %s from '%s'",
-                    custom_date,
-                    stream_name[:50],
-                )
-
-        if custom_regex.time_enabled:
-            custom_time = extract_time_with_custom_regex(stream_name, custom_regex)
-            if custom_time:
-                normalized.extracted_time = custom_time
-                logger.debug(
-                    "[CLASSIFY] Custom time regex extracted: %s from '%s'",
-                    custom_time,
-                    stream_name[:50],
-                )
+        _apply_custom_datetime_regex(stream_name, custom_regex, normalized)
 
     # Early exit for empty streams
     if not normalized.normalized:
@@ -1339,204 +1739,29 @@ def classify_stream(
                     stream_name[:50],
                 )
 
-        # Detect league and sport hints (useful for all categories)
-        league_hint = detect_league_hint(text)
-        sport_hint = detect_sport_hint(text)
+        league_hint, sport_hint = _resolve_hints(text, stream_name, custom_regex)
 
-        # Narrow umbrella hints using gender markers (W)/(M)
-        # e.g., NCAAB with (W) → womens-college-basketball only
-        if isinstance(league_hint, list) and len(league_hint) > 1:
-            league_hint = _narrow_by_gender(league_hint, stream_name)
+        ctx = _ClassifyContext(
+            stream_name=stream_name,
+            text=text,
+            normalized=normalized,
+            league_event_type=league_event_type,
+            event_league_sport=event_league_sport,
+            custom_regex=custom_regex,
+            league_hint=league_hint,
+            sport_hint=sport_hint,
+            feed_hint=feed_hint,
+        )
 
-        # Step 1c: Apply custom league regex to override built-in detection
-        # Uses ORIGINAL stream name (not normalized) for more flexible matching
-        if custom_regex and custom_regex.league_enabled:
-            custom_league = extract_league_with_custom_regex(stream_name, custom_regex)
-            if custom_league:
-                league_hint = custom_league
-                logger.debug(
-                    "[CLASSIFY] Custom league regex extracted: %s from '%s'",
-                    custom_league,
-                    stream_name[:50],
-                )
-
-        # Step 2: Check for event card
-        # Guard: if sport hint identifies a non-combat sport, skip keyword-
-        # based event_card detection. This prevents user-defined EVENT_CARD
-        # keywords (e.g., "card", "main") from stealing team sports streams
-        # like "(Baseball)". The league_event_type override still takes
-        # priority — if the league is explicitly configured as event_card,
-        # the sport hint won't block it.
-        _event_card_sports = {"mma", "boxing"}
-        _sport_blocks_keywords = False
-        if sport_hint is not None and league_event_type != "event_card":
-            if isinstance(sport_hint, list):
-                _sport_blocks_keywords = not any(
-                    s.lower() in _event_card_sports for s in sport_hint
-                )
-            else:
-                _sport_blocks_keywords = (
-                    sport_hint.lower() not in _event_card_sports
-                )
-            if _sport_blocks_keywords:
-                logger.debug(
-                    "[CLASSIFY] Sport hint '%s' blocks event_card classification",
-                    sport_hint,
-                )
-
-        if not _sport_blocks_keywords and is_event_card(text, league_event_type):
-            event_hint = extract_event_card_hint(text)
-
-            # Detect card segment (early_prelims, prelims, main_card, combined)
-            # Use original stream name for more accurate pattern matching
-            card_segment = detect_card_segment(stream_name)
-
-            # Try custom regex for fighters first (if configured)
-            custom_regex_used = False
-            fighter1, fighter2 = None, None
-            if custom_regex and custom_regex.fighters_enabled:
-                fighter1, fighter2, success = extract_fighters_with_custom_regex(
-                    stream_name, custom_regex
-                )
-                if success:
-                    custom_regex_used = True
-                    logger.debug(
-                        "[CLASSIFY] Custom fighters regex matched: %s vs %s",
-                        fighter1,
-                        fighter2,
-                    )
-
-            # Fallback to builtin extraction if custom regex didn't match
-            if not fighter1 and not fighter2:
-                fighter1, fighter2 = extract_fighters_from_event_card(text)
-
-            # Try custom regex for event name (if configured)
-            custom_event_name = None
-            if custom_regex and custom_regex.event_name_enabled:
-                custom_event_name = extract_event_name_with_custom_regex(
-                    stream_name, custom_regex
-                )
-                if custom_event_name:
-                    event_hint = custom_event_name
-                    custom_regex_used = True
-                    logger.debug(
-                        "[CLASSIFY] Custom event_name regex matched: %s", custom_event_name
-                    )
-
-            result = ClassifiedStream(
-                category=StreamCategory.EVENT_CARD,
-                normalized=normalized,
-                team1=fighter1,  # Fighter 1 (treated as team for matching)
-                team2=fighter2,  # Fighter 2 (treated as team for matching)
-                event_hint=event_hint,
-                card_segment=card_segment,
-                league_hint=league_hint,
-                sport_hint=sport_hint,
-                custom_regex_used=custom_regex_used,
-                feed_hint=feed_hint,
-            )
-
-        # Step 2.5: Check for racing events (F1, NASCAR, etc.)
-        # Racing leagues are configured with event_type="event" - there's no
-        # reliable text keyword, so this is purely a league_event_type check.
-        # The full normalized text becomes the event_hint for fuzzy matching
-        # against the race weekend's name/circuit (e.g., "Monaco Grand Prix").
-        #
-        # Racing streams don't follow "Team A vs Team B" naming. If the stream
-        # has a game separator (vs/@/at) with extractable team names (e.g.
-        # "SD at BAL"), it's a team-sport stream that's leaked into a
-        # racing-only league set - let it fall through to Step 4 instead.
-        if result is None and is_racing(league_event_type):
-            sep, sep_position = find_game_separator(text)
-            has_team_pattern = False
-            if sep:
-                sep_team1, sep_team2 = extract_teams_from_separator(text, sep, sep_position)
-                has_team_pattern = bool(sep_team1 or sep_team2)
-
-            # Guard against hijacking a team-sport stream that leaked into a
-            # racing-dominant group. A bare team name ("Maple Leafs") has no
-            # separator, so the has_team_pattern check alone wouldn't catch it;
-            # but if it carries a positive NON-racing sport hint (e.g. "NHL |
-            # Maple Leafs" → "hockey"), that's strong evidence it isn't a race —
-            # let it fall through to team matching. Racing has no reliable text
-            # keyword, so we can't require positive racing evidence; we only veto
-            # on a hint that actively disagrees (None never vetoes).
-            hint_disagrees = sport_hint is not None and str(sport_hint).lower() != "racing"
-
-            if not has_team_pattern and not hint_disagrees:
-                result = ClassifiedStream(
-                    category=StreamCategory.RACING_EVENT,
-                    normalized=normalized,
-                    event_hint=text,
-                    league_hint=league_hint,
-                    sport_hint=sport_hint,
-                    feed_hint=feed_hint,
-                )
-
-        # Step 3: Try custom regex for team extraction (if configured)
-        # Uses ORIGINAL stream name (not normalized) for intuitive pattern matching
-        if result is None and custom_regex and custom_regex.teams_enabled:
-            team1, team2, success = extract_teams_with_custom_regex(stream_name, custom_regex)
-            if success:
-                result = ClassifiedStream(
-                    category=StreamCategory.TEAM_VS_TEAM,
-                    normalized=normalized,
-                    team1=team1,
-                    team2=team2,
-                    separator_found="custom_regex",
-                    league_hint=league_hint,
-                    sport_hint=sport_hint,
-                    custom_regex_used=True,
-                    feed_hint=feed_hint,
-                )
-
-        # Step 4: Check for game separator (builtin fallback)
-        if result is None:
-            separator, sep_position = find_game_separator(text)
-            if separator:
-                team1, team2 = extract_teams_from_separator(text, separator, sep_position)
-
-                # Only classify as TEAM_VS_TEAM if we got at least one team
-                if team1 or team2:
-                    result = ClassifiedStream(
-                        category=StreamCategory.TEAM_VS_TEAM,
-                        normalized=normalized,
-                        team1=team1,
-                        team2=team2,
-                        separator_found=separator,
-                        league_hint=league_hint,
-                        sport_hint=sport_hint,
-                        feed_hint=feed_hint,
-                    )
-
-        # Step 4.5: Check for single-team stream (TEAM_ONLY)
-        # Applies when no separator was found (would otherwise be PLACEHOLDER).
-        # A stream qualifies as TEAM_ONLY when:
-        #   - No date or time was extracted (stream is not event-specific)
-        #   - After stripping league/sport/noise prefixes, a non-trivial candidate remains
-        # The matcher validates the candidate against the team cache; a miss → NO_MATCH.
-        if result is None:
-            if normalized.extracted_date is None and normalized.extracted_time is None:
-                candidate = _clean_team_name(text)
-                if candidate and len(candidate) >= 3:
-                    result = ClassifiedStream(
-                        category=StreamCategory.TEAM_ONLY,
-                        normalized=normalized,
-                        team1=candidate,
-                        league_hint=league_hint,
-                        sport_hint=sport_hint,
-                        feed_hint=feed_hint,
-                    )
+        result = None
+        for step in _CLASSIFY_STEPS:
+            result = step(ctx)
+            if result is not None:
+                break
 
         # Step 5: Default to placeholder if we can't classify
         if result is None:
-            result = ClassifiedStream(
-                category=StreamCategory.PLACEHOLDER,
-                normalized=normalized,
-                league_hint=league_hint,
-                sport_hint=sport_hint,
-                feed_hint=feed_hint,
-            )
+            result = ctx.make(StreamCategory.PLACEHOLDER)
 
     logger.debug(
         "[CLASSIFY] '%s' -> %s (league=%s, sport=%s, teams=%s/%s, segment=%s)",
@@ -1558,6 +1783,7 @@ def classify_streams(
     custom_regex: CustomRegexConfig | None = None,
     feed_home_terms: list[str] | None = None,
     feed_away_terms: list[str] | None = None,
+    event_league_sport: str | None = None,
 ) -> list[ClassifiedStream]:
     """Classify multiple streams.
 
@@ -1567,11 +1793,19 @@ def classify_streams(
         custom_regex: Optional custom regex configuration for team extraction
         feed_home_terms: Terms indicating home feed (e.g., ["HOME"])
         feed_away_terms: Terms indicating away feed (e.g., ["AWAY"])
+        event_league_sport: Dominant sport of the group's event-type leagues
 
     Returns:
         List of ClassifiedStream objects
     """
     return [
-        classify_stream(name, league_event_type, custom_regex, feed_home_terms, feed_away_terms)
+        classify_stream(
+            name,
+            league_event_type,
+            custom_regex,
+            feed_home_terms,
+            feed_away_terms,
+            event_league_sport,
+        )
         for name in stream_names
     ]

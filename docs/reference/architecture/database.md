@@ -110,7 +110,8 @@ The settings table is a single row with 67 columns, organized into these groups:
 
 | Module | Purpose |
 |--------|---------|
-| `connection.py` | Connection management, schema init, migrations |
+| `connection.py` | Connection management, schema init |
+| `migrations/` | Structural pre-migrations + versioned data migrations |
 | `teams.py` | Team CRUD with parsed leagues |
 | `groups.py` | Event group CRUD (28-field `EventEPGGroup` dataclass) |
 | `templates.py` | Template CRUD |
@@ -152,6 +153,7 @@ The allocator respects:
 | File | Purpose |
 |------|---------|
 | `teamarr/database/schema.sql` | Authoritative schema for fresh installs |
-| `teamarr/database/connection.py` | Connection manager, migrations |
-| `teamarr/database/settings.py` | Settings with typed dataclasses |
+| `teamarr/database/connection.py` | Connection manager, startup orchestration |
+| `teamarr/database/migrations/` | Pre-migrations (`pre.py`) + versioned migrations (`versioned.py`) |
+| `teamarr/database/settings/` | Settings package: typed dataclasses (`types.py`), declarative field registry mapping each field to its DB column and serialization (`registry.py`), registry-driven readers (`read.py`) and updaters (`update.py`) |
 | `teamarr/database/channel_numbers.py` | Numbering algorithm |

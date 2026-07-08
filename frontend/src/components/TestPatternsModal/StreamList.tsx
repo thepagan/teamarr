@@ -34,7 +34,7 @@ export function StreamList({ streams, patterns, onTextSelect }: StreamListProps)
     return streams.map((stream) => {
       const name = stream.stream_name
 
-      // Extraction ranges (teams, date, time, league)
+      // Extraction ranges (teams, date, time, league, fighters, event name)
       const extractionRanges = [
         ...(patterns.custom_regex_teams_enabled && patterns.custom_regex_teams
           ? getMatchRanges(patterns.custom_regex_teams, name)
@@ -67,6 +67,18 @@ export function StreamList({ streams, patterns, onTextSelect }: StreamListProps)
           ? getMatchRanges(patterns.custom_regex_league, name).map((r) => ({
               ...r,
               group: r.group || "league",
+            }))
+          : []),
+        ...(patterns.custom_regex_fighters_enabled && patterns.custom_regex_fighters
+          ? getMatchRanges(patterns.custom_regex_fighters, name).map((r) => ({
+              ...r,
+              group: r.group || "fighters",
+            }))
+          : []),
+        ...(patterns.custom_regex_event_name_enabled && patterns.custom_regex_event_name
+          ? getMatchRanges(patterns.custom_regex_event_name, name).map((r) => ({
+              ...r,
+              group: r.group || "event_name",
             }))
           : []),
       ]

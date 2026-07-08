@@ -22,7 +22,12 @@ from teamarr.consumers.matching.constants import (
     BOTH_TEAMS_THRESHOLD,
     HIGH_CONFIDENCE_THRESHOLD,
 )
-from teamarr.consumers.matching.country_resolver import CountryNameResolver
+from teamarr.consumers.matching.country_resolver import (
+    CountryNameResolver,
+)
+from teamarr.consumers.matching.country_resolver import (
+    _normalize as _normalize_country,
+)
 from teamarr.consumers.matching.normalizer import normalize_for_matching
 from teamarr.consumers.matching.result import (
     FailedReason,
@@ -31,7 +36,7 @@ from teamarr.consumers.matching.result import (
     MatchOutcome,
 )
 from teamarr.consumers.stream_match_cache import StreamMatchCache, event_to_cache_data
-from teamarr.core.types import Event, Team
+from teamarr.core.types import Event, EventStatus, RacingResult, RacingSession, Team, Venue
 from teamarr.services.sports_data import SportsDataService
 from teamarr.utilities.constants import TEAM_ALIASES
 from teamarr.utilities.fuzzy_match import get_matcher, normalize_text
@@ -235,6 +240,10 @@ class TeamMatcher:
         self._reverse_aliases: dict[str, list[tuple[str, str]]] = self._build_reverse_cache()
         # Locale-aware country name resolver (e.g. "brasil" → "Brazil")
         self._country_resolver = CountryNameResolver()
+        # Memoize country resolution per team name: it's deterministic and the
+        # same names are re-checked against every candidate event. Without this
+        # the [ALIAS] log line repeats once per candidate (147x in #256).
+        self._country_resolve_cache: dict[str, str | None] = {}
 
     def reload_aliases(self) -> None:
         """Reload aliases from database.
@@ -1782,15 +1791,21 @@ class TeamMatcher:
             if user_canonical:
                 return user_canonical
 
-        # Finally, try automatic country name resolution for national-team sports
-        country_canonical = self._country_resolver.resolve(team_name)
-        if country_canonical:
-            logger.debug(
-                "[ALIAS] Country name resolved: %r → %r", team_name, country_canonical
-            )
-            return country_canonical
-
-        return None
+        # Finally, try automatic country name resolution for national-team sports.
+        # Memoized: the same stream team names are re-checked against every
+        # candidate event, so resolve + log once per unique name, not per
+        # candidate (the 147x [ALIAS] spam in #256). Self-maps (e.g. an English
+        # name that resolves to itself) are not logged — they carry no signal.
+        if team_name not in self._country_resolve_cache:
+            country_canonical = self._country_resolver.resolve(team_name)
+            self._country_resolve_cache[team_name] = country_canonical
+            if country_canonical and country_canonical != _normalize_country(team_name):
+                logger.debug(
+                    "[ALIAS] Country name resolved: %r → %r",
+                    team_name,
+                    country_canonical,
+                )
+        return self._country_resolve_cache[team_name]
 
     def _check_alias_match(
         self,
@@ -2141,7 +2156,6 @@ class TeamMatcher:
                 color=away_data.get("color"),
             )
 
-            from teamarr.core.types import EventStatus
 
             status_data = cached_data.get("status") or {}
             status = EventStatus(
@@ -2162,7 +2176,6 @@ class TeamMatcher:
             )
 
             # Reconstruct Venue from dict if present
-            from teamarr.core.types import Venue
 
             venue_data = cached_data.get("venue")
             venue = None
@@ -2193,7 +2206,6 @@ class TeamMatcher:
                 main_card_start = datetime.fromisoformat(main_card_start)
 
             # Reconstruct racing sessions, if present
-            from teamarr.core.types import RacingResult, RacingSession
 
             sessions = []
             for session_data in cached_data.get("sessions") or []:
@@ -2253,6 +2265,10 @@ class TeamMatcher:
                 main_card_start=main_card_start,
                 circuit_name=cached_data.get("circuit_name"),
                 sessions=sessions,
+                tournament_name=cached_data.get("tournament_name"),
+                round_name=cached_data.get("round_name"),
+                court=cached_data.get("court"),
+                draw_type=cached_data.get("draw_type"),
             )
         except Exception as e:
             logger.warning("[MATCH_CACHE] Failed to reconstruct event from cache: %s", e)

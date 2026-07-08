@@ -9,6 +9,7 @@ Reconciliation handles existing databases automatically on next startup.
 """
 
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -23,8 +24,106 @@ DB_OPERATIONAL_EXCEPTIONS = (
     sqlite3.OperationalError,
     *((psycopg2.Error,) if psycopg2 else ()),
 )
+
 # Tables to skip during reconciliation (internal/temporary)
 _SKIP_TABLES = frozenset({"sqlite_sequence"})
+
+# Defaults that ALTER TABLE ADD COLUMN accepts (constants only —
+# CURRENT_TIMESTAMP and expressions are rejected by SQLite for ADD COLUMN)
+_CONSTANT_DEFAULT = re.compile(
+    r"^(NULL|TRUE|FALSE|-?\d+(\.\d+)?|'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\")$",
+    re.IGNORECASE,
+)
+
+
+def _split_top_level(body: str) -> list[str]:
+    """Split a CREATE TABLE body on top-level commas.
+
+    Respects parentheses (CHECK(...)), quoted identifiers/strings, and SQL
+    comments, so commas inside them don't split.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        # Line comment: skip to end of line
+        if ch == "-" and body[i : i + 2] == "--":
+            while i < n and body[i] != "\n":
+                i += 1
+            continue
+        # Block comment: skip to closing */
+        if ch == "/" and body[i : i + 2] == "/*":
+            end = body.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        # Quoted string/identifier: copy verbatim to closing quote
+        if ch in ("'", '"', "`", "["):
+            close = "]" if ch == "[" else ch
+            buf.append(ch)
+            i += 1
+            while i < n:
+                buf.append(body[i])
+                if body[i] == close:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _extract_column_def(create_sql: str, col_name: str) -> str | None:
+    """Extract a column's verbatim definition from a CREATE TABLE statement.
+
+    Returns the full definition text (type, NOT NULL, DEFAULT, CHECK, ...)
+    exactly as written in schema.sql, or None if not found.
+    """
+    start = create_sql.find("(")
+    end = create_sql.rfind(")")
+    if start == -1 or end <= start:
+        return None
+
+    for part in _split_top_level(create_sql[start + 1 : end]):
+        tokens = part.split()
+        if not tokens:
+            continue
+        ident = tokens[0].strip("\"'`[]")
+        if ident.lower() == col_name.lower():
+            # Collapse newlines/indentation to a single-line definition
+            return " ".join(part.split())
+    return None
+
+
+def _fallback_column_def(col: sqlite3.Row) -> str:
+    """Build a minimal column definition from PRAGMA table_info.
+
+    Used when the verbatim definition can't be applied (e.g. UNIQUE, NOT
+    NULL without default, or non-constant defaults — all illegal in ALTER
+    TABLE ADD COLUMN). Drops constraints so the upgrade still succeeds;
+    non-constant defaults (CURRENT_TIMESTAMP) are omitted since SQLite
+    rejects them for added columns.
+    """
+    col_def = col["type"] or ""
+    default = col["dflt_value"]
+    if default is not None and _CONSTANT_DEFAULT.match(str(default).strip()):
+        col_def += f" DEFAULT {default}"
+    return col_def
 
 
 @dataclass
@@ -121,32 +220,55 @@ def _reconcile_table(
     # Get expected columns from reference
     ref_cols = ref.execute(f"PRAGMA table_info([{table}])").fetchall()
 
+    # Reference CREATE TABLE text — source of verbatim column definitions
+    # (PRAGMA table_info drops NOT NULL/CHECK, which made upgraded databases
+    # diverge from fresh installs)
+    create_row = ref.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    create_sql = create_row["sql"] if create_row else ""
+
     added = []
     for col in ref_cols:
         col_name = col["name"]
         if col_name in actual_cols:
             continue
 
-        # Build column definition for ALTER TABLE ADD COLUMN
-        col_type = col["type"] or ""
-        default = col["dflt_value"]
+        # Prefer the verbatim schema.sql definition (keeps NOT NULL, CHECK,
+        # DEFAULT); fall back to a minimal type+default definition for the
+        # cases ALTER TABLE ADD COLUMN can't express (UNIQUE/PRIMARY KEY,
+        # NOT NULL without default, non-constant defaults)
+        verbatim = _extract_column_def(create_sql, col_name)
+        col_ident = _quote_identifier(conn, col_name)
+        fallback_def = _translate_column_definition(conn, col["type"] or "", col["dflt_value"], _fallback_column_def(col))
+        fallback = f"{col_ident} {fallback_def}".strip()
+        candidates = [verbatim] if verbatim else []
+        if fallback not in candidates:
+            candidates.append(fallback)
 
-        col_def = col_type
-        if default is not None:
-            col_def += f" DEFAULT {default}"
+        last_error: Exception | None = None
+        for idx, col_def in enumerate(candidates):
+            translated_col_def = _translate_verbatim_column_definition(conn, col_def)
+            try:
+                conn.execute(f"ALTER TABLE {table_ident} ADD COLUMN {translated_col_def}")
+                added.append(col_name)
+                logger.info("[RECONCILE] Added %s.%s (%s)", table, col_name, translated_col_def)
+                if idx > 0:
+                    logger.warning(
+                        "[RECONCILE] %s.%s added WITHOUT full constraints "
+                        "(schema.sql def %r not applicable via ALTER): %s",
+                        table,
+                        col_name,
+                        candidates[0],
+                        last_error,
+                    )
+                last_error = None
+                break
+            except DB_OPERATIONAL_EXCEPTIONS as e:
+                last_error = e
 
-        try:
-            col_ident = _quote_identifier(conn, col_name)
-            col_def = _translate_column_definition(conn, col_type, default, col_def)
-            conn.execute(
-                f"ALTER TABLE {table_ident} ADD COLUMN {col_ident} {col_def}"
-            )
-            added.append(col_name)
-            logger.info(
-                "[RECONCILE] Added %s.%s (%s)", table, col_name, col_def
-            )
-        except DB_OPERATIONAL_EXCEPTIONS as e:
-            msg = f"Failed to add {table}.{col_name}: {e}"
+        if last_error is not None:
+            msg = f"Failed to add {table}.{col_name}: {last_error}"
             result.errors.append(msg)
             logger.warning("[RECONCILE] %s", msg)
 
@@ -177,7 +299,7 @@ def _translate_column_definition(
         pg_type = "JSONB"
 
     col_def = pg_type
-    if default is not None:
+    if default is not None and _CONSTANT_DEFAULT.match(str(default).strip()):
         translated_default = default
         if pg_type.upper() == "BOOLEAN":
             if default == "0":
@@ -186,3 +308,26 @@ def _translate_column_definition(
                 translated_default = "TRUE"
         col_def += f" DEFAULT {translated_default}"
     return col_def
+
+
+def _translate_verbatim_column_definition(conn: sqlite3.Connection, col_def: str) -> str:
+    """Translate a schema.sql column definition for PostgreSQL ADD COLUMN."""
+    if getattr(conn, "dialect", None) != "postgres":
+        return col_def
+
+    translated = col_def
+    translated = re.sub(r"^\[([^\]]+)\]", r'"\1"', translated)
+    translated = re.sub(r"\bJSON\b", "JSONB", translated, flags=re.IGNORECASE)
+    translated = re.sub(
+        r"\bBOOLEAN\s+DEFAULT\s+0\b",
+        "BOOLEAN DEFAULT FALSE",
+        translated,
+        flags=re.IGNORECASE,
+    )
+    translated = re.sub(
+        r"\bBOOLEAN\s+DEFAULT\s+1\b",
+        "BOOLEAN DEFAULT TRUE",
+        translated,
+        flags=re.IGNORECASE,
+    )
+    return translated

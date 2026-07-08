@@ -2,16 +2,21 @@
 
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from teamarr.consumers.scheduler import restart_scheduler_sub_task
 from teamarr.database import get_db
-from teamarr.database.connection import DEFAULT_DB_PATH, _is_postgres_url, get_database_url
+from teamarr.database.connection import resolve_db_path
+from teamarr.database.migration import validate_backup_file
+from teamarr.services.backup_service import create_backup_service
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +35,7 @@ def _validate_backup_filename(filename: str) -> None:
     """
     if (
         not filename.startswith("teamarr_")
-        or Path(filename).suffix not in {".db", ".sql"}
+        or not filename.endswith(".db")
         or "/" in filename
         or "\\" in filename
         or ".." in filename
@@ -99,23 +104,17 @@ class BackupSettingsUpdate(BaseModel):
     path: str | None = None
 
 
-def _get_backup_media_type(filename: str) -> str:
-    """Return the download media type for a backup file."""
-    return "application/sql" if filename.endswith(".sql") else "application/x-sqlite3"
-
-
 # =============================================================================
 # BACKUP MANAGEMENT ENDPOINTS
 # =============================================================================
 
 
 @router.get("/list", response_model=BackupListResponse)
-async def list_backups():
+def list_backups():
     """List all backup files.
 
     Returns backup files sorted by creation date (newest first).
     """
-    from teamarr.services.backup_service import create_backup_service
 
     backup_service = create_backup_service(get_db)
     backups = backup_service.list_backups()
@@ -137,12 +136,11 @@ async def list_backups():
 
 
 @router.post("/create", response_model=BackupCreateResponse)
-async def create_backup():
+def create_backup():
     """Create a manual backup of the database.
 
     Creates a new backup file in the configured backup directory.
     """
-    from teamarr.services.backup_service import create_backup_service
 
     backup_service = create_backup_service(get_db)
     result = backup_service.create_backup(manual=True)
@@ -162,12 +160,11 @@ async def create_backup():
 
 
 @router.delete("/{filename}", response_model=BackupDeleteResponse)
-async def delete_backup(filename: str):
+def delete_backup(filename: str):
     """Delete a backup file.
 
     Protected backups cannot be deleted. Unprotect them first.
     """
-    from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
 
@@ -195,13 +192,12 @@ async def delete_backup(filename: str):
 
 
 @router.post("/{filename}/protect", response_model=BackupProtectResponse)
-async def protect_backup(filename: str):
+def protect_backup(filename: str):
     """Protect a backup from rotation deletion.
 
     Protected backups are not counted toward the max backup limit
     and will not be deleted during automatic rotation.
     """
-    from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
 
@@ -217,13 +213,12 @@ async def protect_backup(filename: str):
 
 
 @router.post("/{filename}/unprotect", response_model=BackupProtectResponse)
-async def unprotect_backup(filename: str):
+def unprotect_backup(filename: str):
     """Remove protection from a backup.
 
     After unprotecting, the backup may be deleted during rotation
     if it exceeds the maximum backup count.
     """
-    from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
 
@@ -239,13 +234,12 @@ async def unprotect_backup(filename: str):
 
 
 @router.post("/{filename}/restore", response_model=RestoreResponse)
-async def restore_from_backup(filename: str):
+def restore_from_backup(filename: str):
     """Restore database from an existing backup file.
 
     Creates a pre-restore backup of the current database before restoring.
     The application will need to be restarted for changes to take effect.
     """
-    from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
 
@@ -266,13 +260,12 @@ async def restore_from_backup(filename: str):
 
 
 @router.get("/file/{filename}", response_class=FileResponse)
-async def download_specific_backup(filename: str):
+def download_specific_backup(filename: str):
     """Download a specific backup file.
 
     Args:
         filename: The backup filename to download
     """
-    from teamarr.services.backup_service import create_backup_service
 
     _validate_backup_filename(filename)
 
@@ -288,7 +281,7 @@ async def download_specific_backup(filename: str):
     return FileResponse(
         path=str(backup_path),
         filename=filename,
-        media_type=_get_backup_media_type(filename),
+        media_type="application/x-sqlite3",
     )
 
 
@@ -298,7 +291,7 @@ async def download_specific_backup(filename: str):
 
 
 @router.get("/settings", response_model=BackupSettingsResponse)
-async def get_backup_settings():
+def get_backup_settings():
     """Get scheduled backup settings."""
     from teamarr.database.settings import get_backup_settings
 
@@ -314,7 +307,7 @@ async def get_backup_settings():
 
 
 @router.put("/settings", response_model=BackupSettingsResponse)
-async def update_backup_settings(update: BackupSettingsUpdate):
+def update_backup_settings(update: BackupSettingsUpdate):
     """Update scheduled backup settings."""
     from croniter import croniter
 
@@ -371,7 +364,6 @@ async def update_backup_settings(update: BackupSettingsUpdate):
         )
 
     # Restart backup sub-scheduler with new settings
-    from teamarr.consumers.scheduler import restart_scheduler_sub_task
 
     restart_scheduler_sub_task("backup")
 
@@ -393,28 +385,12 @@ async def update_backup_settings(update: BackupSettingsUpdate):
 
 
 @router.get("", response_class=FileResponse)
-async def download_backup():
+def download_backup():
     """Download a backup of the database.
 
-    Returns the active backend as a downloadable backup attachment.
+    Returns the SQLite database file as a downloadable attachment.
     """
-    if _is_postgres_url(get_database_url()):
-        from teamarr.services.backup_service import create_backup_service
-
-        backup_service = create_backup_service(get_db)
-        result = backup_service.create_backup(manual=True)
-        if not result.success or not result.filepath or not result.filename:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=result.error or "Failed to create backup",
-            )
-        return FileResponse(
-            path=result.filepath,
-            filename=result.filename,
-            media_type=_get_backup_media_type(result.filename),
-        )
-
-    if not DEFAULT_DB_PATH.exists():
+    if not resolve_db_path(None).exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Database file not found",
@@ -427,7 +403,7 @@ async def download_backup():
     logger.info("[BACKUP] Downloading backup as %s", filename)
 
     return FileResponse(
-        path=str(DEFAULT_DB_PATH),
+        path=str(resolve_db_path(None)),
         filename=filename,
         media_type="application/x-sqlite3",
     )
@@ -437,46 +413,60 @@ async def download_backup():
 async def restore_backup(file: UploadFile = File(...)):
     """Restore database from uploaded backup.
 
-    The uploaded file must match the active database backend.
+    The uploaded file must be a valid SQLite database.
     A backup of the current database is created before restoring.
 
     WARNING: This will replace ALL current data!
     """
-    from teamarr.services.backup_service import create_backup_service
-
-    is_postgres = _is_postgres_url(get_database_url())
-    allowed_suffixes = (".sql", ".db") if is_postgres else (".db",)
-
-    if not file.filename or not file.filename.endswith(allowed_suffixes):
-        allowed_label = " or ".join(allowed_suffixes)
+    # Validate file extension
+    if not file.filename or not file.filename.endswith(".db"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid file type. Please upload a {allowed_label} file.",
+            detail="Invalid file type. Please upload a .db file.",
         )
 
-    upload_suffix = Path(file.filename).suffix.lower()
+    content = await file.read()
 
-    backup_service = create_backup_service(get_db)
+    # Everything past the upload read is blocking file/sqlite work — run it
+    # off the event loop so a large restore doesn't stall other requests.
+    return await run_in_threadpool(_restore_from_content, content)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=upload_suffix) as tmp:
+
+def _restore_from_content(content: bytes) -> RestoreResponse:
+    """Validate uploaded backup bytes and swap in the new database."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
         tmp_path = Path(tmp.name)
         try:
-            content = await file.read()
+            # Write uploaded content to temp file
             tmp.write(content)
             tmp.flush()
 
-            success, message, pre_restore_path = backup_service.restore_backup_from_path(tmp_path)
-            if not success:
+            try:
+                validate_backup_file(tmp_path)
+            except ValueError as e:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=message,
-                )
+                    detail=str(e),
+                ) from e
+
+            # Create backup of current database before restoring
+            backup_path = None
+            if resolve_db_path(None).exists():
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = resolve_db_path(None).parent / f"teamarr_pre_restore_{timestamp}.db"
+                shutil.copy2(resolve_db_path(None), backup_path)
+                logger.info("[RESTORE] Created pre-restore backup at %s", backup_path)
+
+            # Replace database with uploaded file
+            shutil.copy2(tmp_path, resolve_db_path(None))
+            logger.info("[RESTORE] Database restored from uploaded backup")
 
             return RestoreResponse(
                 success=True,
-                message=message,
-                backup_path=pre_restore_path,
+                message="Database restored. Please restart the application for changes to take effect.",  # noqa: E501
+                backup_path=str(backup_path) if backup_path else None,
             )
 
         finally:
+            # Clean up temp file
             tmp_path.unlink(missing_ok=True)

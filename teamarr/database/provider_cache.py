@@ -45,6 +45,14 @@ def event_to_dict(event: Event) -> dict:
         # Racing-specific fields
         "circuit_name": event.circuit_name,
         "sessions": [racing_session_to_dict(s) for s in event.sessions],
+        "race_laps": event.race_laps,
+        "race_distance_miles": event.race_distance_miles,
+        "stage_laps": event.stage_laps,
+        # Tennis-specific fields
+        "tournament_name": event.tournament_name,
+        "round_name": event.round_name,
+        "court": event.court,
+        "draw_type": event.draw_type,
     }
 
 
@@ -138,6 +146,14 @@ def dict_to_event(data: dict) -> Event:
         # Racing-specific fields
         circuit_name=data.get("circuit_name"),
         sessions=[dict_to_racing_session(s) for s in data.get("sessions", [])],
+        race_laps=data.get("race_laps"),
+        race_distance_miles=data.get("race_distance_miles"),
+        stage_laps=data.get("stage_laps") or [],
+        # Tennis-specific fields
+        tournament_name=data.get("tournament_name"),
+        round_name=data.get("round_name"),
+        court=data.get("court"),
+        draw_type=data.get("draw_type"),
     )
 
 

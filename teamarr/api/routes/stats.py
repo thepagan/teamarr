@@ -15,6 +15,7 @@ from fastapi import APIRouter, Query
 
 from teamarr.database import get_db
 from teamarr.database.settings import get_all_settings
+from teamarr.database.stats import get_current_stats, get_live_xmltv_content, get_recent_runs
 
 router = APIRouter()
 
@@ -36,26 +37,9 @@ def get_stats():
     - Last 24 hour summary
     - Breakdown by run type
     """
-    from teamarr.database.stats import get_current_stats
 
     with get_db() as conn:
         return get_current_stats(conn)
-
-
-@router.get("/dashboard")
-def get_dashboard_stats():
-    """Get aggregated dashboard stats for UI quadrants.
-
-    Returns stats organized for the Dashboard's 4 quadrants:
-    - Teams: total, active, assigned, leagues breakdown
-    - Event Groups: total, streams, match rates, leagues (from latest run)
-    - EPG: channels, events, filler by type (from latest run)
-    - Channels: active, logos, groups, deleted
-    """
-    from teamarr.database.stats import get_dashboard_stats as db_dashboard_stats
-
-    with get_db() as conn:
-        return db_dashboard_stats(conn)
 
 
 @router.get("/live")
@@ -84,7 +68,6 @@ def get_live_stats(
             "event": {"games_today": 0, "live_now": 0, "by_league": {}, "live_events": []},
         }
 
-        from teamarr.database.stats import get_live_xmltv_content
 
         xmltv = get_live_xmltv_content(conn)
 
@@ -241,21 +224,6 @@ def _parse_xmltv_for_live_stats(
                 )
 
 
-@router.get("/history")
-def get_stats_history(
-    days: int = Query(7, ge=1, le=90, description="Number of days of history"),
-    run_type: str | None = Query(None, description="Filter by run type"),
-):
-    """Get daily stats history for charting.
-
-    Returns per-day aggregates for the specified time range.
-    """
-    from teamarr.database.stats import get_stats_history as get_history
-
-    with get_db() as conn:
-        return get_history(conn, days=days, run_type=run_type)
-
-
 # =============================================================================
 # PROCESSING RUNS
 # =============================================================================
@@ -273,7 +241,6 @@ def get_runs(
     Returns detailed information about recent processing runs
     with optional filtering.
     """
-    from teamarr.database.stats import get_recent_runs
 
     with get_db() as conn:
         runs = get_recent_runs(
@@ -289,45 +256,12 @@ def get_runs(
         }
 
 
-@router.get("/runs/{run_id}")
-def get_run(run_id: int):
-    """Get a specific processing run by ID."""
-    from fastapi import HTTPException, status
-
-    from teamarr.database.stats import get_run as get_run_by_id
-
-    with get_db() as conn:
-        run = get_run_by_id(conn, run_id)
-        if not run:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Run {run_id} not found",
-            )
-        return run.to_dict()
-
-
 # =============================================================================
 # MAINTENANCE
 # =============================================================================
 
-
-@router.delete("/runs/cleanup")
-def cleanup_runs(
-    days: int = Query(30, ge=1, le=365, description="Delete runs older than N days"),
-):
-    """Delete old processing runs.
-
-    Cleans up historical run data to manage database size.
-    Called automatically after each generation run (30 days).
-    """
-    from teamarr.database.stats import cleanup_old_runs
-
-    with get_db() as conn:
-        deleted = cleanup_old_runs(conn, days=days)
-        return {
-            "deleted": deleted,
-            "message": f"Deleted {deleted} runs older than {days} days",
-        }
+# NOTE: run cleanup has no endpoint — cleanup_old_runs(days=30) runs
+# automatically after each generation run (consumers/generation.py).
 
 
 @router.delete("/runs")

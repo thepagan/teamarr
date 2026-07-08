@@ -1,7 +1,7 @@
 /**
  * StreamItem — renders a single stream name with multi-layer regex highlighting.
  *
- * Each extraction field (teams, date, time, league) gets a distinct color.
+ * Each extraction field (teams, date, time, league, fighters, event name) gets a distinct color.
  * Include/exclude matches are shown as green borders or red strike-through.
  * Built-in filter matches are shown with filter reason badge.
  */
@@ -22,6 +22,11 @@ const FIELD_COLORS: Record<string, { bg: string; text: string; label: string }> 
   day:    { bg: "bg-yellow-500/15",  text: "text-yellow-200",  label: "Day" },
   time:   { bg: "bg-orange-500/20",  text: "text-orange-300",  label: "Time" },
   league: { bg: "bg-purple-500/20",  text: "text-purple-300",  label: "League" },
+  // Combat / Event Card extraction
+  fighter1:   { bg: "bg-blue-500/20",   text: "text-blue-300",   label: "Fighter 1" },
+  fighter2:   { bg: "bg-cyan-500/20",   text: "text-cyan-300",   label: "Fighter 2" },
+  fighters:   { bg: "bg-blue-500/20",   text: "text-blue-300",   label: "Fighters" },
+  event_name: { bg: "bg-pink-500/20",   text: "text-pink-300",   label: "Event Name" },
 }
 
 // ---------------------------------------------------------------------------

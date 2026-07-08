@@ -8,13 +8,13 @@ docs_version: "2.3.1"
 
 # Template Engine
 
-The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 226 variables across 19 categories, 23 condition evaluators, suffix rules for multi-game context, and template-type scoping for the variable picker.
+The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 240 variables across 20 categories, 23 condition evaluators, suffix rules for multi-game context, and template-type scoping for the variable picker.
 
 ## Architecture
 
 ```
 TemplateResolver
-  ├── VariableRegistry (226 variables, 19 categories)
+  ├── VariableRegistry (240 variables, 20 categories)
   ├── ConditionEvaluator (23 evaluators)
   └── ContextBuilder (Event + Team → TemplateContext)
 ```
@@ -154,8 +154,8 @@ Template resolution happens in three places that **must stay in sync**:
 
 | Path | Purpose | File |
 |------|---------|------|
-| Channel creation | New channel name, tvg_id, logo | `lifecycle/service.py` |
-| Channel sync | Update existing channel | `lifecycle/service.py` |
+| Channel creation | New channel name, tvg_id, logo | `lifecycle/creator.py` |
+| Channel sync | Update existing channel | `lifecycle/syncer.py` |
 | EPG generation | XMLTV programme content | `consumers/event_epg.py` |
 
 When adding new template variables, all three paths must be updated.
@@ -179,7 +179,7 @@ The reconstruction is centralized so it reaches **every** consumer identically:
 
 Every art sink calls `resolve_art` (or the shared helper): EPG programme `<icon>`
 and channel `<icon>` (event/team EPG + `xmltv.py` as an idempotent safety net),
-Dispatcharr channel logos (`lifecycle/service._resolve_logo_url`), and fillers.
+Dispatcharr channel logos (`lifecycle/naming._resolve_logo_url`), and fillers.
 This guarantees the EPG icon and the Dispatcharr channel logo never diverge.
 
 **Migrations:** v75 deduces the most-frequent art origin from existing templates
@@ -212,7 +212,7 @@ See `GET /variables/samples` (`live`, `gaps`, `live_populated`, `live_total`).
 | `templates/conditions.py` | 23 condition evaluators |
 | `templates/context.py` | Context dataclasses (Odds, GameContext, TemplateContext) |
 | `templates/context_builder.py` | Build TemplateContext from Event + Team |
-| `templates/variables/` | 19 category modules with 226 variable definitions |
+| `templates/variables/` | 20 category modules with 240 variable definitions |
 | `templates/variables/registry.py` | VariableRegistry singleton |
 | `templates/sample_data.py` | 3-shape fictitious sample values + `resolve_shape` for UI preview |
 | `utilities/art_url.py` | Game-thumbs base URL join helper + reader (`apply_art_base_url`, `read_art_base_url`) |

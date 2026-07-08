@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from teamarr.database.connection import get_db
+
 logger = logging.getLogger(__name__)
 
 
@@ -269,7 +271,6 @@ class PersistentTTLCache:
 
     def _load_from_sqlite(self) -> None:
         """Load non-expired entries from SQLite into memory."""
-        from teamarr.database.connection import get_db
 
         now = _utc_now()
         loaded = 0
@@ -359,7 +360,6 @@ class PersistentTTLCache:
 
     def clear(self) -> None:
         """Clear all cached values."""
-        from teamarr.database.connection import get_db
 
         self._memory_cache.clear()
 
@@ -377,7 +377,6 @@ class PersistentTTLCache:
 
     def cleanup_expired(self) -> int:
         """Remove expired entries from memory and SQLite."""
-        from teamarr.database.connection import get_db
 
         # Clean memory
         removed = self._memory_cache.cleanup_expired()
@@ -399,7 +398,6 @@ class PersistentTTLCache:
         Returns number of entries written.
         Call this after EPG generation for immediate persistence.
         """
-        from teamarr.database.connection import get_db
 
         # Atomically grab dirty/deleted keys
         with self._dirty_lock:

@@ -3,12 +3,14 @@
 from fastapi import APIRouter
 
 from teamarr.database import get_db
+from teamarr.jellyfin.client import JellyfinClient
 
 from .models import (
     JellyfinConnectionTestRequest,
     JellyfinConnectionTestResponse,
     JellyfinSettingsModel,
     JellyfinSettingsUpdate,
+    to_model,
     unmask_or_skip,
 )
 
@@ -23,13 +25,7 @@ def get_jellyfin_settings():
     with get_db() as conn:
         settings = get_jellyfin_settings(conn)
 
-    return JellyfinSettingsModel(
-        enabled=settings.enabled,
-        url=settings.url,
-        username=settings.username,
-        password=settings.password,
-        api_key=settings.api_key,
-    )
+    return to_model(JellyfinSettingsModel, settings)
 
 
 @router.put("/settings/jellyfin", response_model=JellyfinSettingsModel)
@@ -53,13 +49,7 @@ def update_jellyfin_settings(update: JellyfinSettingsUpdate):
     with get_db() as conn:
         settings = get_jellyfin_settings(conn)
 
-    return JellyfinSettingsModel(
-        enabled=settings.enabled,
-        url=settings.url,
-        username=settings.username,
-        password=settings.password,
-        api_key=settings.api_key,
-    )
+    return to_model(JellyfinSettingsModel, settings)
 
 
 @router.post("/jellyfin/test", response_model=JellyfinConnectionTestResponse)
@@ -72,7 +62,6 @@ def test_jellyfin_connection(
     Accepts optional url/username/password overrides.
     """
     from teamarr.database.settings import get_jellyfin_settings
-    from teamarr.jellyfin.client import JellyfinClient
 
     with get_db() as conn:
         saved = get_jellyfin_settings(conn)

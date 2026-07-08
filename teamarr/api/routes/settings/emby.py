@@ -3,12 +3,14 @@
 from fastapi import APIRouter
 
 from teamarr.database import get_db
+from teamarr.emby.client import EmbyClient
 
 from .models import (
     EmbyConnectionTestRequest,
     EmbyConnectionTestResponse,
     EmbySettingsModel,
     EmbySettingsUpdate,
+    to_model,
     unmask_or_skip,
 )
 
@@ -23,13 +25,7 @@ def get_emby_settings():
     with get_db() as conn:
         settings = get_emby_settings(conn)
 
-    return EmbySettingsModel(
-        enabled=settings.enabled,
-        url=settings.url,
-        username=settings.username,
-        password=settings.password,
-        api_key=settings.api_key,
-    )
+    return to_model(EmbySettingsModel, settings)
 
 
 @router.put("/settings/emby", response_model=EmbySettingsModel)
@@ -53,13 +49,7 @@ def update_emby_settings(update: EmbySettingsUpdate):
     with get_db() as conn:
         settings = get_emby_settings(conn)
 
-    return EmbySettingsModel(
-        enabled=settings.enabled,
-        url=settings.url,
-        username=settings.username,
-        password=settings.password,
-        api_key=settings.api_key,
-    )
+    return to_model(EmbySettingsModel, settings)
 
 
 @router.post("/emby/test", response_model=EmbyConnectionTestResponse)
@@ -72,7 +62,6 @@ def test_emby_connection(
     Accepts optional url/username/password overrides.
     """
     from teamarr.database.settings import get_emby_settings
-    from teamarr.emby.client import EmbyClient
 
     with get_db() as conn:
         saved = get_emby_settings(conn)

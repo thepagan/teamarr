@@ -14,6 +14,14 @@ from datetime import datetime
 from sqlite3 import Connection, Row
 from typing import TYPE_CHECKING, Any
 
+from teamarr.core import TemplateConfig
+from teamarr.core.filler_types import (
+    ConditionalFillerTemplate,
+    FillerConfig,
+    FillerTemplate,
+    OffseasonFillerTemplate,
+)
+
 logger = logging.getLogger(__name__)
 
 # Art fields whose RELATIVE values are normalized to a leading slash (epic z02s),
@@ -25,8 +33,17 @@ _ABSOLUTE_URL = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
 def _normalize_art_path(value: Any) -> Any:
     """Ensure a relative art path starts with '/'. Absolute URLs and empty/non-str
-    values pass through unchanged."""
+    values pass through unchanged.
+
+    Variable-LED values ("{feed_team_logo}…") are never rooted with "/" — a
+    leading variable may resolve to an absolute URL at render time, and the
+    prepended slash breaks it ("/https://…", #275). A corrupted leading
+    "/{var}" from the old behavior is repaired on save.
+    """
     if not isinstance(value, str) or not value or _ABSOLUTE_URL.match(value):
+        return value
+    value = re.sub(r"^/+(?=\{)", "", value)
+    if value.startswith("{"):
         return value
     return value if value.startswith("/") else "/" + value
 
@@ -538,12 +555,6 @@ def template_to_filler_config(template: Template) -> FillerConfig:
         FillerConfig ready for FillerGenerator
     """
     # Import from core layer (proper layer isolation)
-    from teamarr.core.filler_types import (
-        ConditionalFillerTemplate,
-        FillerConfig,
-        FillerTemplate,
-        OffseasonFillerTemplate,
-    )
 
     # Build pregame template from fallback (no hardcoded defaults - schema provides them)
     pregame_fb = template.pregame_fallback or {}
@@ -635,7 +646,6 @@ def template_to_programme_config(template: Template) -> TemplateConfig:
     Returns:
         TemplateConfig ready for TeamEPGGenerator
     """
-    from teamarr.core import TemplateConfig
 
     # Get categories from template
     categories = template.xmltv_categories or []

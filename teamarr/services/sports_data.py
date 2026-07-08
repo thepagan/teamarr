@@ -12,10 +12,12 @@ Uses PersistentTTLCache for all caching:
 
 import logging
 import threading
+import time
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 from teamarr.core import Event, SportsProvider, Team, TeamStats
+from teamarr.database import get_db
 from teamarr.database.provider_cache import (
     dict_to_event,
     dict_to_stats,
@@ -49,6 +51,41 @@ logger = logging.getLogger(__name__)
 # cached event during the window.
 REFRESH_COALESCE_TTL = 300  # seconds
 
+# Negative-cache marker for get_event. A failed provider fetch must also be
+# cached: the refresh coalesce marker only skips the cache *delete*, so without
+# a negative entry every per-channel refresh of an event whose summary fetch
+# fails (e.g. ESPN 404) falls through to another serial provider call —
+# hundreds of live 404s per run for a single event.
+_EVENT_NOT_FOUND = {"__event_not_found__": True}
+
+# In-memory memo for team_cache identity lookups. Enrichment runs for the home
+# and away team of every event on every get_events cache hit, so without this
+# each degraded team costs a fresh SQLite connection (+3 PRAGMAs) per event —
+# multiplied by streams × leagues × dates in the multi-league match fallback.
+# Team identity is effectively static; the TTL bounds staleness from mid-run
+# short-name heals. Misses (None) are memoized too: a team absent from
+# team_cache would otherwise re-query on every event it appears in.
+_TEAM_IDENTITY_MEMO: dict[tuple[str, str, str], tuple[float, dict | None]] = {}
+_TEAM_IDENTITY_MEMO_TTL = 900.0  # seconds
+_TEAM_IDENTITY_MEMO_MAX = 8192
+
+
+def _cached_team_identity(provider: str, team_id: str, league: str) -> dict | None:
+    key = (provider, team_id, league)
+    now = time.monotonic()
+    hit = _TEAM_IDENTITY_MEMO.get(key)
+    if hit is not None and now - hit[0] < _TEAM_IDENTITY_MEMO_TTL:
+        return hit[1]
+
+
+    with get_db() as conn:
+        cached = get_team_identity(conn, provider, team_id, league)
+
+    if len(_TEAM_IDENTITY_MEMO) >= _TEAM_IDENTITY_MEMO_MAX:
+        _TEAM_IDENTITY_MEMO.clear()
+    _TEAM_IDENTITY_MEMO[key] = (now, cached)
+    return cached
+
 
 def _backfill_team_from_cache(team: Team | None, league: str) -> Team | None:
     """Patch a Team's short_name/abbreviation/name from team_cache when missing.
@@ -63,11 +100,8 @@ def _backfill_team_from_cache(team: Team | None, league: str) -> Team | None:
     if team.short_name and team.abbreviation and team.name:
         return team
 
-    from teamarr.database import get_db
-
     try:
-        with get_db() as conn:
-            cached = get_team_identity(conn, team.provider, team.id, league)
+        cached = _cached_team_identity(team.provider, team.id, league)
     except Exception as e:
         logger.debug("[TEAM_BACKFILL] lookup failed for %s/%s: %s", team.provider, team.id, e)
         return team
@@ -151,7 +185,6 @@ def _ensure_registry_initialized() -> None:
     if ProviderRegistry.is_initialized():
         return
 
-    from teamarr.database import get_db
     from teamarr.services.league_mappings import init_league_mapping_service
 
     league_mapping_service = init_league_mapping_service(get_db)
@@ -394,6 +427,9 @@ class SportsDataService:
         # Check cache (deserialize from dict)
         cached = self._cache.get(cache_key)
         if cached is not None:
+            if isinstance(cached, dict) and cached.get("__event_not_found__"):
+                logger.debug("[CACHE_HIT] %s (negative — provider miss)", cache_key)
+                return None
             if isinstance(cached, dict) and _event_dict_is_stale(cached):
                 logger.debug(
                     "[CACHE_STALE] %s — team data missing short_name, re-fetching",
@@ -414,6 +450,10 @@ class SportsDataService:
                     # Serialize to dict before caching
                     self._cache.set(cache_key, event_to_dict(event), CACHE_TTL_SINGLE_EVENT)
                     return _enrich_event_teams(event)
+
+        # Short TTL: don't mask an event that becomes available, just absorb
+        # the per-channel refresh fan-out within one coalesce window.
+        self._cache.set(cache_key, _EVENT_NOT_FOUND, REFRESH_COALESCE_TTL)
         return None
 
     # Fields refreshed onto the original event by refresh_event_status. Anything

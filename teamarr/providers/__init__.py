@@ -15,19 +15,16 @@ ProviderRegistry.initialize() must be called during app startup
 to inject the LeagueMappingSource into providers.
 """
 
+from teamarr.database import get_db
+from teamarr.database.team_cache import get_team_name_by_id
 from teamarr.providers.espn import ESPNClient, ESPNProvider
 from teamarr.providers.hockeytech import HockeyTechClient, HockeyTechProvider
 from teamarr.providers.mlbstats import MLBStatsClient, MLBStatsProvider
+from teamarr.providers.nascar import NASCARProvider
 from teamarr.providers.registry import ProviderConfig, ProviderRegistry
 from teamarr.providers.squiggle import SquiggleClient, SquiggleProvider
 from teamarr.providers.supabase import SupabaseLeagueClient, SupabaseProvider
 from teamarr.providers.tsdb import RateLimitStats, TSDBClient, TSDBProvider
-
-
-class _NFHSProviderPlaceholder:
-    """Placeholder class to avoid importing NFHS during package initialization."""
-
-    pass
 
 # =============================================================================
 # PROVIDER FACTORY FUNCTIONS
@@ -49,7 +46,6 @@ def _get_tsdb_api_key() -> str | None:
     passing to the provider layer (which should not access database).
     """
     try:
-        from teamarr.database import get_db
 
         with get_db() as conn:
             cursor = conn.execute("SELECT tsdb_api_key FROM settings WHERE id = 1")
@@ -69,8 +65,6 @@ def _create_tsdb_team_name_resolver() -> callable:
     This callback accesses the database, keeping DB access at the factory
     boundary rather than inside the provider layer.
     """
-    from teamarr.database import get_db
-    from teamarr.database.team_cache import get_team_name_by_id
 
     def resolver(team_id: str, league: str) -> str | None:
         with get_db() as conn:
@@ -109,18 +103,25 @@ def _create_mlbstats_provider() -> MLBStatsProvider:
     )
 
 
-def _create_nfhs_provider():
-    """Factory for NFHS provider."""
-    from teamarr.providers.nfhs import NFHSProvider
-
-    return NFHSProvider()
-
-
 def _create_squiggle_provider() -> SquiggleProvider:
     """Factory for Squiggle provider with injected dependencies."""
     return SquiggleProvider(
         league_mapping_source=ProviderRegistry.get_league_mapping_source(),
     )
+
+
+def _create_nascar_provider() -> NASCARProvider:
+    """Factory for NASCAR provider with injected dependencies."""
+    return NASCARProvider(
+        league_mapping_source=ProviderRegistry.get_league_mapping_source(),
+    )
+
+
+def _create_nfhs_provider():
+    """Factory for NFHS provider; imported lazily to avoid startup import cycles."""
+    from teamarr.providers.nfhs import NFHSProvider
+
+    return NFHSProvider()
 
 
 # =============================================================================
@@ -170,10 +171,20 @@ ProviderRegistry.register(
 )
 
 ProviderRegistry.register(
+    name="nascar",
+    provider_class=NASCARProvider,
+    factory=_create_nascar_provider,
+    priority=35,  # NASCAR Cup/ORAP/Trucks — authoritative session schedules
+    enabled=True,
+)
+
+from teamarr.providers.nfhs import NFHSProvider
+
+ProviderRegistry.register(
     name="nfhs",
-    provider_class=_NFHSProviderPlaceholder,
+    provider_class=NFHSProvider,
     factory=_create_nfhs_provider,
-    priority=70,  # High school sports provider
+    priority=80,  # High school sports; gated by NFHS settings at runtime
     enabled=True,
 )
 
@@ -184,7 +195,6 @@ ProviderRegistry.register(
     priority=100,  # Fallback provider for boxing, etc.
     enabled=True,
 )
-
 
 # =============================================================================
 # EXPORTS
@@ -203,29 +213,18 @@ __all__ = [
     # MLB Stats
     "MLBStatsClient",
     "MLBStatsProvider",
-    # NFHS
-    "NFHSClient",
-    "NFHSProvider",
     # Supabase
     "SupabaseLeagueClient",
     "SupabaseProvider",
     # Squiggle (AFL)
     "SquiggleClient",
     "SquiggleProvider",
+    # NASCAR
+    "NASCARProvider",
+    # NFHS
+    "NFHSProvider",
     # TheSportsDB
     "RateLimitStats",
     "TSDBClient",
     "TSDBProvider",
 ]
-
-
-def __getattr__(name: str):
-    if name == "NFHSClient":
-        from teamarr.providers.nfhs import NFHSClient
-
-        return NFHSClient
-    if name == "NFHSProvider":
-        from teamarr.providers.nfhs import NFHSProvider
-
-        return NFHSProvider
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

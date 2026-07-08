@@ -36,7 +36,7 @@ A global lock prevents concurrent runs. The workflow progresses through 8 phases
 
 ## Event Group Processor
 
-`event_group_processor.py` handles the core matching and channel lifecycle for event groups.
+The `event_group_processor/` package handles the core matching and channel lifecycle for event groups. `processor.py` holds the `EventGroupProcessor` coordinator; the pipeline stages live in sibling modules (`stream_fetcher.py`, `matching.py`, `team_filter.py`, `persistence.py`, `xmltv.py`, `preview.py`, `results.py`).
 
 ### Processing Pipeline
 
@@ -126,9 +126,9 @@ EPG-path caching is free: `TeamMatcher` already keys its cache on `(group_id, st
 
 ## Channel Lifecycle
 
-### Service (`lifecycle/service.py`)
+### Service (`lifecycle/service.py` + stage modules)
 
-`ChannelLifecycleService` manages channel creation, sync, and deletion in Dispatcharr.
+`ChannelLifecycleService` manages channel creation, sync, and deletion in Dispatcharr. `service.py` holds the coordinator (shared state, `_safe_update_channel`, profile-change batching); the paths live in sibling modules: `creator.py` (matched-stream driver, duplicate modes, channel creation), `syncer.py` (settings/profiles/logo sync, EPG association), `cleanup.py` (scheduled deletions, missing/rotated streams, orphan + disabled-group sweeps), `naming.py` (name/logo/template resolution shared by create and sync).
 
 **Safe update pattern** — `_safe_update_channel()`:
 - Calls Dispatcharr API
@@ -140,8 +140,8 @@ EPG-path caching is free: `TeamMatcher` already keys its cache on `(group_id, st
 
 | Path | Purpose | File |
 |------|---------|------|
-| `_create_channel` | New channel from matched stream | `lifecycle/service.py` |
-| `_sync_channel_settings` | Update existing channel | `lifecycle/service.py` |
+| `_create_channel` | New channel from matched stream | `lifecycle/creator.py` |
+| `_sync_channel_settings` | Update existing channel | `lifecycle/syncer.py` |
 | EPG Generator | XMLTV channel name/icon | `event_epg.py` |
 
 All three resolve: name, tvg_id, logo, channel group, profiles, stream profile, channel number, and delete timing from the same event + template context.
@@ -218,13 +218,13 @@ No match defaults to priority 999 (sorted to end). Channels are sorted by priori
 | File | Purpose |
 |------|---------|
 | `consumers/generation.py` | Unified generation workflow |
-| `consumers/event_group_processor.py` | Event group processing pipeline |
+| `consumers/event_group_processor/` | Event group processing pipeline (coordinator + stage modules) |
 | `consumers/team_processor.py` | Team EPG generation |
 | `consumers/matching/classifier.py` | Stream classification |
 | `consumers/matching/matcher.py` | Stream-to-event matching |
 | `consumers/matching/epg_index.py` | Per-run scoped EPG program index (tvg_id → programs) |
 | `consumers/matching/epg_matcher.py` | EPG title/category matching helpers |
-| `consumers/lifecycle/service.py` | Channel lifecycle management |
+| `consumers/lifecycle/` | Channel lifecycle management (service coordinator + creator/syncer/cleanup/naming) |
 | `consumers/lifecycle/dynamic_resolver.py` | Wildcard resolution |
 | `consumers/lifecycle/reconciliation.py` | Drift detection and repair |
 | `consumers/lifecycle/timing.py` | Channel create/delete timing |
