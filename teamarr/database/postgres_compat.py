@@ -402,10 +402,50 @@ class PostgresConnectionWrapper:
             "strftime('%Y-%m-%d %H:%M', started_at)",
             "TO_CHAR(started_at, 'YYYY-MM-DD HH24:MI')",
         )
+        translated = self._translate_boolean_insert_literals(translated)
         translated = self._translate_boolean_comparisons(translated)
         if translate_placeholders:
             translated = _translate_placeholders(translated)
         return translated
+
+    def _translate_boolean_insert_literals(self, query: str) -> str:
+        match = re.search(
+            rf"\bINSERT\s+INTO\s+(?P<table>{_IDENTIFIER_PATTERN})\s*"
+            r"\((?P<columns>.*?)\)\s*VALUES\s*",
+            query,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return query
+
+        table_name = match.group("table").strip('"')
+        column_types = self._get_column_types().get(table_name, {})
+        columns = [part.strip().strip('"') for part in match.group("columns").split(",")]
+        boolean_indexes = {
+            index for index, column_name in enumerate(columns)
+            if column_types.get(column_name) == "boolean"
+        }
+        if not boolean_indexes:
+            return query
+
+        values_start = match.end()
+        values_end = _find_values_clause_end(query, values_start)
+        values_sql = query[values_start:values_end]
+
+        def translate_tuple(inner: str) -> str:
+            parts = _split_sql_csv(inner)
+            for index in boolean_indexes:
+                if index >= len(parts):
+                    continue
+                token = parts[index].strip()
+                if token == "1":
+                    parts[index] = "TRUE"
+                elif token == "0":
+                    parts[index] = "FALSE"
+            return "(" + ", ".join(parts) + ")"
+
+        translated_values = _rewrite_top_level_value_tuples(values_sql, translate_tuple)
+        return query[:values_start] + translated_values + query[values_end:]
 
     def _translate_boolean_comparisons(self, query: str) -> str:
         aliases = self._extract_query_tables(query)
@@ -694,6 +734,127 @@ def _translate_placeholders(query: str) -> str:
         output.append(char)
 
     return "".join(output)
+
+
+def _find_values_clause_end(query: str, start: int) -> int:
+    in_single = False
+    in_double = False
+    depth = 0
+    i = start
+
+    while i < len(query):
+        char = query[i]
+        next_char = query[i + 1] if i + 1 < len(query) else ""
+
+        if char == "'" and not in_double:
+            if in_single and next_char == "'":
+                i += 2
+                continue
+            in_single = not in_single
+            i += 1
+            continue
+
+        if char == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+
+        if in_single or in_double:
+            i += 1
+            continue
+
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            if query[i:].lstrip().upper().startswith("ON CONFLICT"):
+                return i
+            if query[i:].lstrip().upper().startswith("RETURNING"):
+                return i
+            if char == ";":
+                return i
+
+        i += 1
+
+    return len(query)
+
+
+def _rewrite_top_level_value_tuples(query: str, translate_tuple) -> str:
+    output: list[str] = []
+    i = 0
+
+    while i < len(query):
+        if query[i] != "(":
+            output.append(query[i])
+            i += 1
+            continue
+
+        start = i
+        depth = 0
+        in_single = False
+        in_double = False
+
+        while i < len(query):
+            char = query[i]
+            next_char = query[i + 1] if i + 1 < len(query) else ""
+
+            if char == "'" and not in_double:
+                if in_single and next_char == "'":
+                    i += 2
+                    continue
+                in_single = not in_single
+                i += 1
+                continue
+
+            if char == '"' and not in_single:
+                in_double = not in_double
+                i += 1
+                continue
+
+            if not in_single and not in_double:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        output.append(translate_tuple(query[start + 1 : i]))
+                        i += 1
+                        break
+
+            i += 1
+        else:
+            output.append(query[start:])
+            break
+
+    return "".join(output)
+
+
+def _split_sql_csv(sql: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+
+    for char in sql:
+        if char == "'" and not in_double:
+            in_single = not in_single
+            current.append(char)
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            current.append(char)
+            continue
+        if char == "," and not in_single and not in_double:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+
+    if current:
+        parts.append("".join(current).strip())
+
+    return parts
 
 
 def _translate_transaction_statements(query: str) -> str:
