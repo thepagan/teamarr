@@ -8,7 +8,6 @@ from .read import (
     get_all_settings,
     get_backup_settings,
     get_database_settings,
-    get_nfhs_settings,
     get_channel_numbering_settings,
     get_channelsdvr_settings,
     get_dispatcharr_settings,
@@ -29,7 +28,6 @@ from .types import (
     APISettings,
     BackupSettings,
     DatabaseSettings,
-    NFHSSettings,
     ChannelNumberingSettings,
     ChannelsDVRSettings,
     DispatcharrSettings,
@@ -51,7 +49,6 @@ from .types import (
 from .update import (
     update_backup_settings,
     update_database_settings,
-    update_nfhs_settings,
     update_channel_numbering_settings,
     update_channelsdvr_settings,
     update_dispatcharr_settings,
@@ -90,7 +87,6 @@ __all__ = [
     "UpdateCheckSettings",
     "BackupSettings",
     "DatabaseSettings",
-    "NFHSSettings",
     "FeedSeparationSettings",
     "AllSettings",
     # Read operations
@@ -110,7 +106,6 @@ __all__ = [
     "get_update_check_settings",
     "get_backup_settings",
     "get_database_settings",
-    "get_nfhs_settings",
     "get_feed_separation_settings",
     # Update operations
     "update_dispatcharr_settings",
@@ -129,6 +124,5 @@ __all__ = [
     "update_update_check_settings",
     "update_backup_settings",
     "update_database_settings",
-    "update_nfhs_settings",
     "update_feed_separation_settings",
 ]

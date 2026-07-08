@@ -17,8 +17,6 @@ import {
   updateDisplaySettings,
   getDatabaseSettings,
   updateDatabaseSettings,
-  getNFHSSettings,
-  updateNFHSSettings,
   getTeamFilterSettings,
   updateTeamFilterSettings,
   getExceptionKeywords,
@@ -128,11 +126,6 @@ export const useUpdateDisplaySettings = settingsMutationHook(updateDisplaySettin
 export const useDatabaseSettings = settingsQueryHook("database", getDatabaseSettings)
 export const useUpdateDatabaseSettings = settingsMutationHook(updateDatabaseSettings, [
   ["settings", "database"],
-])
-
-export const useNFHSSettings = settingsQueryHook("nfhs", getNFHSSettings)
-export const useUpdateNFHSSettings = settingsMutationHook(updateNFHSSettings, [
-  ["settings", "nfhs"],
 ])
 
 export const useTeamFilterSettings = settingsQueryHook("team-filter", getTeamFilterSettings)

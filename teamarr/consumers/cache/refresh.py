@@ -581,34 +581,6 @@ class CacheRefresher:
         if "softball" in league_slug:
             return "softball"
 
-        # NFHS high school leagues
-        if league_slug.startswith("hs-bowling"):
-            return "bowling"
-        if league_slug.startswith("hs-cheer"):
-            return "cheer"
-        if league_slug.startswith("hs-cross-country"):
-            return "cross-country"
-        if league_slug.startswith("hs-field-hockey"):
-            return "field-hockey"
-        if league_slug.startswith("hs-flag-football"):
-            return "flag-football"
-        if league_slug.startswith("hs-golf"):
-            return "golf"
-        if league_slug.startswith("hs-gymnastics"):
-            return "gymnastics"
-        if league_slug.startswith("hs-swimming"):
-            return "swimming"
-        if league_slug.startswith("hs-tennis"):
-            return "tennis"
-        if league_slug.startswith("hs-track-field"):
-            return "track-and-field"
-        if league_slug.startswith("hs-water-polo"):
-            return "water-polo"
-        if league_slug.startswith("hs-wrestling"):
-            return "wrestling"
-        if league_slug.startswith("hs-soccer"):
-            return "soccer"
-
         # Default fallback
         return "sports"
 

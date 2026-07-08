@@ -25,7 +25,6 @@ from .types import (
     FeedSeparationSettings,
     JellyfinSettings,
     LifecycleSettings,
-    NFHSSettings,
     SchedulerSettings,
     StreamFilterSettings,
     StreamOrderingSettings,
@@ -123,11 +122,6 @@ def get_display_settings(conn: Connection) -> DisplaySettings:
 def get_database_settings(conn: Connection) -> DatabaseSettings:
     """Get stored database UI settings."""
     return _get_group(conn, "database")
-
-
-def get_nfhs_settings(conn: Connection) -> NFHSSettings:
-    """Get NFHS provider settings."""
-    return _get_group(conn, "nfhs")
 
 
 def get_stream_filter_settings(conn: Connection) -> StreamFilterSettings:

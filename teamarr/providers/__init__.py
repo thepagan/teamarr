@@ -117,13 +117,6 @@ def _create_nascar_provider() -> NASCARProvider:
     )
 
 
-def _create_nfhs_provider():
-    """Factory for NFHS provider; imported lazily to avoid startup import cycles."""
-    from teamarr.providers.nfhs import NFHSProvider
-
-    return NFHSProvider()
-
-
 # =============================================================================
 # PROVIDER REGISTRATION
 # =============================================================================
@@ -178,16 +171,6 @@ ProviderRegistry.register(
     enabled=True,
 )
 
-from teamarr.providers.nfhs import NFHSProvider
-
-ProviderRegistry.register(
-    name="nfhs",
-    provider_class=NFHSProvider,
-    factory=_create_nfhs_provider,
-    priority=80,  # High school sports; gated by NFHS settings at runtime
-    enabled=True,
-)
-
 ProviderRegistry.register(
     name="tsdb",
     provider_class=TSDBProvider,
@@ -221,8 +204,6 @@ __all__ = [
     "SquiggleProvider",
     # NASCAR
     "NASCARProvider",
-    # NFHS
-    "NFHSProvider",
     # TheSportsDB
     "RateLimitStats",
     "TSDBClient",

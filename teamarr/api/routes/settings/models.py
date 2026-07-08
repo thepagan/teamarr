@@ -270,35 +270,6 @@ class TSDBKeyValidationResponse(BaseModel):
     is_premium: bool = False
     message: str
 
-
-
-# =============================================================================
-# NFHS SETTINGS
-# =============================================================================
-
-
-class NFHSSettingsModel(BaseModel):
-    """NFHS (High School Sports) provider settings."""
-
-    enabled: bool = False
-    state_codes: list[str] = Field(
-        default_factory=list,
-        description="List of 2-letter US state codes to fetch NFHS schools/events",
-    )
-    levels: list[str] = Field(
-        default_factory=lambda: ["Varsity"],
-        description="Competition levels to fetch from NFHS",
-    )
-
-
-class NFHSSettingsUpdate(BaseModel):
-    """Update model for NFHS settings (all fields optional)."""
-
-    enabled: bool | None = None
-    state_codes: list[str] | None = None
-    levels: list[str] | None = None
-
-
 # =============================================================================
 # DATABASE SETTINGS
 # =============================================================================
@@ -657,7 +628,6 @@ class AllSettingsModel(BaseModel):
     durations: DurationSettingsModel
     display: DisplaySettingsModel
     database: DatabaseSettingsModel | None = None
-    nfhs: NFHSSettingsModel | None = None
     team_filter: TeamFilterSettingsModel | None = None
     channel_numbering: ChannelNumberingSettingsModel | None = None
     stream_ordering: StreamOrderingSettingsModel | None = None

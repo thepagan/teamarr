@@ -210,9 +210,7 @@ export function TeamImport() {
         return
       }
 
-      const sportDisplayName = league.provider === "nfhs"
-        ? "High School Sports"
-        : (getSportDisplayName(league.sport, sportsMap) || "Other")
+      const sportDisplayName = getSportDisplayName(league.sport, sportsMap) || "Other"
       if (!grouped[sportDisplayName]) grouped[sportDisplayName] = []
       grouped[sportDisplayName].push(league)
     })
@@ -390,13 +388,7 @@ export function TeamImport() {
           ) : (
             <div className="py-1">
               {Object.entries(leaguesBySport)
-                .sort(([a], [b]) => {
-                  const aKey = String(a ?? "")
-                  const bKey = String(b ?? "")
-                  if (aKey === "High School Sports") return 1
-                  if (bKey === "High School Sports") return -1
-                  return aKey.localeCompare(bKey)
-                })
+                .sort(([a], [b]) => String(a ?? "").localeCompare(String(b ?? "")))
                 .map(([sport, leagues]) => (
                   <div key={sport} className="border-b last:border-b-0">
                     <button

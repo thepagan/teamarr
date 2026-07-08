@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Loader2, Database, Server, School, Trash2 } from "lucide-react"
+import { Loader2, Database, Server, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -19,14 +19,10 @@ import {
 } from "@/hooks/useEPG"
 import {
   useDatabaseSettings,
-  useNFHSSettings,
   useUpdateDatabaseSettings,
-  useUpdateNFHSSettings,
 } from "@/hooks/useSettings"
 import { BackupRestoreCard } from "../BackupRestoreCard"
 import { formatRelativeTime } from "../format"
-
-const NFHS_LEVELS = ["Varsity", "Junior Varsity", "Freshman", "Middle School"]
 
 function DatabaseSettingsCard() {
   const { data } = useDatabaseSettings()
@@ -102,89 +98,6 @@ function DatabaseSettingsCard() {
                 {
                   onSuccess: () => toast.success("Database settings saved"),
                   onError: () => toast.error("Failed to save database settings"),
-                },
-              )
-            }}
-          >
-            {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Save
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function NFHSSettingsCard() {
-  const { data } = useNFHSSettings()
-  const updateMutation = useUpdateNFHSSettings()
-  const [enabled, setEnabled] = useState(false)
-  const [stateCodes, setStateCodes] = useState("")
-  const [levels, setLevels] = useState<string[]>(["Varsity"])
-
-  useEffect(() => {
-    if (!data) return
-    setEnabled(data.enabled)
-    setStateCodes(data.state_codes.join(", "))
-    setLevels(data.levels.length ? data.levels : ["Varsity"])
-  }, [data])
-
-  const toggleLevel = (level: string) => {
-    setLevels((current) =>
-      current.includes(level)
-        ? current.filter((item) => item !== level)
-        : [...current, level],
-    )
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <School className="h-5 w-5" />
-          NFHS
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex items-center justify-between">
-          <Label htmlFor="nfhs-enabled">High School Sports</Label>
-          <Switch id="nfhs-enabled" checked={enabled} onCheckedChange={setEnabled} />
-        </div>
-        <Input
-          placeholder="State codes, comma-separated"
-          value={stateCodes}
-          onChange={(event) => setStateCodes(event.target.value)}
-        />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          {NFHS_LEVELS.map((level) => (
-            <label key={level} className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="accent-primary"
-                checked={levels.includes(level)}
-                onChange={() => toggleLevel(level)}
-              />
-              {level}
-            </label>
-          ))}
-        </div>
-        <div className="flex justify-end">
-          <Button
-            size="sm"
-            disabled={updateMutation.isPending}
-            onClick={() => {
-              updateMutation.mutate(
-                {
-                  enabled,
-                  state_codes: stateCodes
-                    .split(/[,\s]+/)
-                    .map((code) => code.trim().toUpperCase())
-                    .filter(Boolean),
-                  levels: levels.length ? levels : ["Varsity"],
-                },
-                {
-                  onSuccess: () => toast.success("NFHS settings saved"),
-                  onError: () => toast.error("Failed to save NFHS settings"),
                 },
               )
             }}
@@ -394,7 +307,6 @@ export function AdvancedTab() {
 
       <BackupRestoreCard />
       <DatabaseSettingsCard />
-      <NFHSSettingsCard />
       <ScheduledChannelResetCard />
       <DataCachesCard />
     </>

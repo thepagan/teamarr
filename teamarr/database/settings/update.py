@@ -239,28 +239,6 @@ def update_database_settings(
     return _apply(conn, "database", provided)
 
 
-def update_nfhs_settings(
-    conn: Connection,
-    enabled: bool | None = None,
-    state_codes: list[str] | None = None,
-    levels: list[str] | None = None,
-) -> bool:
-    """Update NFHS provider settings."""
-    normalized_state_codes = None
-    if state_codes is not None:
-        normalized_state_codes = [
-            code.strip().upper()
-            for code in state_codes
-            if isinstance(code, str) and code.strip()
-        ]
-    provided = _skip_none(
-        enabled=enabled,
-        state_codes=normalized_state_codes,
-        levels=levels,
-    )
-    return _apply(conn, "nfhs", provided)
-
-
 def update_team_filter_settings(
     conn: Connection,
     enabled: bool | None = None,

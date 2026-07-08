@@ -37,7 +37,6 @@ from .models import (
     FeedSeparationSettingsModel,
     JellyfinSettingsModel,
     LifecycleSettingsModel,
-    NFHSSettingsModel,
     ReconciliationSettingsModel,
     SchedulerSettingsModel,
     StreamOrderingRuleModel,
@@ -48,7 +47,6 @@ from .models import (
 from .stream_ordering import router as stream_ordering_router
 from .team_filter import router as team_filter_router
 from .update_check import router as update_check_router
-from .nfhs import router as nfhs_router
 
 # Main router that includes all sub-routers
 router = APIRouter()
@@ -59,7 +57,6 @@ router.include_router(emby_router)
 router.include_router(jellyfin_router)
 router.include_router(channelsdvr_router)
 router.include_router(database_router)
-router.include_router(nfhs_router)
 router.include_router(lifecycle_router)
 router.include_router(epg_router)
 router.include_router(display_router)
@@ -107,7 +104,6 @@ __all__ = [
     "FeedSeparationSettingsModel",
     "JellyfinSettingsModel",
     "LifecycleSettingsModel",
-    "NFHSSettingsModel",
     "ReconciliationSettingsModel",
     "SchedulerSettingsModel",
     "StreamOrderingRuleModel",

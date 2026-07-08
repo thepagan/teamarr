@@ -44,7 +44,6 @@ from .types import (
     FeedSeparationSettings,
     JellyfinSettings,
     LifecycleSettings,
-    NFHSSettings,
     ReconciliationSettings,
     SchedulerSettings,
     StreamFilterSettings,
@@ -332,16 +331,6 @@ GROUPS: dict[str, GroupSpec] = {
             DatabaseSettings,
             _specs(DatabaseSettings, columns={"backend": "database_backend"}),
             "Database",
-        ),
-        GroupSpec(
-            "nfhs",
-            NFHSSettings,
-            _specs(
-                NFHSSettings,
-                prefix="nfhs_",
-                hooks={"levels": {"parse": _parse_str_list(["Varsity"])}},
-            ),
-            "NFHS",
         ),
         GroupSpec(
             "api",
