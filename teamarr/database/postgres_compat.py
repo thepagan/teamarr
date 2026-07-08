@@ -412,6 +412,8 @@ class PostgresConnectionWrapper:
             "TO_CHAR(started_at, 'YYYY-MM-DD HH24:MI')",
         )
         translated = self._translate_boolean_insert_literals(translated)
+        translated = self._translate_boolean_update_literals(translated)
+        translated = self._translate_boolean_coalesce_literals(translated)
         translated = self._translate_boolean_comparisons(translated)
         if translate_placeholders:
             translated = _translate_placeholders(translated)
@@ -455,6 +457,89 @@ class PostgresConnectionWrapper:
 
         translated_values = _rewrite_top_level_value_tuples(values_sql, translate_tuple)
         return query[:values_start] + translated_values + query[values_end:]
+
+    def _translate_boolean_update_literals(self, query: str) -> str:
+        match = re.search(
+            rf"\bUPDATE\s+(?P<table>{_IDENTIFIER_PATTERN})\s+SET\s+",
+            query,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return query
+
+        table_name = match.group("table").strip('"')
+        column_types = self._get_column_types().get(table_name, {})
+        if not column_types:
+            return query
+
+        def replace_assignment(assignment: re.Match[str]) -> str:
+            column_name = assignment.group("column").strip('"')
+            value = assignment.group("value")
+            if column_types.get(column_name) != "boolean":
+                return assignment.group(0)
+            translated_value = self._translate_boolean_literal(table_name, column_name, value)
+            if translated_value is None:
+                return assignment.group(0)
+            return f"{assignment.group('prefix')}{translated_value}"
+
+        return re.sub(
+            rf"(?P<prefix>\b(?P<column>{_IDENTIFIER_PATTERN})\s*=\s*)"
+            r"(?P<value>TRUE|FALSE|0|1)\b",
+            replace_assignment,
+            query,
+            flags=re.IGNORECASE,
+        )
+
+    def _translate_boolean_coalesce_literals(self, query: str) -> str:
+        aliases = self._extract_query_tables(query)
+
+        def resolve_table(alias: str | None, column_name: str) -> str | None:
+            if alias:
+                return aliases.get(alias.strip('"').lower())
+            return self._resolve_unqualified_table(column_name, aliases)
+
+        def replace_coalesce(match: re.Match[str]) -> str:
+            alias = match.group("alias")
+            column_name = match.group("column").strip('"')
+            fallback = match.group("fallback")
+            table_name = resolve_table(alias, column_name)
+            if table_name is None:
+                return match.group(0)
+            translated_fallback = self._translate_boolean_literal(table_name, column_name, fallback)
+            if translated_fallback is None:
+                return match.group(0)
+
+            column_expr = f"{alias}.{match.group('column')}" if alias else match.group("column")
+            return f"COALESCE({column_expr}, {translated_fallback})"
+
+        translated = re.sub(
+            rf"COALESCE\(\s*(?:(?P<alias>{_IDENTIFIER_PATTERN})\.)?"
+            rf"(?P<column>{_IDENTIFIER_PATTERN})\s*,\s*(?P<fallback>TRUE|FALSE|0|1)\s*\)",
+            replace_coalesce,
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        def replace_comparison(match: re.Match[str]) -> str:
+            alias = match.group("alias")
+            column_name = match.group("column").strip('"')
+            value = match.group("value")
+            table_name = resolve_table(alias, column_name)
+            if table_name is None:
+                return match.group(0)
+            translated_value = self._translate_boolean_literal(table_name, column_name, value)
+            if translated_value is None:
+                return match.group(0)
+            return f"{match.group('expr')} {match.group('operator')} {translated_value}"
+
+        return re.sub(
+            rf"(?P<expr>COALESCE\(\s*(?:(?P<alias>{_IDENTIFIER_PATTERN})\.)?"
+            rf"(?P<column>{_IDENTIFIER_PATTERN})\s*,\s*(?:TRUE|FALSE|0|1)\s*\))\s*"
+            r"(?P<operator>=|!=|<>)\s*(?P<value>TRUE|FALSE|0|1)\b",
+            replace_comparison,
+            translated,
+            flags=re.IGNORECASE,
+        )
 
     def _translate_boolean_comparisons(self, query: str) -> str:
         aliases = self._extract_query_tables(query)
