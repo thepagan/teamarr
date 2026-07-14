@@ -8,6 +8,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from sqlite3 import Connection
+from types import EllipsisType
 
 logger = logging.getLogger(__name__)
 
@@ -156,11 +157,44 @@ def get_subscribed_league_codes(conn: Connection) -> set[str]:
     return codes
 
 
+def _drop_unknown_league_codes(conn: Connection, codes: list[str]) -> list[str]:
+    """Drop codes not present in the leagues ∪ league_cache universe (#408).
+
+    ESPN's discovery list churns (leagues drop out while their data endpoints
+    keep working), so slugs can outlive the cache and become invisible zombies:
+    the UI's cache-driven pickers never render them, yet every generation run
+    still fetches events for them. Validating on save keeps the persisted list
+    inside the known universe; drops are logged, never silent.
+
+    When league_cache is empty (fresh install, mid cache-refresh — the refresh
+    deletes and repopulates the table) there is no universe to judge against,
+    so validation is skipped rather than wrongly purging the whole list.
+    """
+    cache_rows = conn.execute("SELECT DISTINCT league_slug FROM league_cache").fetchall()
+    if not cache_rows:
+        return codes
+    known = {row[0].lower() for row in cache_rows}
+    known.update(
+        row[0].lower()
+        for row in conn.execute("SELECT league_code FROM leagues").fetchall()
+    )
+    kept = [c for c in codes if c and c.lower() in known]
+    dropped = [c for c in codes if c and c.lower() not in known]
+    if dropped:
+        logger.warning(
+            "[SUBSCRIPTION] Dropped %d unknown league code(s) on save "
+            "(not in leagues/league_cache): %s",
+            len(dropped),
+            ", ".join(sorted(dropped)),
+        )
+    return kept
+
+
 def update_subscription(
     conn: Connection,
-    leagues: list[str] | None = ...,
-    soccer_mode: str | None = ...,
-    soccer_followed_teams: list[dict] | None = ...,
+    leagues: list[str] | None | EllipsisType = ...,
+    soccer_mode: str | None | EllipsisType = ...,
+    soccer_followed_teams: list[dict] | None | EllipsisType = ...,
 ) -> SportsSubscription:
     """Update the global sports subscription.
 
@@ -179,6 +213,8 @@ def update_subscription(
     params = []
 
     if leagues is not ...:
+        if leagues:
+            leagues = _drop_unknown_league_codes(conn, leagues)
         updates.append("leagues = ?")
         params.append(json.dumps(leagues) if leagues is not None else "[]")
 
@@ -273,15 +309,17 @@ def add_subscription_template(
         sports,
         leagues,
     )
-    return cursor.lastrowid
+    new_id = cursor.lastrowid
+    assert new_id is not None  # just-inserted row always has a rowid
+    return new_id
 
 
 def update_subscription_template(
     conn: Connection,
     assignment_id: int,
     template_id: int | None = None,
-    sports: list[str] | None = ...,
-    leagues: list[str] | None = ...,
+    sports: list[str] | None | EllipsisType = ...,
+    leagues: list[str] | None | EllipsisType = ...,
 ) -> bool:
     """Update a subscription template assignment.
 
@@ -477,7 +515,9 @@ def upsert_league_config(
         ),
     )
     logger.info("[LEAGUE_CONFIG] Upserted config for %s", league_code)
-    return get_league_config(conn, league_code)
+    config = get_league_config(conn, league_code)
+    assert config is not None  # just upserted, row must exist
+    return config
 
 
 def delete_league_config(conn: Connection, league_code: str) -> bool:

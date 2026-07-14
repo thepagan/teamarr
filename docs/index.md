@@ -6,9 +6,7 @@ docs_version: "2.3.0"
 ---
 
 <div style="text-align: center; margin-bottom: 2rem;">
-  <h1 style="margin-bottom: 0.5rem;">Teamarr</h1>
-  <img src="assets/images/logo.svg" alt="Teamarr" width="100" height="100" style="margin: 1rem 0;">
-  <p style="font-size: 1.25rem; color: #666;">Sports EPG Generator for Dispatcharr</p>
+  <img src="assets/images/teamarr_electric_blue.png" alt="Teamarr — Sports EPG Generator for Dispatcharr" width="340" style="margin: 1rem 0; border-radius: 12px;">
 </div>
 
 ## What is Teamarr?
@@ -49,8 +47,8 @@ EPG:     Kansas City Chiefs @ Philadelphia Eagles
 
 ## Features
 
-- **350+ leagues across 15 sports** - Football, basketball, hockey, baseball, soccer (~250 leagues via ESPN discovery), cricket, lacrosse, MMA, boxing, rugby, volleyball, Australian football, softball, racing (F1, NASCAR, IndyCar), and tennis (ATP, WTA). 140 pre-configured leagues plus dynamically discovered soccer leagues.
-- **240 template variables** - Customize channel names and EPG with team records, scores, venues, broadcasts, standings, playoff status, motorsports sessions/results, tennis tournament context, and more
+- **350+ leagues across 15 sports** - Football, basketball, hockey, baseball, soccer (~250 leagues via ESPN discovery), cricket, lacrosse, MMA, boxing, rugby, volleyball, Australian football, softball, racing (F1, NASCAR, IndyCar), and tennis (ATP, WTA). 142 pre-configured leagues plus dynamically discovered soccer leagues.
+- **260 template variables** - Customize channel names and EPG with team records, scores, venues, broadcasts, standings, playoff status, motorsports sessions/results, tennis tournament context, and more
 - **Flexible matching** - Aliases, fuzzy matching, and configurable stream ordering to handle inconsistent IPTV naming
 - **Channel groups & profiles** - Use existing Dispatcharr groups/profiles or create them dynamically using variables and wildcards
 - **Smart sorting** - Configurable stream and channel sorting modes based on priority rules

@@ -9,8 +9,39 @@ Single-use fakes (FakeDispatcharrChannel, FakeTemplate, FakeMappingSource,
 ...) stay local to their test file.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+
+class FakeCache:
+    """Minimal in-memory stand-in for the shared PersistentTTLCache.
+
+    Stores values forever (TTLs are recorded in ``set_calls`` but not
+    enforced) — within-one-run cache semantics, which is what service-layer
+    tests exercise.
+    """
+
+    def __init__(self):
+        self.data = {}
+        self.set_calls = []
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, value, ttl=None):
+        self.data[key] = value
+        self.set_calls.append((key, value, ttl))
+
+    def delete(self, key):
+        self.data.pop(key, None)
+
+    @contextmanager
+    def lock_key(self, key):
+        """No-op single-flight lock — get_events/get_event enter this before a
+        provider fetch; the real PersistentTTLCache serializes concurrent
+        misses, but tests run single-threaded so a bare yield suffices."""
+        yield
 
 
 @dataclass

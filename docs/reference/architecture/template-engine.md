@@ -8,13 +8,13 @@ docs_version: "2.3.1"
 
 # Template Engine
 
-The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 240 variables across 20 categories, 23 condition evaluators, suffix rules for multi-game context, and template-type scoping for the variable picker.
+The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 260 variables across 20 categories, 33 condition evaluators, suffix rules for multi-game context, and template-type scoping for the variable picker.
 
 ## Architecture
 
 ```
 TemplateResolver
-  ├── VariableRegistry (240 variables, 20 categories)
+  ├── VariableRegistry (260 variables, 20 categories)
   ├── ConditionEvaluator (23 evaluators)
   └── ContextBuilder (Event + Team → TemplateContext)
 ```
@@ -202,18 +202,33 @@ Each shape is a kitchen-sink: every variable that applies to it is filled (the `
 
 **Live preview.** When live is on, the picker fetches a real recent/upcoming event (`get_sample_event`, provider-aware, cached) and shows its actual values. A variable the real event can't fill is **surfaced as a gap** — left empty and counted — rather than masked with the fictitious sample, so users don't get a false sense of availability. Gaps are scoped to **categories relevant to the event's shape** (a basketball preview doesn't flag empty combat/racing variables), and the picker shows live coverage (`live_populated`/`live_total`). Any failure (no event, provider down) falls back silently to the static sample.
 
+Combat leagues follow the same finished-first cascade (#260): candidates come from a ±7-day UFC scoreboard range (cards are ~weekly, so a today-only scan is empty most of the week), and when no card is in range a deep lookback walks 35-day windows for the last finished card — the only sample that fills `fight_result`/`finish_*`. Failing all of that, the static WVBA shape renders, so game-thumbs URL slugs stay testable year-round.
+
 See `GET /variables/samples` (`live`, `gaps`, `live_populated`, `live_total`).
+
+**Server-side render (`POST /templates/preview`, #357).** The editor's rendered
+previews come from the backend, not client-side substitution: the endpoint runs
+the SAME `TemplateResolver` (substitution, empty-artifact cleanup, article
+capitalization) and conditional selector that EPG generation uses, against the
+same live event context as `/variables/samples` (shared cache in
+`templates/preview.py`), falling back to static samples when no live event is
+available. The response also carries a **condition trace** — per row: matched,
+selected, and a human-readable reason — so the editor can show which
+conditional-description row fires for the preview event and why. The frontend
+keeps a client-side substitution (`createResolver`) only as an instant
+optimistic layer while the debounced server render is in flight.
 
 ## File Locations
 
 | File | Purpose |
 |------|---------|
 | `templates/resolver.py` | Variable resolution pipeline |
-| `templates/conditions.py` | 23 condition evaluators |
+| `templates/conditions.py` | 33 condition evaluators |
 | `templates/context.py` | Context dataclasses (Odds, GameContext, TemplateContext) |
 | `templates/context_builder.py` | Build TemplateContext from Event + Team |
 | `templates/variables/` | 20 category modules with 240 variable definitions |
 | `templates/variables/registry.py` | VariableRegistry singleton |
 | `templates/sample_data.py` | 3-shape fictitious sample values + `resolve_shape` for UI preview |
+| `templates/preview.py` | Live-context builder + cache shared by `/variables/samples` and `/templates/preview` |
 | `utilities/art_url.py` | Game-thumbs base URL join helper + reader (`apply_art_base_url`, `read_art_base_url`) |
 | `utilities/xmltv.py` | XMLTV serialization (applies art base as an idempotent safety net) |

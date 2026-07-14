@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo, useCallback } from "react"
+import { useState, useMemo, useCallback } from "react"
 import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
-import { ArrowLeft, Loader2, FlaskConical } from "lucide-react"
+import { ArrowLeft, LoaderCircle, FlaskConical } from "lucide-react"
 import { useQuery } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -87,7 +87,10 @@ export function EventGroupForm() {
     queryKey: ["leagues"],
     queryFn: () => getLeagues(),
   })
-  const allLeagues = leaguesData?.leagues || []
+  // useMemo (not `|| []`): a fresh fallback array would destabilize every
+  // downstream hook dependency (react-hooks/exhaustive-deps).
+  const leaguesList = leaguesData?.leagues
+  const allLeagues = useMemo(() => leaguesList ?? [], [leaguesList])
 
   const matchGlobal = useCallback(async () => {
     setMatchingGlobal(true)
@@ -143,8 +146,14 @@ export function EventGroupForm() {
     custom_regex_event_name_enabled: formData.custom_regex_event_name_enabled ?? false,
   }), [formData])
 
-  // Populate form when editing
-  useEffect(() => {
+  // Populate form when editing (render-time "adjust state when props change"
+  // pattern — see DispatcharrOutputSettings.tsx).
+  const [syncedGroup, setSyncedGroup] = useState<{
+    group: typeof group
+    allLeagues: typeof allLeagues
+  } | null>(null)
+  if (syncedGroup?.group !== group || syncedGroup?.allLeagues !== allLeagues) {
+    setSyncedGroup({ group, allLeagues })
     if (group) {
       setFormData({
         name: group.name,
@@ -217,7 +226,7 @@ export function EventGroupForm() {
         setOverrideFollowedTeams(group.subscription_soccer_followed_teams || [])
       }
     }
-  }, [group, allLeagues])
+  }
 
   // `overrides` lets callers (e.g. Apply-to-Form) save with freshly-merged
   // patterns without waiting for the async setFormData to flush.
@@ -543,7 +552,7 @@ export function EventGroupForm() {
                         onClick={matchGlobal}
                         disabled={matchingGlobal}
                       >
-                        {matchingGlobal ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                        {matchingGlobal ? <LoaderCircle className="h-3 w-3 mr-1 animate-spin" /> : null}
                         Match Global
                       </Button>
                     </div>

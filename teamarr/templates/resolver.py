@@ -68,7 +68,19 @@ class TemplateResolver:
             return ""
 
         # Build all variables (base + suffixed)
-        variables = self._build_all_variables(context)
+        return self.resolve_with_map(template, self._build_all_variables(context))
+
+    def resolve_with_map(self, template: str, variables: dict[str, str]) -> str:
+        """Replace {variable} placeholders from a pre-built name -> value map.
+
+        The substitution/cleanup core of resolve(), exposed for callers that
+        have a variable map but no TemplateContext — e.g. the preview endpoint
+        rendering against static sample data (#357). Unknown variables stay
+        literal; known-but-empty values are replaced then cleaned up, exactly
+        as in context-based resolution.
+        """
+        if not template:
+            return ""
 
         unreplaced = []
 
@@ -77,6 +89,14 @@ class TemplateResolver:
             # Keep unknown variables literal (helps users identify typos)
             # Known variables with empty values still get replaced with ""
             if var_name not in variables:
+                # A VALID registry variable with a LEGAL suffix that's simply
+                # missing its game context (no next/last game — offseason,
+                # season end) resolves to empty like any known-but-empty value
+                # (#418) — raw {game_time.next} braces must never reach a real
+                # guide. Typos and illegal suffix usage (e.g. .next on a
+                # BASE_ONLY variable) still stay literal.
+                if self._is_contextless_suffix(var_name):
+                    return ""
                 unreplaced.append(var_name)
                 return match.group(0)  # Return original {variable} unchanged
             return variables[var_name]
@@ -91,6 +111,24 @@ class TemplateResolver:
 
         return result
 
+    def _is_contextless_suffix(self, var_name: str) -> bool:
+        """True for a valid variable + legal suffix that lacks game context.
+
+        ``{game_time.next}`` when there is no next game is valid authoring —
+        the context is missing, not the variable. Anything else absent from
+        the map (unknown base name, illegal suffix for the variable's rules)
+        is a template error and must stay literal so the author can see it.
+        """
+        base, sep, suffix = var_name.partition(".")
+        if not sep or suffix not in ("next", "last"):
+            return False
+        var_def = self._registry.get(base)
+        if var_def is None:
+            return False
+        if suffix == "next":
+            return var_def.suffix_rules in (SuffixRules.ALL, SuffixRules.BASE_NEXT_ONLY)
+        return var_def.suffix_rules in (SuffixRules.ALL, SuffixRules.LAST_ONLY)
+
     def _cleanup_result(self, text: str) -> str:
         """Clean up artifacts left when variables resolve to empty strings.
 
@@ -99,14 +137,27 @@ class TemplateResolver:
         - Multiple consecutive spaces
         - Leading/trailing whitespace
         """
-        # Remove empty parentheses and brackets
-        text = re.sub(r"\s*\(\s*\)", "", text)
-        text = re.sub(r"\s*\[\s*\]", "", text)
-
-        # Collapse multiple spaces into one
+        # Collapse runs of spaces first so wrapper removal sees at most one
+        # space in any position — keeps the patterns below bounded (no adjacent
+        # unbounded quantifiers; CodeQL py/polynomial-redos).
         text = re.sub(r" {2,}", " ", text)
 
-        return text.strip()
+        # Remove empty parentheses and brackets
+        text = re.sub(r" ?\( ?\)", "", text)
+        text = re.sub(r" ?\[ ?\]", "", text)
+
+        # Wrapper removal can leave one double space behind ("a () b" -> "a  b")
+        text = re.sub(r" {2,}", " ", text)
+
+        text = text.strip()
+
+        # Article-aware vars ({team_name_the}, {tournament_name_the}) emit a
+        # lowercase "the " for mid-sentence use; capitalize it when it opens
+        # the rendered text (Gracenote: "The Washington Mystics play…").
+        if text.startswith("the "):
+            text = f"T{text[1:]}"
+
+        return text
 
     def build_variable_map(self, ctx: TemplateContext) -> dict[str, str]:
         """Public: resolve every registered variable for a context.
@@ -209,7 +260,12 @@ class TemplateResolver:
         return self._registry.count()
 
     def get_available_conditions(self) -> list[str]:
-        """Get list of all available condition types."""
+        """Get list of all available condition types.
+
+        TODO: PRUNE? — no callers; stale vs conditions.py (missing combat/
+        racing/summary conditions). The API's /variables/conditions endpoint
+        is the served list; verify with user before removing.
+        """
         return [
             "is_home",
             "is_away",

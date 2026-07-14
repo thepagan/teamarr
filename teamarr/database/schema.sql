@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS templates (
     -- XMLTV Metadata
     xmltv_flags JSON DEFAULT '{"new": true, "live": false, "date": false}',
     xmltv_video JSON DEFAULT '{"enabled": false, "quality": "HDTV"}',
-    xmltv_categories JSON DEFAULT '["Sports"]',
+    xmltv_categories JSON DEFAULT '["Sports", "Sports event"]',
     -- Independent category list applied only to filler programmes (pregame/postgame/idle).
     -- Empty list = no <category> tags on filler. Replaced the old `categories_apply_to`
     -- gate in v72: previously 'all' duplicated xmltv_categories onto filler; now you set
@@ -67,7 +67,22 @@ CREATE TABLE IF NOT EXISTS templates (
     idle_enabled BOOLEAN DEFAULT 1,
     idle_content JSON DEFAULT '{"title": "{team_name} Programming", "subtitle": null, "description": "Next game: {game_date.next} at {game_time.next} vs {opponent.next}", "art_url": null}',
     idle_conditional JSON DEFAULT '{"enabled": false, "description_final": null, "description_not_final": null}',
-    idle_offseason JSON DEFAULT '{"title_enabled": false, "title": null, "subtitle_enabled": false, "subtitle": null, "description_enabled": false, "description": "No upcoming {team_name} games scheduled."}',
+    -- Conditional filler rows (#420, epic cajd): per-register condition rows in
+    -- the hehg.2 shape ({condition, condition_value, template, title?, subtitle?,
+    -- priority, label}). Replace the legacy final/not-final switch columns above,
+    -- which stay in place unread (v80 migration converts; rollback-safe).
+    -- Postgame default mirrors the new-template form seed (cajd.4/cajd.6):
+    -- recap-when-published over the constructed base. Existing DBs keep their
+    -- '[]' default (reconciliation never alters existing columns) — the form
+    -- always sends the fields, so the default only covers column-less INSERTs.
+    pregame_conditional_rows JSON DEFAULT '[]',
+    postgame_conditional_rows JSON DEFAULT '[{"condition": "has_recap", "template": "{game_recap.last}", "priority": 10, "label": "Recap (provider)"}]',
+    idle_conditional_rows JSON DEFAULT '[]',
+    -- Offseason register seeded enabled (#418): with it off, idle content
+    -- renders {*.next} literals into real guides once a team has no next game.
+    -- description_enabled is the master toggle; title stays unset so it falls
+    -- back to the idle title (which carries no .next).
+    idle_offseason JSON DEFAULT '{"title_enabled": false, "title": null, "subtitle_enabled": true, "subtitle": "No upcoming game currently on schedule", "description_enabled": true, "description": "No upcoming {team_name} games scheduled."}',
 
     -- Conditional Descriptions (advanced)
     conditional_descriptions JSON DEFAULT '[]',
@@ -203,6 +218,9 @@ CREATE TABLE IF NOT EXISTS settings (
     -- pre-attach / post-detach minutes applied to the EPG program slot.
     epg_stream_pre_buffer_minutes INTEGER DEFAULT 60,
     epg_stream_post_buffer_minutes INTEGER DEFAULT 60,
+
+    -- Tennis: only match grand-slam tournaments (#283)
+    tennis_majors_only INTEGER DEFAULT 0,
 
     -- Filler Settings
     midnight_crossover_mode TEXT DEFAULT 'postgame' CHECK(midnight_crossover_mode IN ('postgame', 'idle')),
@@ -451,7 +469,7 @@ CREATE TABLE IF NOT EXISTS settings (
     channelsdvr_lineup_id TEXT,
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 78
+    schema_version INTEGER DEFAULT 81
 );
 
 -- Insert default settings
@@ -938,6 +956,16 @@ CREATE INDEX IF NOT EXISTS idx_leagues_provider ON leagues(provider);
 CREATE INDEX IF NOT EXISTS idx_leagues_sport ON leagues(sport);
 CREATE INDEX IF NOT EXISTS idx_leagues_import ON leagues(import_enabled);
 
+-- User overrides for built-in league display fields (#371). Lives OUTSIDE
+-- the leagues table: the seed below replaces whole rows (INSERT OR REPLACE)
+-- on every startup, so any user edit made directly to leagues would be wiped
+-- (the #194 lesson). Overrides here win over curated values at read time.
+CREATE TABLE IF NOT EXISTS league_overrides (
+    league_code TEXT PRIMARY KEY,
+    gracenote_category TEXT,                 -- overrides {gracenote_category}
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 
 -- =============================================================================
 -- SEED: Configured Leagues (SINGLE SOURCE OF TRUTH)
@@ -1011,17 +1039,20 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
 
     -- Hockey - European Leagues (TSDB)
     ('norwegian-hockey', 'tsdb', '4926', 'Norwegian Fjordkraft-ligaen', 'Norwegian Fjordkraft-ligaen', 'hockey', 'https://r2.thesportsdb.com/images/media/league/badge/lpfdvc1697194460.png', NULL, 1, NULL, 'norwegian-hockey', 'team_vs_team', NULL, NULL, NULL, 'free', 1),
+    ('shl', 'tsdb', '4419', 'Swedish Hockey League', 'Swedish Hockey League', 'hockey', 'https://r2.thesportsdb.com/images/media/league/badge/95fnqb1547547893.png', NULL, 1, 'SHL', 'shl', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
 
     -- Australian Football (TSDB)
     ('afl', 'squiggle', 'afl', NULL, 'Australian Football League', 'australian-football', 'https://r2.thesportsdb.com/images/media/league/badge/wvx4721525519372.png', NULL, 1, 'AFL', 'afl', 'team_vs_team', 'AFL', NULL, NULL, NULL, 1),
 
     -- Baseball (ESPN)
     ('mlb', 'espn', 'baseball/mlb', NULL, 'Major League Baseball', 'baseball', 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png', NULL, 1, 'MLB', 'mlb', 'team_vs_team', 'MLB Baseball', NULL, NULL, NULL, 1),
-    ('milb-aaa', 'mlbstats', '11', NULL, 'Triple-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'AAA', 'milb-aaa', 'team_vs_team', 'MiLB Baseball', NULL, NULL, NULL, 1),
-    ('milb-aa', 'mlbstats', '12', NULL, 'Double-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'AA', 'milb-aa', 'team_vs_team', 'MiLB Baseball', NULL, NULL, NULL, 1),
-    ('milb-high-a', 'mlbstats', '13', NULL, 'High-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'High-A', 'milb-high-a', 'team_vs_team', 'MiLB Baseball', NULL, NULL, NULL, 1),
-    ('milb-a', 'mlbstats', '14', NULL, 'Single-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'Single-A', 'milb-a', 'team_vs_team', 'MiLB Baseball', NULL, NULL, NULL, 1),
-    ('rookie', 'mlbstats', '16', NULL, 'Rookie', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'Rookie', 'rookie', 'team_vs_team', 'MiLB Baseball', NULL, NULL, NULL, 1),
+    -- gracenote_category: real Gracenote titles all MiLB levels 'Minor League
+    -- Baseball' — never the level name or 'MiLB' (tvnk.8 capture note).
+    ('milb-aaa', 'mlbstats', '11', NULL, 'Triple-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'AAA', 'milb-aaa', 'team_vs_team', 'Minor League Baseball', NULL, NULL, NULL, 1),
+    ('milb-aa', 'mlbstats', '12', NULL, 'Double-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'AA', 'milb-aa', 'team_vs_team', 'Minor League Baseball', NULL, NULL, NULL, 1),
+    ('milb-high-a', 'mlbstats', '13', NULL, 'High-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'High-A', 'milb-high-a', 'team_vs_team', 'Minor League Baseball', NULL, NULL, NULL, 1),
+    ('milb-a', 'mlbstats', '14', NULL, 'Single-A', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'Single-A', 'milb-a', 'team_vs_team', 'Minor League Baseball', NULL, NULL, NULL, 1),
+    ('rookie', 'mlbstats', '16', NULL, 'Rookie', 'baseball', 'https://images.ctfassets.net/iiozhi00a8lc/7eeTdW5zGYe0sW2ZlIle7E/990464d4b5e4e3b3a65cb6c56ce808ea/milb-alt.svg', NULL, 1, 'Rookie', 'rookie', 'team_vs_team', 'Minor League Baseball', NULL, NULL, NULL, 1),
     ('college-baseball', 'espn', 'baseball/college-baseball', NULL, 'NCAA Baseball', 'baseball', 'https://www.ncaa.com/modules/custom/casablanca_core/img/sportbanners/baseball.png', NULL, 1, NULL, 'ncaabb', 'team_vs_team', 'College Baseball', NULL, NULL, NULL, 1),
     ('college-softball', 'espn', 'baseball/college-softball', NULL, 'NCAA Softball', 'softball', 'https://www.ncaa.com/modules/custom/casablanca_core/img/sportbanners/softball.png', NULL, 1, NULL, 'ncaasbw', 'team_vs_team', 'College Softball', NULL, NULL, NULL, 1),
     -- ESPN serves no dedicated WBC league logo (only a generic baseball icon), so hardcode the Wikimedia Commons mark.
@@ -1061,12 +1092,17 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('uefa.europa', 'espn', 'soccer/uefa.europa', NULL, 'UEFA Europa League', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2310.png', NULL, 1, 'UEL', 'uel', 'team_vs_team', 'UEFA Europa League Soccer', NULL, NULL, NULL, 1),
     ('uefa.europa.conf', 'espn', 'soccer/uefa.europa.conf', NULL, 'UEFA Europa Conference League', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2954.png', NULL, 1, 'UECL', 'uecl', 'team_vs_team', 'UEFA Europa Conference League Soccer', NULL, NULL, NULL, 1),
     -- International Tournaments
-    ('fifa.world', 'espn', 'soccer/fifa.world', NULL, 'FIFA World Cup', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/4.png', NULL, 1, 'World Cup', 'world-cup', 'team_vs_team', 'FIFA World Cup Soccer', NULL, NULL, NULL, 1),
-    ('fifa.wwc', 'espn', 'soccer/fifa.wwc', NULL, 'FIFA Women''s World Cup', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/131.png', NULL, 1, 'WWC', 'wwc', 'team_vs_team', 'FIFA Women''s World Cup Soccer', NULL, NULL, NULL, 1),
-    ('uefa.euro', 'espn', 'soccer/uefa.euro', NULL, 'UEFA European Championship', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/60.png', NULL, 1, 'Euro', 'euro', 'team_vs_team', 'UEFA Euro Soccer', NULL, NULL, NULL, 1),
-    ('conmebol.america', 'espn', 'soccer/conmebol.america', NULL, 'Copa America', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/73.png', NULL, 1, NULL, 'copa-america', 'team_vs_team', 'Copa America Soccer', NULL, NULL, NULL, 1),
-    ('concacaf.gold', 'espn', 'soccer/concacaf.gold', NULL, 'CONCACAF Gold Cup', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/128.png', NULL, 1, 'Gold Cup', 'gold-cup', 'team_vs_team', 'CONCACAF Gold Cup Soccer', NULL, NULL, NULL, 1),
-    ('concacaf.nations.league', 'espn', 'soccer/concacaf.nations.league', NULL, 'CONCACAF Nations League', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2737.png', NULL, 1, 'CNL', 'cnl', 'team_vs_team', 'CONCACAF Nations League Soccer', NULL, NULL, NULL, 1),
+    -- gracenote_category: real Gracenote brands national-team tournaments WITHOUT the
+    -- sport suffix (captured: 'FIFA World Cup 2026', not 'FIFA World Cup Soccer').
+    -- The year is deliberately not baked in (would go stale) — templates compose it
+    -- via '{gracenote_category} {year}'. Club competitions keep the ' Soccer' suffix
+    -- (captured: 'Premier League Soccer').
+    ('fifa.world', 'espn', 'soccer/fifa.world', NULL, 'FIFA World Cup', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/4.png', NULL, 1, 'World Cup', 'world-cup', 'team_vs_team', 'FIFA World Cup', NULL, NULL, NULL, 1),
+    ('fifa.wwc', 'espn', 'soccer/fifa.wwc', NULL, 'FIFA Women''s World Cup', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/131.png', NULL, 1, 'WWC', 'wwc', 'team_vs_team', 'FIFA Women''s World Cup', NULL, NULL, NULL, 1),
+    ('uefa.euro', 'espn', 'soccer/uefa.euro', NULL, 'UEFA European Championship', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/60.png', NULL, 1, 'Euro', 'euro', 'team_vs_team', 'UEFA Euro', NULL, NULL, NULL, 1),
+    ('conmebol.america', 'espn', 'soccer/conmebol.america', NULL, 'Copa America', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/73.png', NULL, 1, NULL, 'copa-america', 'team_vs_team', 'Copa America', NULL, NULL, NULL, 1),
+    ('concacaf.gold', 'espn', 'soccer/concacaf.gold', NULL, 'CONCACAF Gold Cup', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/128.png', NULL, 1, 'Gold Cup', 'gold-cup', 'team_vs_team', 'CONCACAF Gold Cup', NULL, NULL, NULL, 1),
+    ('concacaf.nations.league', 'espn', 'soccer/concacaf.nations.league', NULL, 'CONCACAF Nations League', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2737.png', NULL, 1, 'CNL', 'cnl', 'team_vs_team', 'CONCACAF Nations League', NULL, NULL, NULL, 1),
     -- Americas Leagues
     ('mex.1', 'espn', 'soccer/mex.1', NULL, 'Liga MX', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/22.png', NULL, 1, NULL, 'ligamx', 'team_vs_team', 'Liga MX Soccer', NULL, NULL, NULL, 1),
     ('arg.1', 'espn', 'soccer/arg.1', NULL, 'Argentine Liga Profesional', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/1.png', NULL, 1, 'LPA', 'lpa', 'team_vs_team', 'Argentine Liga Profesional Soccer', NULL, NULL, NULL, 1),
@@ -1113,6 +1149,8 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('ipl', 'tsdb', '4460', 'Indian Premier League', 'Indian Premier League', 'cricket', 'https://r2.thesportsdb.com/images/media/league/badge/gaiti11741709844.png', NULL, 1, 'IPL', 'ipl', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
     ('bbl', 'tsdb', '4461', 'Australian Big Bash League', 'Big Bash League', 'cricket', 'https://r2.thesportsdb.com/images/media/league/badge/yko7ny1546635346.png', NULL, 1, 'BBL', 'bbl', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
     ('sa20', 'tsdb', '5532', 'SA20', 'South Africa Twenty20', 'cricket', 'https://r2.thesportsdb.com/images/media/league/badge/aakvuk1734183412.png', NULL, 1, 'SA20', 'sa20', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    -- MLC: short US T20 season fits the free rolling next-events window (eventsnextleague), so no premium key needed.
+    ('mlc', 'tsdb', '5401', 'Major League Cricket', 'Major League Cricket', 'cricket', 'https://r2.thesportsdb.com/images/media/league/badge/mbbos01689159510.png', NULL, 1, 'MLC', 'mlc', 'team_vs_team', NULL, NULL, NULL, 'free', 1),
 
     -- Rugby (ESPN)
     ('rwc',   'espn', 'rugby/164205',    NULL, 'Rugby World Cup',                 'rugby', 'https://upload.wikimedia.org/wikipedia/commons/a/a3/Rugby_World_Cup_Logo%2C_used_post_RWC_2023.svg', NULL, 1, 'RWC',   'rwc',   'team_vs_team', NULL, NULL, NULL, NULL, 1),
@@ -1146,18 +1184,21 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     -- Motorsports (NASCAR API) - authoritative session schedules from cf.nascar.com.
     -- provider_league_id encodes the NASCAR series number (1=Cup, 2=ORAP, 3=Trucks).
     -- The NASCAR provider uses hardcoded URL patterns; this field is for reference only.
-    ('nascar-cup',      'nascar', '1', NULL, 'NASCAR Cup Series',                    'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Cup',   'nascar-cup',      'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
-    ('nascar-xfinity',  'nascar', '2', NULL, 'NASCAR O''Reilly Auto Parts Series',   'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR ORAP',  'nascar-xfinity',  'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
-    ('nascar-truck',    'nascar', '3', NULL, 'NASCAR Craftsman Truck Series',         'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Trucks','nascar-truck',    'event', 'NASCAR Racing', NULL, NULL, NULL, 1),
+    -- gracenote_category NULL: real Gracenote titles NASCAR by full series name
+    -- (captured: 'NASCAR Craftsman Truck Series'), which display_name already is —
+    -- the event_type-aware fallback serves it without duplicating the string here.
+    ('nascar-cup',      'nascar', '1', NULL, 'NASCAR Cup Series',                    'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Cup',   'nascar-cup',      'event', NULL, NULL, NULL, NULL, 1),
+    ('nascar-xfinity',  'nascar', '2', NULL, 'NASCAR O''Reilly Auto Parts Series',   'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR ORAP',  'nascar-xfinity',  'event', NULL, NULL, NULL, NULL, 1),
+    ('nascar-truck',    'nascar', '3', NULL, 'NASCAR Craftsman Truck Series',         'racing', 'https://a.espncdn.com/combiner/i?img=/redesign/assets/img/icons/ESPN-icon-NASCAR.png', NULL, 0, 'NASCAR Trucks','nascar-truck',    'event', NULL, NULL, NULL, NULL, 1),
     ('indycar', 'espn', 'racing/irl', NULL, 'IndyCar Series', 'racing', 'https://a.espncdn.com/combiner/i?img=/i/espn/teamlogos/500/indycar_series.png', NULL, 0, 'IndyCar', 'indycar', 'event', 'IndyCar Racing', NULL, NULL, NULL, 1),
     -- Disabled: ESPN's racing/motogp scoreboard endpoint returns HTTP 400 (no usable schedule/logo data).
     -- Re-enable once migrated to TSDB (idLeague 4407) - planned v2 feature alongside IMSA/WEC session grouping.
-    ('motogp', 'espn', 'racing/motogp', NULL, 'MotoGP', 'racing', 'https://a.espncdn.com/i/teamlogos/leagues/500/motogp.png', NULL, 0, 'MotoGP', 'motogp', 'event', 'Motorcycle Racing', NULL, NULL, NULL, 0),
+    ('motogp', 'espn', 'racing/motogp', NULL, 'MotoGP', 'racing', 'https://a.espncdn.com/i/teamlogos/leagues/500/motogp.png', NULL, 0, 'MotoGP', 'motogp', 'event', 'MotoGP Racing', NULL, NULL, NULL, 0),
 
     -- Motorsports (TSDB) - session schedules grouped from TheSportsDB's flat
     -- per-event-per-session season data (teamarr/providers/tsdb/racing.py).
-    ('imsa', 'tsdb', '4488', 'IMSA SportsCar Championship', 'IMSA WeatherTech SportsCar Championship', 'racing', 'https://r2.thesportsdb.com/images/media/league/badge/t3fpd41536244390.png', NULL, 0, 'IMSA', 'imsa', 'event', 'Motor Racing', NULL, NULL, 'premium', 1),
-    ('wec', 'tsdb', '4413', 'WEC', 'FIA World Endurance Championship', 'racing', 'https://r2.thesportsdb.com/images/media/league/badge/2fjrko1705526433.png', NULL, 0, 'WEC', 'wec', 'event', 'Motor Racing', NULL, NULL, 'premium', 1),
+    ('imsa', 'tsdb', '4488', 'IMSA SportsCar Championship', 'IMSA WeatherTech SportsCar Championship', 'racing', 'https://r2.thesportsdb.com/images/media/league/badge/t3fpd41536244390.png', NULL, 0, 'IMSA', 'imsa', 'event', NULL, NULL, NULL, 'premium', 1),
+    ('wec', 'tsdb', '4413', 'WEC', 'FIA World Endurance Championship', 'racing', 'https://r2.thesportsdb.com/images/media/league/badge/2fjrko1705526433.png', NULL, 0, 'WEC', 'wec', 'event', NULL, NULL, NULL, 'premium', 1),
 
     -- Tennis (ESPN) - One Event per MATCH (players as home/away), parsed from
     -- tournament groupings (teamarr/providers/espn/tennis.py). Grand slams are

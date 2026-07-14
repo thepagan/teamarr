@@ -49,10 +49,7 @@ const TEAM_BODY = `[${TEAM_CHARS}][${TEAM_CHARS} .'-]+[${TEAM_CHARS}.]`
  */
 function generalizeForField(
   field: TextSelection["field"],
-  text: string,
-  _streamName: string,
-  _beforeText: string,
-  _afterText: string
+  text: string
 ): string {
   switch (field) {
     case "team1":
@@ -144,7 +141,7 @@ export function generatePattern(
   const after = streamName.slice(idx + text.length)
 
   // Build an anchor from the immediate surrounding context
-  const captureGroup = generalizeForField(field, text, streamName, before, after)
+  const captureGroup = generalizeForField(field, text)
   const namedGroup = `(?<${field}>${captureGroup.slice(1, -1)})`
 
   // Find a stable anchor before the selection
@@ -161,7 +158,7 @@ export function generatePattern(
     }
     // For date-related fields, also anchor on date separators (/, ., -)
     if (!anchorBefore && (field === "month" || field === "day" || field === "date")) {
-      const dateSepMatch = before.match(/[/.\-]\s*$/)
+      const dateSepMatch = before.match(/[/.-]\s*$/)
       if (dateSepMatch) {
         anchorBefore = escapeRegex(dateSepMatch[0])
       }
@@ -180,7 +177,7 @@ export function generatePattern(
     }
     // For date-related fields, also anchor on date separators
     if (!anchorAfter && (field === "month" || field === "day" || field === "date")) {
-      const dateSepMatch = after.match(/^\s*[/.\-]/)
+      const dateSepMatch = after.match(/^\s*[/.-]/)
       if (dateSepMatch) {
         anchorAfter = escapeRegex(dateSepMatch[0])
       }

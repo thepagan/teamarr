@@ -49,37 +49,53 @@ bd ready                              # Find available work
 bd show <id>                          # View issue details
 bd update <id> --status in_progress   # Claim work
 bd close <id>                         # Complete work
-bd sync                               # Sync beads data
+bd doctor                             # Check beads health (sync issues, hooks)
 ```
 
-## Development Workflow
+Beads data syncs automatically: git hooks import/export `.beads/*.jsonl` on
+checkout/merge, and the JSONL rides in normal commits. (`bd sync` no longer
+exists in bd ≥1.1.)
 
-**Critical:** Work from `dev` branch, not `main`.
+## Development Workflow (issue-first — MANDATORY)
 
-### Development Steps
+**Nothing gets implemented without a GitHub issue.** Every feature, bug fix, and refactor — including internally-discovered work — follows this lifecycle. No coding straight onto `dev`.
 
-1. **Check for work**: `bd ready` or `bd list`
-2. **Claim work**: `bd update <id> --status in_progress`
-3. **Implement the change**
-4. **Review docs impact** (MANDATORY consideration — not every change needs doc updates, but every change must be *evaluated* against the Documentation Updates table below). If the change touches user-visible behavior, template variables, schema, providers, config, API endpoints, or changes a count/version referenced in docs, update the relevant page(s) in the same commit or a paired commit. Do not wait for the user to prompt.
-5. **Run quality gates** (MANDATORY when shipping):
+### The Lifecycle: issue → bead → claim → branch → PR → dev → release
+
+1. **Issue first** — `gh issue create` (or an existing community issue). Applies to internal work too. *Sole exception:* trivial bookkeeping (beads sync, typo, one-line doc fix) may batch under a standing "Housekeeping" issue for the release cycle instead of individual issues.
+2. **Bead it** — `bd create` referencing the issue: put `(#NNN)` in the bead title. Larger features get an epic + child beads (see Roadmap & Feature Planning). Comment the bead id on the issue so the two stay linked.
+3. **Claim** — `bd update <id> --status in_progress` BEFORE writing code.
+4. **Branch** — from up-to-date dev:
+   ```bash
+   git checkout dev && git pull
+   git checkout -b <type>/<issue#>-<slug>    # type ∈ feat|fix|refactor|chore|docs
+   ```
+5. **Implement on the branch** — code, then docs-impact evaluation (MANDATORY — check every change against the Documentation Updates table below; doc updates ship in the same branch), then quality gates (MANDATORY):
    ```bash
    ruff check teamarr/ tests/
    pytest tests/ -v
    cd frontend && npm run build
    ```
-6. **Close the bead**: `bd close <id>`
-7. **Push to dev** (MANDATORY):
+6. **Open a PR to dev when gates are green** — CI (`test.yml`, `dependency-review`) runs **only on `pull_request`**, so a direct merge to dev skips the test gate. Internal work goes through a PR too:
    ```bash
-   git add <changed-files>
-   git commit -m "Brief description"
-   git push origin dev
+   git push -u origin <branch>
+   gh pr create --base dev --fill
    ```
+   Wait for checks green, then merge via GitHub: `gh pr merge <#> --merge --delete-branch`. Then comment the dev-land hash on the issue, add the `status: on-dev` label (**keep the issue open** — it closes at release), and close the bead.
+   *Exception:* trivial bookkeeping (beads sync, typo, one-line doc fix) may merge straight to dev under the standing Housekeeping issue — no PR needed.
+7. **Release to main in batches** — `dev → main` happens ONLY via the Release Workflow below. **Release triggers** (any one): a user-facing regression fix is waiting on dev · ~2–3 weeks since the last release · dev is ≥25 commits ahead of main. Dev must never again pile up 100+ unreleased commits.
+8. **At release** — close every `status: on-dev` issue with the release link.
 
-**Critical shipping rules:**
-- Work is incomplete until `git push` succeeds
-- Never stop before pushing—it leaves work stranded locally
-- Never say "ready to push when you are"—YOU must push
+### Inbound community PRs
+
+- Triage every new PR promptly: comment with an assessment and expected timeline.
+- Review-ready PRs get attention **before** starting new self-initiated work.
+- Merge via GitHub when possible; take-and-fix with credit when conflicts force it. Always credit contributors in the changelog (`— thanks @user (#PR)`).
+
+### Session rules
+
+- **Start:** `git checkout dev && git pull` · `bd ready` · `gh pr list` (triage anything new).
+- **End:** everything committed AND pushed (work is incomplete until push succeeds — never stop before pushing, never say "ready to push when you are"); report whether dev currently meets a release trigger.
 
 ### Roadmap & Feature Planning
 
@@ -120,6 +136,8 @@ When the user says **"release"**, **"/release"**, or **"version bump"**, execute
 8. **Generate Discord changelog** — use the Release Template below, output ready to paste
 9. **Update plans/STATUS.md** — add release to changelog, update version
 
+**Push-button alternative (`Cut Release` workflow, #281):** Actions tab → "Cut Release" → Run workflow from `dev`, pick patch/minor/major (or an explicit version). CI re-runs the gates, bumps `pyproject.toml` + `uv.lock`, pushes the bump to dev, fast-forwards main, pushes the tag, opens a **draft** release, and dispatches the Docker publishes for `main` and the tag (explicit dispatch — `GITHUB_TOKEN` pushes don't trigger workflows). Steps 7–9 stay manual: write curated notes on the draft and publish it, generate the Discord changelog, update `plans/STATUS.md`. After a Cut Release run, `git pull` locally — the bump commit lands on dev via the bot.
+
 **Rules:**
 - Never release with failing tests or lint errors
 - Release notes should be human-readable summaries, not raw commit messages
@@ -154,24 +172,7 @@ Get version from `pyproject.toml` line 7, append `-dev+<short_hash>` of HEAD com
 
 ### Release Template
 
-```
-## 🎉 v<version> — <YYYY-MM-DD>
-
-🐛 **Bug Fixes**
-- <one-liner> (#issue)
-
-✨ **New Features**
-- <one-liner> (#issue)
-
-⚡ **Enhancements**
-- <one-liner> (#issue)
-
-🎨 **UI/UX**
-- <one-liner> (#issue)
-
-🔧 **Under the Hood**
-- <one-liner> — thanks @contributor (#PR)
-```
+Identical sections to the Dev Push Template, with two differences: the header is `## 🎉 v<version> — <YYYY-MM-DD>` and items carry **no commit hashes** (releases omit them).
 
 ### Rules
 - Discord markdown (## headers, **bold**, \`code\`)
@@ -201,8 +202,8 @@ Get version from `pyproject.toml` line 7, append `-dev+<short_hash>` of HEAD com
 
 | Change Type | Update |
 |-------------|--------|
-| New/renamed/removed template variable | `teamarr/templates/variables/` docstring AND `docs/guide/templates/variables.md` AND variable-count claims in `docs/guide/templates/variables.md`, `docs/reference/architecture/template-engine.md`, `docs/index.md`, and `CLAUDE.md` ("Key Subsystems") |
-| New/renamed/removed condition evaluator | `teamarr/templates/conditions.py` docstring AND `docs/guide/templates/conditions.md` AND condition-count claims |
+| New/renamed/removed template variable | `teamarr/templates/variables/` docstring AND `docs/guide/epg/variables.md` AND variable-count claims in `docs/guide/epg/variables.md`, `docs/reference/architecture/template-engine.md`, `docs/index.md`, and `CLAUDE.md` ("Key Subsystems") |
+| New/renamed/removed condition evaluator | `teamarr/templates/conditions.py` docstring AND `docs/guide/epg/conditions.md` AND condition-count claims |
 | New/renamed/removed league | `INSERT OR REPLACE INTO leagues` in `schema.sql` AND the appropriate sport section of `docs/reference/supported-leagues.md` AND league-count claims in `docs/reference/supported-leagues.md`, `docs/reference/index.md`, `docs/index.md`, and `docs/reference/providers/<provider>.md` |
 | New/renamed sport | `INSERT INTO sports` in `schema.sql` AND `docs/reference/supported-leagues.md` sport list AND sport-count claims |
 | New API endpoint | Route docstring AND OpenAPI (auto) AND relevant `docs/reference/architecture/*.md` if the endpoint shape changes subsystem behavior |
@@ -224,7 +225,7 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Version | `pyproject.toml` line 7 |
 | Dependencies | `pyproject.toml` (ranges) + `uv.lock` (pinned, used by the Docker build) — run `uv lock` after any dependency change or `--frozen` builds fail |
 | League configs | `teamarr/database/schema.sql` |
-| Schema version | `teamarr/database/schema.sql` (v78) |
+| Schema version | `teamarr/database/schema.sql` (v81) |
 | Schema reconciliation | `teamarr/database/reconciliation.py` |
 | Provider registration | `teamarr/providers/__init__.py` |
 
@@ -232,9 +233,9 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 
 ```
 API Layer        → teamarr/api/routes/ (18 modules)
-Consumer Layer   → teamarr/consumers/ (generation, team_epg, event_epg, event_group_processor/, cache/, lifecycle/, matching/)
+Consumer Layer   → teamarr/consumers/ (key packages: generation, team_epg, event_epg, event_group_processor/, cache/, lifecycle/, matching/, enforcement/, filler/)
 Service Layer    → teamarr/services/sports_data.py
-Provider Layer   → teamarr/providers/ (espn, hockeytech, mlbstats, nascar, tsdb)
+Provider Layer   → teamarr/providers/ (espn, squiggle, nascar, mlbstats, hockeytech, supabase, tsdb)
 ```
 
 **Providers** (lower priority = tried first):
@@ -243,6 +244,7 @@ Provider Layer   → teamarr/providers/ (espn, hockeytech, mlbstats, nascar, tsd
 - NASCAR (35) - NASCAR Cup/O'Reilly (Xfinity)/Trucks; official cf.nascar.com schedule API, full weekend sessions, no key
 - MLB Stats (40) - MiLB (Triple-A through Rookie)
 - HockeyTech (50) - CHL, AHL, PWHL, USHL
+- Supabase (55) - Supabase-backed leagues (CBL, etc.)
 - TSDB (100) - Cricket, rugby, boxing, Scandinavian leagues, uru.2
 
 **Dispatcharr Sync Reliability** (`lifecycle/service.py`):
@@ -251,8 +253,8 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 ## Key Subsystems
 
 **Template Engine** (`teamarr/templates/`):
-- 240 variables in `variables/` (20 categories)
-- 23 condition evaluators in `conditions.py`
+- 260 variables in `variables/` (20 categories)
+- 33 condition evaluators in `conditions.py`
 - Suffix rules: `.next`, `.last` for multi-game scenarios
 - Template scope: each variable is tagged `TemplateScope.ALL` / `TEAM_ONLY` / `EVENT_ONLY` — gates variable picker by template type via `GET /variables?template_type=…`
 
@@ -277,7 +279,7 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 - `epg_resolver.py` bridges the stream `tvg_id` → program `tvg_id` namespace gap via a cascade: direct tvg_id → curated channel `epg_data_id` → strict name match (does NOT require an EPG-linked channel). `_Teamarr` source excluded.
 - `epg_index.py` fetches by resolved tvg_id, keys by stream tvg_id; `epg_matcher.py` routes program title+sub_title (pipe-joined) through `classify_stream → TeamMatcher`.
 - `MatchMethod.EPG` persisted to `managed_channel_streams.match_method` → drives the `epg_match` stream-ordering rule. EPG-matched groups show an "EPG Matched" badge.
-- Docs: `docs/guide/epg-matching.md`.
+- Docs: `docs/guide/matching/program-matching.md`.
 
 ## Plans & Roadmap
 
@@ -327,19 +329,26 @@ When the user says **"audit"**, claim the next open child bead under `teamarrv2-
 
 When asked to **"sync status"** or **"update status"**:
 
-1. Query GitHub issues: `gh issue list --state all --limit 50`
-2. Query GitHub PRs: `gh pr list --state all --limit 20`
-3. Read PR/issue comments for context: `gh api repos/Pharaoh-Labs/teamarr/issues/<id>/comments`
-4. Query beads: `bd list`, `bd list --label roadmap`
-5. Cross-reference issues ↔ beads (check which issues have epics, which don't)
-6. Update `plans/STATUS.md` with:
-   - Open issues table (with bead mapping)
-   - Open PRs table (with status/notes)
-   - Roadmap epics (ready vs blocked)
-   - Issues needing beads
-   - Recently closed items
-   - Change log entry with date
-7. Present summary and recommend next steps
+**Principle: one source of truth per fact.** GitHub owns issue/PR state (via labels), beads own work state, `plans/STATUS.md` owns only judgment (priorities, next steps, standing facts). Never transcribe into STATUS.md anything that `gh`/`bd` can derive live.
+
+**Label vocabulary** (issue state lives HERE, not in prose — triagers maintain these too). Status labels track the work lifecycle; `type:` labels classify the change; two special labels flag ownership/blockers:
+| Label | Meaning |
+|-------|---------|
+| `status: needs-triage` | No assessment or bead yet |
+| `status: needs-bead` | Triaged; needs a bead before work |
+| `status: ready` | Bead created; queued for work |
+| `status: on-dev` | Landed on dev; closes at next release. `gh issue list --label "status: on-dev"` = release checklist |
+| `status: released` | Shipped in a release |
+| `contributor-led` | Community contributor driving implementation |
+| `research` | Blocked on research / data-source discovery |
+| `type: process` | Standing process/housekeeping issue (also `type:` bug/feature/enhancement/docs/chore/refactor/league) |
+
+**The sync:**
+1. Query live state: `gh issue list --state open`, `gh pr list`, `bd list -n 300` (beware default 50-row cap), read comment threads on anything that changed
+2. Reconcile labels — new untriaged issues get `status: needs-triage`; dev-landed fixes get `status: on-dev`; fix wrong/missing labels
+3. Cross-reference issues ↔ beads; file beads for triaged issues that lack them (`(#NNN)` in bead title)
+4. **Rewrite `plans/STATUS.md` from scratch** (target ≤80 lines): header (version, dev-ahead count, release-trigger check, open counts), Needs Attention (≤10 curated rows of judgment), Next Work queue, Standing Facts, last 3 changelog entries. Never append-and-patch — full regeneration makes drift impossible. Prior history lives in `plans/archive/`.
+5. Present summary; state whether a release trigger is met
 
 ## Adding a New League
 
@@ -407,3 +416,50 @@ docker logs --tail 100 teamarr              # Docker container stdout
 - `browser_screenshot` - Capture page screenshot
 
 Use for: Visual verification of UI changes, testing frontend flows, debugging styling issues.
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
+## Beads Issue Tracker
+
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+
+### Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+### Rules
+
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+
+## Session Completion
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **PUSH TO REMOTE** - This is MANDATORY:
+   ```bash
+   git pull --rebase
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing - that leaves work stranded locally
+- NEVER say "ready to push when you are" - YOU must push
+- If push fails, resolve and retry until it succeeds
+<!-- END BEADS INTEGRATION -->

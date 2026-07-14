@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING, Any
 
 from teamarr.core import TemplateConfig
 from teamarr.core.filler_types import (
-    ConditionalFillerTemplate,
     FillerConfig,
     FillerTemplate,
     OffseasonFillerTemplate,
+    legacy_conditional_to_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,14 @@ class Template:
         default_factory=lambda: {"enabled": False, "subtitle": None, "description": None}
     )
 
+    # Filler condition rows (#420, epic cajd) — hehg.2 row shape, evaluated
+    # against the register's reference game. Replace the legacy *_conditional
+    # dicts above (kept for rollback/UI until cajd.4; no longer read by
+    # generation except as a config-build fallback when rows are empty).
+    pregame_conditional_rows: list[dict] = field(default_factory=list)
+    postgame_conditional_rows: list[dict] = field(default_factory=list)
+    idle_conditional_rows: list[dict] = field(default_factory=list)
+
     # Conditional descriptions
     conditional_descriptions: list[dict] = field(default_factory=list)
 
@@ -223,6 +231,9 @@ def _row_to_template(row: Row) -> Template:
         idle_offseason=_parse_json(
             row["idle_offseason"], {"enabled": False, "subtitle": None, "description": None}
         ),
+        pregame_conditional_rows=_parse_json(row["pregame_conditional_rows"], []),
+        postgame_conditional_rows=_parse_json(row["postgame_conditional_rows"], []),
+        idle_conditional_rows=_parse_json(row["idle_conditional_rows"], []),
         conditional_descriptions=_parse_json(row["conditional_descriptions"], []),
         event_channel_name=row["event_channel_name"],
         event_channel_logo_url=row["event_channel_logo_url"],
@@ -435,6 +446,9 @@ def create_template(
         "idle_content",
         "idle_conditional",
         "idle_offseason",
+        "pregame_conditional_rows",
+        "postgame_conditional_rows",
+        "idle_conditional_rows",
         "conditional_descriptions",
     }
 
@@ -452,6 +466,7 @@ def create_template(
     cursor = conn.execute(f"INSERT INTO templates ({column_str}) VALUES ({placeholders})", values)
     conn.commit()
     template_id = cursor.lastrowid
+    assert template_id is not None  # just-inserted row always has a rowid
     logger.info("[CREATED] Template id=%d name=%s type=%s", template_id, name, template_type)
     return template_id
 
@@ -492,6 +507,9 @@ def update_template(conn: Connection, template_id: int, **kwargs) -> bool:
         "idle_content",
         "idle_conditional",
         "idle_offseason",
+        "pregame_conditional_rows",
+        "postgame_conditional_rows",
+        "idle_conditional_rows",
         "conditional_descriptions",
     }
 
@@ -558,11 +576,13 @@ def template_to_filler_config(template: Template) -> FillerConfig:
 
     # Build pregame template from fallback (no hardcoded defaults - schema provides them)
     pregame_fb = template.pregame_fallback or {}
+    pregame_fallback_desc = pregame_fb.get("description_fallback")
     pregame_template = FillerTemplate(
         title=pregame_fb.get("title", ""),
         subtitle=pregame_fb.get("subtitle"),
         description=pregame_fb.get("description", ""),
         art_url=pregame_fb.get("art_url"),
+        description_fallbacks=[pregame_fallback_desc] if pregame_fallback_desc else [],
     )
 
     # Build postgame template from fallback (no hardcoded defaults - schema provides them)
@@ -574,18 +594,6 @@ def template_to_filler_config(template: Template) -> FillerConfig:
         art_url=postgame_fb.get("art_url"),
     )
 
-    # Postgame conditional
-    pg_cond = template.postgame_conditional or {}
-    postgame_conditional = ConditionalFillerTemplate(
-        enabled=pg_cond.get("enabled", False),
-        title_final=pg_cond.get("title_final"),
-        title_not_final=pg_cond.get("title_not_final"),
-        subtitle_final=pg_cond.get("subtitle_final"),
-        subtitle_not_final=pg_cond.get("subtitle_not_final"),
-        description_final=pg_cond.get("description_final"),
-        description_not_final=pg_cond.get("description_not_final"),
-    )
-
     # Build idle template (no hardcoded defaults - schema provides them)
     idle_ct = template.idle_content or {}
     idle_template = FillerTemplate(
@@ -595,16 +603,14 @@ def template_to_filler_config(template: Template) -> FillerConfig:
         art_url=idle_ct.get("art_url"),
     )
 
-    # Idle conditional
-    idle_cond = template.idle_conditional or {}
-    idle_conditional = ConditionalFillerTemplate(
-        enabled=idle_cond.get("enabled", False),
-        title_final=idle_cond.get("title_final"),
-        title_not_final=idle_cond.get("title_not_final"),
-        subtitle_final=idle_cond.get("subtitle_final"),
-        subtitle_not_final=idle_cond.get("subtitle_not_final"),
-        description_final=idle_cond.get("description_final"),
-        description_not_final=idle_cond.get("description_not_final"),
+    # Condition rows per register (#420). Empty rows fall back to converting
+    # the legacy final/not-final conditional in memory, so conditionals
+    # authored through the pre-cajd.4 UI (after v80 already ran) still work.
+    postgame_rows = template.postgame_conditional_rows or legacy_conditional_to_rows(
+        template.postgame_conditional
+    )
+    idle_rows = template.idle_conditional_rows or legacy_conditional_to_rows(
+        template.idle_conditional
     )
 
     # Idle offseason
@@ -626,12 +632,13 @@ def template_to_filler_config(template: Template) -> FillerConfig:
         pregame_template=pregame_template,
         postgame_enabled=template.postgame_enabled,
         postgame_template=postgame_template,
-        postgame_conditional=postgame_conditional,
         idle_enabled=template.idle_enabled,
         idle_template=idle_template,
-        idle_conditional=idle_conditional,
         idle_offseason=idle_offseason,
         xmltv_categories=filler_categories,
+        pregame_rows=template.pregame_conditional_rows or [],
+        postgame_rows=postgame_rows,
+        idle_rows=idle_rows,
     )
 
 
@@ -703,145 +710,13 @@ def template_to_event_config(template: Template) -> EventTemplateConfig:
 
 
 def seed_default_templates(conn: Connection) -> None:
-    """Seed default templates if none exist.
+    """Seed/upgrade the curated default template set.
 
-    Creates a team template and event template for getting started.
-    Art URLs use localhost placeholder - replace with your own image server.
+    Implementation lives in teamarr.database.default_templates (tvnk.1/#329);
+    this shim keeps the historical import path working.
     """
-    existing = get_all_templates(conn)
-    if existing:
-        return  # Don't overwrite existing templates
-
-    # Default team template
-    create_template(
-        conn,
-        name="Team",
-        template_type="team",
-        title_format="{gracenote_category}",
-        subtitle_template="{away_team} at {home_team}",
-        program_art_url="http://localhost:3000/{league_id}/{away_team_pascal}/{home_team_pascal}/cover.png",
-        game_duration_mode="sport",
-        pregame_enabled=True,
-        postgame_enabled=True,
-        idle_enabled=True,
-        xmltv_flags={"new": True, "live": True, "date": True},
-        xmltv_video={"enabled": False, "quality": "HDTV"},
-        xmltv_categories=["Sports", "{sport}", "Sports Event"],
-        xmltv_filler_categories=[],
-        pregame_periods=[],
-        pregame_fallback={
-            "title": "Coming up: {gracenote_category} starting at {game_time.next}",
-            "subtitle": "{away_team.next} at {home_team.next}",
-            "description": "The {away_team_record.next} {away_team.next} travel to {venue_city.next}, {venue_state.next} to play the {home_team_record.next} {home_team.next} {today_tonight.next} at {game_time.next}.",  # noqa: E501
-            "art_url": "http://localhost:3000/{league_id}/{away_team_pascal.next}/{home_team_pascal.next}/cover.png",
-        },
-        postgame_periods=[],
-        postgame_fallback={
-            "title": "{gracenote_category}: {team_name} Postgame Recap",
-            "subtitle": "{away_team.last} at {home_team.last}",
-            "description": "{team_name} {result_text.last} the {opponent.last} {final_score.last}",
-            "art_url": "http://localhost:3000/{league_id}/{away_team_pascal.last}/{home_team_pascal.last}/cover.png",
-        },
-        postgame_conditional={
-            "enabled": True,
-            "description_final": "The {team_name} {result_text.last} the {opponent.last} {final_score.last} {overtime_text.last}",  # noqa: E501
-            "description_not_final": "The game between the {team_name} and the {opponent.last} on {game_date.last} has not yet ended as of the last update.",  # noqa: E501
-        },
-        idle_content={
-            "title": "No {team_name} Game Today",
-            "subtitle": "Next game: {game_date.next} at {game_time.next} {vs_at.next} the {opponent.next}",  # noqa: E501
-            "description": "Next game: {game_date.next} at {game_time.next} vs {opponent.next}",
-            "art_url": "",
-        },
-        idle_conditional={
-            "enabled": True,
-            "description_final": "The {team_name} {result_text.last} the {opponent.last} {final_score.last} {overtime_text.last} on {game_date.last}. Next game will be with the {opponent.next} on {game_date.next}",  # noqa: E501
-            "description_not_final": "The {team_name} last played against the {opponent.last} on {game_date.last}.",  # noqa: E501
-        },
-        idle_offseason={
-            "title_enabled": False,
-            "title": None,
-            "subtitle_enabled": True,
-            "subtitle": "No upcoming game currently on schedule in next 30 days",
-            "description_enabled": True,
-            "description": "No upcoming {team_name} games scheduled.",
-        },
-        conditional_descriptions=[
-            {
-                "condition": None,
-                "condition_value": None,
-                "template": "The {away_team_record} {away_team} travel to {venue_city}, {venue_state} to take on the {home_team_record} {home_team} at {venue}.",  # noqa: E501
-                "priority": 100,
-                "label": "Default",
-            }
-        ],
-        event_channel_name="{away_team} @ {home_team}",
-        event_channel_logo_url="",
+    from teamarr.database.default_templates import (
+        seed_default_templates as _seed,
     )
 
-    # Default event template
-    create_template(
-        conn,
-        name="Event",
-        template_type="event",
-        title_format="{gracenote_category}",
-        subtitle_template="{away_team} at {home_team}",
-        program_art_url="http://localhost:3000/{league_id}/{away_team_pascal}/{home_team_pascal}/cover.png",
-        game_duration_mode="sport",
-        pregame_enabled=True,
-        postgame_enabled=True,
-        idle_enabled=False,
-        xmltv_flags={"new": True, "live": True, "date": True},
-        xmltv_video={"enabled": False, "quality": "HDTV"},
-        xmltv_categories=["Sports", "{sport}", "Sporting Event"],
-        xmltv_filler_categories=[],
-        pregame_periods=[],
-        pregame_fallback={
-            "title": "Coming up: {gracenote_category} starting at {game_time}",
-            "subtitle": "{away_team} at {home_team}",
-            "description": "The {away_team_record} {away_team} travel to {venue_city}, {venue_state} to play the {home_team_record} {home_team} {today_tonight} at {game_time}.",  # noqa: E501
-            "art_url": "http://localhost:3000/{league_id}/{away_team_pascal}/{home_team_pascal}/cover.png",
-        },
-        postgame_periods=[],
-        postgame_fallback={
-            "title": "{gracenote_category}: Postgame Recap",
-            "subtitle": "{away_team} at {home_team}",
-            "description": "The {team_name} {result_text} the {opponent} {final_score} {overtime_text}",  # noqa: E501
-            "art_url": "http://localhost:3000/{league_id}/{away_team_pascal}/{home_team_pascal}/cover.png",
-        },
-        postgame_conditional={
-            "enabled": True,
-            "description_final": "The {team_name} {result_text} the {opponent} {final_score} {overtime_text}",  # noqa: E501
-            "description_not_final": "The game between the {away_team} and {home_team} has not yet ended as of the last update.",  # noqa: E501
-        },
-        idle_content={
-            "title": "{team_name} Programming",
-            "subtitle": "",
-            "description": "",
-            "art_url": "",
-        },
-        idle_conditional={
-            "enabled": False,
-            "description_final": "",
-            "description_not_final": "",
-        },
-        idle_offseason={
-            "title_enabled": False,
-            "title": None,
-            "subtitle_enabled": False,
-            "subtitle": "",
-            "description_enabled": False,
-            "description": "No upcoming {team_name} games scheduled.",
-        },
-        conditional_descriptions=[
-            {
-                "condition": "",
-                "condition_value": None,
-                "template": "The {away_team_record} {away_team} travel to {venue_city}, {venue_state} to play the {home_team_record} {home_team} at {venue}.",  # noqa: E501
-                "priority": 100,
-                "label": "Default",
-            }
-        ],
-        event_channel_name="{away_team} at {home_team}",
-        event_channel_logo_url="http://localhost:3000/{league_id}/{away_team_pascal}/{home_team_pascal}/logo.png",
-    )
+    _seed(conn)

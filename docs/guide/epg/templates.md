@@ -13,6 +13,11 @@ redirect_from:
 
 Templates define how your EPG content looks - the titles, descriptions, and artwork for programmes in your guide.
 
+**New install?** Teamarr ships with a curated set of
+[starter templates](../templates/defaults) modeled on
+professional (Gracenote) EPG conventions — you don't need to build templates
+from scratch. Assign the starters that match your setup and customize later.
+
 ## What Templates Do
 
 When Teamarr generates EPG, it uses templates to create programme entries. Templates contain:
@@ -54,8 +59,12 @@ The template editor has five tabs:
 | **Basic Info** | Template name and event duration settings |
 | **Defaults** | Title, subtitle, description(s), artwork URL, and channel name/logo (event templates) |
 | **Conditions** | Rules that show different descriptions based on game context (team templates only) |
-| **Fillers** | Pregame, postgame, and idle content with optional conditional logic |
+| **Fillers** | Pregame, postgame, and idle content, each with optional condition rows |
 | **Other EPG Options** | XMLTV categories, tags (new/live/date), and video quality |
+
+When **creating** a template, every tab is pre-filled with working defaults: a **Next** button below each tab walks you through them in order, and each tab in the strip carries a small hint — a check once you've reviewed it, an amber dot if something required (the template name) is still missing. Tabs stay freely clickable, and editing an existing template shows no stepper at all.
+
+The **Previewing as** bar above the tabs selects the league (and live vs. sample data) for every preview on the page, and the **Guide Preview** card in the right rail renders the title, subtitle, and description as a viewer's guide would show them — see [Previewing Templates](variables.md#previewing-templates).
 
 ## Variables
 
@@ -87,7 +96,12 @@ Team templates support filler programmes for non-game periods:
 | **Postgame** | After game ends until midnight or next programme |
 | **Idle** | Days with no games scheduled |
 
-Each filler has its own title, subtitle, description, and artwork URL.
+Each filler has its own title, subtitle, description, and artwork URL — plus
+optional **condition rows** that override those fields based on the register's
+reference game (pregame → next game, postgame/idle → last game). The starter
+set uses this to show ESPN's recap headline once it's published and an
+in-progress line while a game is still running. See
+[Filler condition rows](conditions#filler-condition-rows).
 
 ## Conditions
 
@@ -102,6 +116,20 @@ Conditions have priorities - the first matching condition wins.
 See [Conditions](conditions) for available condition types.
 
 ## Getting Started
+
+The fastest path is the shipped starter set — every install seeds ten
+Gracenote-modeled templates covering team channels, US pro events, soccer
+(club and international), college, combat, tennis, and racing.
+See [Default Templates](../templates/defaults) for the full
+set and recommended scoping.
+
+1. Go to **Templates** — the starter templates are already there, unassigned
+2. Assign the ones that match your setup (per sport/league, or as global
+   defaults) via **Template Assignments**
+3. Rename or edit freely — an edited starter is yours and never touched by
+   upgrades
+
+To build your own from scratch:
 
 1. Go to **Templates** and click **Create Template**
 2. Choose **Team** or **Event** type (this cannot be changed later)

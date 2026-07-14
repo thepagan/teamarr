@@ -6,6 +6,7 @@ the sibling mixin modules; this module owns orchestration and shared state.
 """
 
 import logging
+import time
 from collections.abc import Callable
 from datetime import date, datetime
 from sqlite3 import Connection
@@ -115,6 +116,31 @@ class EventGroupProcessor(
         # while ensuring groups that need fresh API data can still get it
         self._shared_events: dict[str, tuple[list[Event], bool]] = {}
 
+        # Per-run consolidation state (this processor lives for one run):
+        # one lifecycle service shared by all groups, and once-per-run flags for
+        # work that used to repeat per group (scheduled deletions, the initial
+        # channel-number reassign pass).
+        self._lifecycle_service = None
+        self._deletions_processed = False
+        self._initial_reassign_done = False
+
+    def _get_lifecycle_service(self):
+        """Lifecycle service shared across all groups in this run.
+
+        The Dispatcharr channel cache is class-level (shared per URL), so
+        per-group construction never bought cache freshness — it only repeated
+        settings reads and the external-occupied computation ~160 times per run.
+        """
+        if self._lifecycle_service is None:
+            self._lifecycle_service = create_lifecycle_service(
+                self._db_factory,
+                self._service,
+                self._dispatcharr_client,
+            )
+            # Compute external channel numbers to avoid collisions (#146)
+            self._lifecycle_service.compute_external_occupied()
+        return self._lifecycle_service
+
     def _resolve_subscription_leagues(
         self, conn: Connection, group: "EventEPGGroup | None" = None
     ) -> list[str]:
@@ -191,7 +217,7 @@ class EventGroupProcessor(
         has_override = (
             group is not None and group.subscription_leagues is not None
         )
-        cache_key = group.id if has_override else 0
+        cache_key = group.id if group is not None and has_override else 0
 
         if cache_key not in self._subscription_leagues_cache:
             self._subscription_leagues_cache[cache_key] = (
@@ -257,6 +283,9 @@ class EventGroupProcessor(
         self._shared_events.clear()
         if hasattr(self, "_subscription_leagues_cache"):
             del self._subscription_leagues_cache
+        self._lifecycle_service = None
+        self._deletions_processed = False
+        self._initial_reassign_done = False
 
         with self._db_factory() as conn:
             # Sync the system-managed "Dispatcharr Channels" source group (183.9) to
@@ -361,11 +390,7 @@ class EventGroupProcessor(
             if run_enforcement:
                 enforcement_lifecycle = None
                 if self._dispatcharr_client:
-                    enforcement_lifecycle = create_lifecycle_service(
-                        db_factory=self._db_factory,
-                        sports_service=self._service,
-                        dispatcharr_client=self._dispatcharr_client,
-                    )
+                    enforcement_lifecycle = self._get_lifecycle_service()
                 all_group_ids = [g.id for g in groups]
                 batch_result.enforcement = self._run_enforcement(
                     conn,
@@ -602,6 +627,19 @@ class EventGroupProcessor(
 
         # Create stats run for tracking
         stats_run = create_run(conn, run_type="event_group", group_id=group.id)
+        # create_run always returns a ProcessingRun with its DB id populated.
+        assert stats_run.id is not None
+
+        # Per-phase wall time for this group, persisted to the run stats so
+        # slow groups can be diagnosed without log archaeology.
+        phases: dict[str, float] = {}
+        _phase_start = time.time()
+
+        def _mark(phase: str) -> None:
+            nonlocal _phase_start
+            now = time.time()
+            phases[phase] = round(phases.get(phase, 0.0) + (now - _phase_start), 2)
+            _phase_start = now
 
         try:
             # Clear any previously stored XMLTV for this group so that if
@@ -613,6 +651,7 @@ class EventGroupProcessor(
             streams = self._fetch_streams(group)
             result.streams_fetched = len(streams)
             stats_run.streams_fetched = len(streams)
+            _mark("fetch")
 
             if not streams:
                 result.errors.append("No streams found for group")
@@ -654,33 +693,11 @@ class EventGroupProcessor(
                 )
                 return result
 
-            # Step 2: Fetch events from data providers
-            # Use subscription leagues (per-group override → global fallback)
+            # Step 2: Resolve subscription leagues (per-group override → global
+            # fallback). The matcher fetches its own events with a 30-day window,
+            # so there is no separate pre-flight event fetch here — an eventless
+            # group simply produces zero matches downstream.
             effective_leagues = self._get_subscription_leagues(conn, group)
-            events = self._fetch_events(effective_leagues, target_date)
-            logger.info(
-                f"Fetched {len(events)} events for group '{group.name}' leagues={effective_leagues}"
-            )
-
-            if not events:
-                result.errors.append(f"No events found for leagues: {effective_leagues}")
-                result.completed_at = datetime.now()
-                stats_run.complete(status="completed", error="No events found")
-                save_run(conn, stats_run)
-                # Update stats - streams are eligible but no events to match against
-                update_group_stats(
-                    conn,
-                    group.id,
-                    stream_count=result.streams_after_filter,  # Eligible streams
-                    matched_count=0,
-                    filtered_stale=filter_result.filtered_stale,
-                    filtered_include_regex=filter_result.filtered_include,
-                    filtered_exclude_regex=filter_result.filtered_exclude,
-                    failed_count=result.streams_after_filter,  # All unmatched due to no events
-                    filtered_not_event=filter_result.filtered_not_event,
-                    total_stream_count=result.streams_fetched,
-                )
-                return result
 
             # Step 3: Match streams to events (uses fingerprint cache)
             match_result = self._match_streams(
@@ -691,6 +708,7 @@ class EventGroupProcessor(
                 status_callback=status_callback,
                 resolved_leagues=effective_leagues,
             )
+            _mark("match")
             # Coverage = distinct streams; volume = total matched results (EPG/TEAM_ONLY
             # fan one stream out to many results, which is why the old result-count
             # numerator pushed match rate over 100%).
@@ -739,20 +757,21 @@ class EventGroupProcessor(
             # Enrich ALL matched events with fresh status from provider
             # This ensures lifecycle filtering uses current final status
             matched_streams = self._enrich_matched_events(matched_streams)
+            _mark("enrich")
 
             # Build event lookup BEFORE team filtering (for cleanup of existing channels)
             # Use segment-aware event_id to match channel.event_id storage
-            def _effective_event_id(m):
+            def _effective_event_id(m) -> str | None:
                 event = m.get("event")
                 if not event or not hasattr(event, "id"):
                     return None
                 segment = m.get("segment")
                 return f"{event.id}-{segment}" if segment else event.id
 
-            all_matched_events = {
-                _effective_event_id(m): m.get("event")
+            all_matched_events: dict[str, Event] = {
+                eid: ev
                 for m in matched_streams
-                if _effective_event_id(m)
+                if (eid := _effective_event_id(m)) and (ev := m.get("event"))
             }
 
             # Apply team include/exclude filtering
@@ -763,7 +782,7 @@ class EventGroupProcessor(
 
             # Build set of event IDs that passed the filter (segment-aware)
             passed_event_ids = {
-                _effective_event_id(m) for m in matched_streams if _effective_event_id(m)
+                eid for m in matched_streams if (eid := _effective_event_id(m))
             }
 
             # Cleanup existing channels that no longer pass team filter
@@ -776,7 +795,7 @@ class EventGroupProcessor(
                 logger.info("[EVENT_EPG] Cleaned up %d channels due to team filter", cleanup_count)
 
             # Build stream dict for cleanup (fingerprint-based content change detection)
-            current_streams = {s.get("id"): s for s in streams if s.get("id")}
+            current_streams = {sid: s for s in streams if (sid := s.get("id"))}
 
             if matched_streams:
                 if status_callback:
@@ -784,6 +803,7 @@ class EventGroupProcessor(
                 lifecycle_result = self._process_channels(
                     matched_streams, group, conn, current_streams=current_streams
                 )
+                _mark("channels")
                 result.channels_created = len(lifecycle_result.created)
                 result.channels_existing = len(lifecycle_result.existing)
                 result.channels_skipped = len(lifecycle_result.skipped)
@@ -846,8 +866,10 @@ class EventGroupProcessor(
                 # Step 6: Store XMLTV for this group (in database)
                 # Always store, even if empty - this clears stale XMLTV when no events match
                 self._store_group_xmltv(conn, group.id, xmltv_content or "")
+                _mark("xmltv")
 
             # Mark run as completed successfully
+            stats_run.extra_metrics["phase_timings"] = phases
             stats_run.complete(status="completed")
 
             # Update group's processing stats
@@ -874,6 +896,7 @@ class EventGroupProcessor(
         except Exception as e:
             logger.exception(f"Error processing group {group.name}")
             result.errors.append(str(e))
+            stats_run.extra_metrics["phase_timings"] = phases
             stats_run.complete(status="failed", error=str(e))
 
         # Save stats run
@@ -906,14 +929,7 @@ class EventGroupProcessor(
         """
         from teamarr.consumers.lifecycle import StreamProcessResult
 
-        lifecycle_service = create_lifecycle_service(
-            self._db_factory,
-            self._service,  # Required for template resolution
-            self._dispatcharr_client,
-        )
-
-        # Compute external channel numbers to avoid collisions (#146)
-        lifecycle_service.compute_external_occupied()
+        lifecycle_service = self._get_lifecycle_service()
 
         # Build group config dict
         # Per-group profiles/channel groups removed — now resolved from
@@ -926,44 +942,57 @@ class EventGroupProcessor(
 
         # Load template from database if configured
         # Resolve template from global subscription
-        template_config = None
+        # Typed Any: _load_event_template yields an EventTemplateConfig, which the
+        # lifecycle creator accepts even though its param is annotated ``dict | None``.
+        template_config: Any = None
         template_id = get_subscription_template_for_event(conn, "", "")
         if template_id:
             template_config = self._load_event_template(conn, template_id)
 
         combined_result = StreamProcessResult()
 
+        from teamarr.database.channel_numbers import (
+            is_sticky_mode,
+            reassign_all_channels,
+        )
+
         # v59: Global channel reassignment before processing
         # Ensures all channels have correct numbers based on global mode.
-        # Skipped in sticky (gap/strict) modes — those defer all placement to the
-        # single end-of-run pass in generation, which is the only one that pushes
+        # Runs once per run (not per group — each group's post-pass already
+        # left numbers correct for the next group). Skipped in sticky
+        # (gap/strict) modes — those defer all placement to the single
+        # end-of-run pass in generation, which is the only one that pushes
         # to Dispatcharr (see is_sticky_mode).
-        try:
-            from teamarr.database.channel_numbers import (
-                is_sticky_mode,
-                reassign_all_channels,
-            )
-            with lifecycle_service._db_factory() as conn:
-                if not is_sticky_mode(conn):
-                    reassign_result = reassign_all_channels(
-                        conn, external_occupied=lifecycle_service._external_occupied
-                    )
-                    if reassign_result.get("channels_moved"):
-                        logger.info(
-                            "[EVENT_EPG] Pre-process reassignment: %d channels moved",
-                            reassign_result["channels_moved"],
+        if not self._initial_reassign_done:
+            self._initial_reassign_done = True
+            try:
+                with lifecycle_service._db_factory() as conn:
+                    if not is_sticky_mode(conn):
+                        reassign_result = reassign_all_channels(
+                            conn, external_occupied=lifecycle_service._external_occupied
                         )
-        except Exception as e:
-            logger.debug("[EVENT_EPG] Error in global reassignment: %s", e)
+                        if reassign_result.get("channels_moved"):
+                            logger.info(
+                                "[EVENT_EPG] Pre-process reassignment: %d channels moved",
+                                reassign_result["channels_moved"],
+                            )
+            except Exception as e:
+                logger.debug("[EVENT_EPG] Error in global reassignment: %s", e)
 
         # V1 Parity Step 1: Process scheduled deletions first
-        try:
-            deletion_result = lifecycle_service.process_scheduled_deletions()
-            combined_result.merge(deletion_result)
-            if deletion_result.deleted:
-                logger.info("[EVENT_EPG] Deleted %d expired channels", len(deletion_result.deleted))
-        except Exception as e:
-            logger.debug("[EVENT_EPG] Error processing scheduled deletions: %s", e)
+        # Once per run — expired channels don't reappear between groups, so the
+        # per-group repetition was ~160 identical sweeps per generation.
+        if not self._deletions_processed:
+            self._deletions_processed = True
+            try:
+                deletion_result = lifecycle_service.process_scheduled_deletions()
+                combined_result.merge(deletion_result)
+                if deletion_result.deleted:
+                    logger.info(
+                        "[EVENT_EPG] Deleted %d expired channels", len(deletion_result.deleted)
+                    )
+            except Exception as e:
+                logger.debug("[EVENT_EPG] Error processing scheduled deletions: %s", e)
 
         # V1 Parity Step 2: Cleanup deleted/missing/changed streams
         if current_streams is not None:
@@ -984,20 +1013,23 @@ class EventGroupProcessor(
         )
         combined_result.merge(process_result)
 
-        # v59: Post-process global reassignment (skipped in sticky modes — see above)
-        try:
-            with lifecycle_service._db_factory() as conn:
-                if not is_sticky_mode(conn):
-                    reassign_result = reassign_all_channels(
-                        conn, external_occupied=lifecycle_service._external_occupied
-                    )
-                    if reassign_result.get("channels_moved"):
-                        logger.info(
-                            "[EVENT_EPG] Post-process reassignment: %d channels moved",
-                            reassign_result["channels_moved"],
+        # v59: Post-process global reassignment (skipped in sticky modes — see
+        # above). Only needed when this group actually changed the channel set;
+        # a no-op group leaves numbering exactly as the last pass did.
+        if combined_result.created or combined_result.deleted:
+            try:
+                with lifecycle_service._db_factory() as conn:
+                    if not is_sticky_mode(conn):
+                        reassign_result = reassign_all_channels(
+                            conn, external_occupied=lifecycle_service._external_occupied
                         )
-        except Exception as e:
-            logger.debug("[EVENT_EPG] Error reassigning channel numbers: %s", e)
+                        if reassign_result.get("channels_moved"):
+                            logger.info(
+                                "[EVENT_EPG] Post-process reassignment: %d channels moved",
+                                reassign_result["channels_moved"],
+                            )
+            except Exception as e:
+                logger.debug("[EVENT_EPG] Error reassigning channel numbers: %s", e)
 
         return combined_result
 

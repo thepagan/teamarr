@@ -12,7 +12,9 @@ export interface ManagedChannel {
   dispatcharr_channel_id: number | null
   dispatcharr_uuid: string | null
   home_team: string | null
+  home_team_abbrev: string | null
   away_team: string | null
+  away_team_abbrev: string | null
   event_date: string | null
   event_name: string | null
   league: string | null
@@ -167,7 +169,9 @@ export interface StreamRuleMatch {
   type: string
   value: string
   priority: number
-  is_winner: boolean
+  is_winner: boolean          // the priority-mode rule that set the band
+  mode: "priority" | "score"  // 'priority' (band) or 'score' (additive contributor)
+  points: number              // signed contribution for score-mode rules
 }
 
 export interface ChannelStreamEntry {
@@ -178,7 +182,8 @@ export interface ChannelStreamEntry {
   match_method: string | null
   match_type: string | null
   exception_keyword: string | null
-  priority: number
+  priority: number            // stored sort key from the last generation run
+  expected_priority: number   // recomputed under current rules (for staleness)
   stream_stats: Record<string, unknown> | null
   stream_stats_updated_at: string | null
   matched_rules: StreamRuleMatch[]

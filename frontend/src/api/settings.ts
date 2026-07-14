@@ -60,6 +60,7 @@ export interface EPGSettings {
   epg_channel_source_groups: number[]
   epg_stream_pre_buffer_minutes: number
   epg_stream_post_buffer_minutes: number
+  tennis_majors_only: boolean
   /** Game-thumbs base URL prefixed onto relative art paths in templates (z02s). */
   art_base_url: string
 }
@@ -160,7 +161,9 @@ export interface ChannelNumberingSettingsUpdate {
 export interface StreamOrderingRule {
   type: "m3u" | "group" | "regex" | "stream_type" | "team_feed" | "not_team_feed" | "epg_match" | "dispatcharr_group" | "stats_metric" | "catch_all"
   value: string
-  priority: number  // 1-99, lower = higher priority
+  priority: number  // 1-99, lower = higher priority (orders 'priority'-mode rules / sets band)
+  mode: "priority" | "score"  // 'priority' = hard first-match band; 'score' = additive
+  points: number  // signed; summed across matched 'score' rules (ignored for 'priority')
 }
 
 export interface StreamOrderingSettings {

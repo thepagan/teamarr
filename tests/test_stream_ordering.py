@@ -11,6 +11,7 @@ from teamarr.database.channels.types import ManagedChannelStream
 from teamarr.database.connection import get_connection, get_db, init_db
 from teamarr.database.settings.types import StreamOrderingRule
 from teamarr.services.stream_ordering import (
+    BAND_STRIDE,
     NO_MATCH_PRIORITY,
     StreamOrderingService,
 )
@@ -464,3 +465,174 @@ class TestEvaluateRules:
         assert evals[0].type == "catch_all"
         assert evals[0].priority == NO_MATCH_PRIORITY
         assert evals[0].is_winner is True
+
+
+# ---------------------------------------------------------------------------
+# Additive scoring + hard-precedence escape hatch (epic teamarr-5ag)
+# ---------------------------------------------------------------------------
+
+
+def _m3u_stream(name: str, account: str, sid: int = 1):
+    s = _stream(name)
+    s.m3u_account_name = account
+    s.id = sid
+    return s
+
+
+class TestAdditiveScoring:
+    def test_scores_sum_within_baseline_band(self):
+        rules = [
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25),
+            StreamOrderingRule("regex", r"(?i)EPG", 99, mode="score", points=10),
+        ]
+        svc = StreamOrderingService(rules)
+        both = svc.compute_priority(_stream("Foo 4K EPG"))
+        only_4k = svc.compute_priority(_stream("Foo 4K"))
+        only_epg = svc.compute_priority(_stream("Foo EPG"))
+        neither = svc.compute_priority(_stream("Foo"))
+        # Higher total score → lower (earlier) priority int
+        assert both < only_4k < neither
+        assert both < only_epg < neither
+        assert only_4k < only_epg  # 25 beats 10
+
+    def test_exact_collapse_formula(self):
+        svc = StreamOrderingService(
+            [StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25)]
+        )
+        assert svc.compute_priority(_stream("x 4K")) == 999 * BAND_STRIDE - 25
+        assert svc.compute_priority(_stream("x")) == 999 * BAND_STRIDE
+
+    def test_hard_band_dominates_score(self):
+        rules = [
+            StreamOrderingRule("m3u", "ProviderA", 1, mode="priority"),
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25),
+        ]
+        svc = StreamOrderingService(rules)
+        a_sd = _m3u_stream("Game SD", "ProviderA")  # band 1, score 0
+        b_4k = _stream("Game 4K")  # baseline band, score +25
+        assert svc.compute_priority(a_sd) < svc.compute_priority(b_4k)
+
+    def test_score_orders_within_same_band(self):
+        rules = [
+            StreamOrderingRule("m3u", "ProviderA", 1, mode="priority"),
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25),
+        ]
+        svc = StreamOrderingService(rules)
+        hd = _m3u_stream("Game HD", "ProviderA")
+        uhd = _m3u_stream("Game 4K", "ProviderA")
+        assert svc.compute_priority(uhd) < svc.compute_priority(hd)
+
+    def test_band1_positive_score_collapses_below_stride(self):
+        # Invariant the UI decode (ManagedChannelsTable.decodePriority) must respect:
+        # a band-1 stream with a positive score collapses to just under BAND_STRIDE
+        # (e.g. 999_975 for +25), NOT above it. The decode must split scored vs.
+        # legacy values on NO_MATCH_PRIORITY, not on BAND_STRIDE, or it renders the
+        # raw collapsed int instead of "1 +25".
+        rules = [
+            StreamOrderingRule("m3u", "ProviderA", 1, mode="priority"),
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25),
+        ]
+        svc = StreamOrderingService(rules)
+        collapsed = svc.compute_priority(_m3u_stream("Game 4K", "ProviderA"))
+        assert collapsed == 1 * BAND_STRIDE - 25  # 999_975
+        assert NO_MATCH_PRIORITY < collapsed < BAND_STRIDE
+
+    def test_negative_points_demote_below_baseline(self):
+        svc = StreamOrderingService(
+            [StreamOrderingRule("regex", r"(?i)SD", 99, mode="score", points=-50)]
+        )
+        assert svc.compute_priority(_stream("Game SD")) > svc.compute_priority(_stream("Game"))
+
+    def test_score_clamped_to_keep_bands_hard(self):
+        # An absurd score must never lift a worse band above a better one.
+        huge = BAND_STRIDE * 5
+        rules = [
+            StreamOrderingRule("m3u", "ProviderA", 1, mode="priority"),
+            StreamOrderingRule("m3u", "ProviderB", 2, mode="priority"),
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=huge),
+        ]
+        svc = StreamOrderingService(rules)
+        a = _m3u_stream("Game SD", "ProviderA")  # band 1, score 0
+        b = _m3u_stream("Game 4K", "ProviderB")  # band 2, clamped huge score
+        assert svc.compute_priority(a) < svc.compute_priority(b)
+
+    def test_sort_streams_orders_by_band_then_score(self):
+        rules = [
+            StreamOrderingRule("m3u", "ProviderA", 1, mode="priority"),
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25),
+            StreamOrderingRule("regex", r"(?i)SD", 99, mode="score", points=-50),
+        ]
+        svc = StreamOrderingService(rules)
+        a_hd = _m3u_stream("A HD", "ProviderA", sid=1)  # band 1, 0
+        a_4k = _m3u_stream("A 4K", "ProviderA", sid=2)  # band 1, +25
+        b_4k = _stream("B 4K")  # baseline, +25
+        b_4k.id = 3
+        b_sd = _stream("B SD")  # baseline, -50
+        b_sd.id = 4
+        ordered = svc.sort_streams([a_hd, b_sd, b_4k, a_4k])
+        assert [s.id for s in ordered] == [2, 1, 3, 4]
+
+    def test_evaluate_rules_reports_score_contributors(self):
+        rules = [
+            StreamOrderingRule("m3u", "ProviderA", 1, mode="priority"),
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25),
+        ]
+        svc = StreamOrderingService(rules)
+        evals = svc.evaluate_rules(_m3u_stream("Game 4K", "ProviderA"))
+        winners = [e for e in evals if e.is_winner]
+        assert len(winners) == 1
+        assert winners[0].type == "m3u" and winners[0].mode == "priority"
+        score_entries = [e for e in evals if e.mode == "score"]
+        assert len(score_entries) == 1
+        assert score_entries[0].points == 25
+        assert score_entries[0].is_winner is False
+
+    def test_attach_time_compute_honors_epg_and_dp_group_fields(self, seeded_db):
+        """compute_stream_priority_from_rules must apply dispatcharr_group /
+        epg_match / stream_type rules at attach time (#379).
+
+        Before the fix the helper's stub stream carried only name/account/group,
+        so these rule types silently never matched and the order pushed to
+        Dispatcharr at attach was wrong until the end-of-run reorder pass.
+        """
+        from teamarr.database.channels import compute_stream_priority_from_rules
+        from teamarr.database.settings.update import update_stream_ordering_rules
+
+        update_stream_ordering_rules(
+            seeded_db,
+            [
+                {"type": "dispatcharr_group", "value": "Sports CA", "priority": 99,
+                 "mode": "score", "points": 800},
+                {"type": "epg_match", "value": "", "priority": 99,
+                 "mode": "score", "points": 10},
+                {"type": "stream_type", "value": "team", "priority": 99,
+                 "mode": "score", "points": -50},
+            ],
+        )
+        seeded_db.commit()
+
+        epg_in_group = compute_stream_priority_from_rules(
+            seeded_db, "TSN4", None, None,
+            match_method="epg", dispatcharr_channel_group="Sports CA",
+        )
+        assert epg_in_group == NO_MATCH_PRIORITY * BAND_STRIDE - 810
+
+        team_stream = compute_stream_priority_from_rules(
+            seeded_db, "Pirates 24/7", None, None, match_type="team",
+        )
+        assert team_stream == NO_MATCH_PRIORITY * BAND_STRIDE + 50
+
+        plain = compute_stream_priority_from_rules(seeded_db, "ESPN", None, None)
+        assert plain == NO_MATCH_PRIORITY * BAND_STRIDE
+
+    def test_details_expose_band_and_score(self):
+        rules = [
+            StreamOrderingRule("m3u", "ProviderA", 3, mode="priority"),
+            StreamOrderingRule("regex", r"(?i)4K", 99, mode="score", points=25),
+        ]
+        svc = StreamOrderingService(rules)
+        d = svc.compute_priority_with_details(_m3u_stream("Game 4K", "ProviderA"))
+        assert d.band == 3
+        assert d.score == 25
+        assert d.matched_rule_type == "m3u"
+        assert d.computed_priority == 3 * BAND_STRIDE - 25

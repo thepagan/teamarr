@@ -13,7 +13,8 @@ from typing import Any
 
 from teamarr.core import Event
 
-from .timing import compute_stream_window, is_stream_in_window
+from ._host import _LifecycleHost
+from .timing import compute_stream_window, is_channel_event_live, is_stream_in_window
 from .types import (
     ChannelCreationResult,
     StreamProcessResult,
@@ -23,7 +24,7 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 
-class ChannelCreator:
+class ChannelCreator(_LifecycleHost):
     """Creates channels from matched streams and handles duplicate modes.
 
     Mixin for ChannelLifecycleService — relies on the coordinator's managers,
@@ -354,7 +355,9 @@ class ChannelCreator:
                                 }
                             )
 
-                            # Log history
+                            # Log history — a successful create always yields a
+                            # local managed-channel id (invariant of _create_channel).
+                            assert channel_result.channel_id is not None
                             log_channel_history(
                                 conn=conn,
                                 managed_channel_id=channel_result.channel_id,
@@ -377,7 +380,7 @@ class ChannelCreator:
 
                     except Exception as stream_err:
                         event_id = matched.get("event")
-                        if hasattr(event_id, "id"):
+                        if event_id is not None and hasattr(event_id, "id"):
                             event_id = event_id.id
                         stream_name = matched.get("stream", {}).get("name", "Unknown")
                         logger.error(
@@ -455,12 +458,15 @@ class ChannelCreator:
             mark_channel_deleted,
             remove_stream_from_channel,
             stream_exists_on_channel,
+            update_stream_account_name,
             update_stream_window,
         )
 
         result = StreamProcessResult()
         stream_name = stream.get("name", "")
         stream_id = stream.get("id")
+        # A matched Dispatcharr stream always carries an integer id.
+        assert stream_id is not None
         disp_channel = None  # Dispatcharr's view of this channel (for phantom detection)
 
         # Verify channel exists in Dispatcharr.
@@ -525,6 +531,7 @@ class ChannelCreator:
                 group_config=group_config,
                 template=template,
                 segment=segment,
+                stream_windowed=attach_at is not None,
             )
             result.merge(settings_result)
             return result
@@ -538,7 +545,13 @@ class ChannelCreator:
                 )
                 source_group_id = group_config.get("id")
                 priority = compute_stream_priority_from_rules(
-                    conn, stream_name, m3u_account_name, source_group_id
+                    conn,
+                    stream_name,
+                    m3u_account_name,
+                    source_group_id,
+                    match_type=match_type,
+                    match_method=match_method,
+                    dispatcharr_channel_group=stream.get("dp_channel_group"),
                 )
                 if priority is None:
                     priority = get_next_stream_priority(conn, existing.id)
@@ -585,6 +598,30 @@ class ChannelCreator:
                             )
                             ordered_streams = [s for s in ordered_streams if s not in phantoms]
 
+                    # Live-event #1 pin (#232): a stream that arrives while the
+                    # event is airing may out-prioritize the current top slot —
+                    # the one a viewer is watching. Slot it in right below #1
+                    # instead; rule-truth priorities stay in the DB, so normal
+                    # order resumes on the first post-event push.
+                    if (
+                        len(ordered_streams) > 1
+                        and ordered_streams[0] == stream_id
+                        and is_channel_event_live(
+                            existing.event_date, existing.scheduled_delete_at
+                        )
+                    ):
+                        ordered_streams[0], ordered_streams[1] = (
+                            ordered_streams[1],
+                            ordered_streams[0],
+                        )
+                        logger.info(
+                            "[STREAM_AUDIT] pin: ch='%s' live event — new stream %d "
+                            "slotted below current #1 %d (#232)",
+                            existing.channel_name,
+                            stream_id,
+                            ordered_streams[0],
+                        )
+
                     logger.info(
                         "[STREAM_AUDIT] consolidate add: ch='%s' (db_id=%d, d_id=%s) "
                         "added stream_id=%d, db_ordered=%s",
@@ -620,17 +657,32 @@ class ChannelCreator:
                         "channel_name": existing.channel_name,
                     }
                 )
-            elif attach_at is not None and detach_at is not None:
-                # Stream already attached: recompute its EPG time-window from the
-                # fresh program slot + current buffers (183.5 / bead 095) so a
-                # buffer-setting change takes effect on the next run, not only at
-                # first attach. Guarded on a non-None window: don't clobber a
-                # full-life/name-matched stream (None,None) or wipe a window on a
-                # transient EPG miss. Reconciliation re-pushes if membership
-                # changed — no manual Dispatcharr update needed here.
-                update_stream_window(
-                    conn, existing.id, stream_id, attach_at, detach_at
-                )
+            else:
+                # Stream already attached: self-heal the stored M3U account name
+                # (#297) — rows attached before per-stream account resolution carry
+                # the group's single account name, mislabeling multi-login streams.
+                # Guarded on a resolved name: don't null on a transient
+                # list-accounts failure.
+                resolved_account = stream.get("m3u_account_name")
+                if resolved_account:
+                    update_stream_account_name(
+                        conn,
+                        existing.id,
+                        stream_id,
+                        resolved_account,
+                        stream.get("m3u_account_id"),
+                    )
+                if attach_at is not None and detach_at is not None:
+                    # Recompute the EPG time-window from the fresh program slot +
+                    # current buffers (183.5 / bead 095) so a buffer-setting change
+                    # takes effect on the next run, not only at first attach.
+                    # Guarded on a non-None window: don't clobber a full-life/
+                    # name-matched stream (None,None) or wipe a window on a
+                    # transient EPG miss. Reconciliation re-pushes if membership
+                    # changed — no manual Dispatcharr update needed here.
+                    update_stream_window(
+                        conn, existing.id, stream_id, attach_at, detach_at
+                    )
 
             result.existing.append(
                 {
@@ -660,6 +712,7 @@ class ChannelCreator:
             group_config=group_config,
             template=template,
             segment=segment,
+            stream_windowed=attach_at is not None,
         )
         result.merge(settings_result)
 
@@ -727,6 +780,8 @@ class ChannelCreator:
         event_provider = getattr(event, "provider", "espn")
         stream_name = stream.get("name", "")
         stream_id = stream.get("id")
+        # A matched Dispatcharr stream always carries an integer id.
+        assert stream_id is not None
         group_id = group_config.get("id")
 
         # For segments, use segment-aware event_id for DB storage
@@ -866,7 +921,9 @@ class ChannelCreator:
                 exception_keyword=matched_keyword,
                 feed_team_id=feed_team_id,
                 home_team=event.home_team.name if event.home_team else None,
+                home_team_abbrev=event.home_team.abbreviation if event.home_team else None,
                 away_team=event.away_team.name if event.away_team else None,
+                away_team_abbrev=event.away_team.abbreviation if event.away_team else None,
                 # Use segment-specific start time for UFC segments, otherwise event start
                 event_date=(segment_start or event.start_time).isoformat()
                 if (segment_start or event.start_time)
@@ -891,7 +948,10 @@ class ChannelCreator:
                 priority=0,
                 exception_keyword=matched_keyword,
                 m3u_account_id=stream.get("m3u_account_id"),
-                m3u_account_name=group_config.get("m3u_account_name"),
+                # Per-stream account name first (#297): the group-config fallback
+                # mislabels multi-login streams with one account for the whole group.
+                m3u_account_name=stream.get("m3u_account_name")
+                or group_config.get("m3u_account_name"),
                 source_group_id=group_id,
                 match_type=match_type,
                 match_method=match_method,

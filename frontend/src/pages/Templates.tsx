@@ -1,7 +1,7 @@
 import { useState, useRef } from "react"
 import { useNavigate } from "react-router-dom"
 import { toast } from "sonner"
-import { Plus, Trash2, Pencil, Loader2, Copy, Download, Upload, Tv, User } from "lucide-react"
+import { Plus, Trash2, Pencil, LoaderCircle, Copy, Download, Upload, Tv, User } from "lucide-react"
 import { Alert } from "@/components/ui/alert"
 import { Spinner } from "@/components/ui/spinner"
 import { Button } from "@/components/ui/button"
@@ -29,6 +29,10 @@ import {
   useDeleteTemplate,
 } from "@/hooks/useTemplates"
 import { getTemplate, type Template } from "@/api/templates"
+import { useQuery } from "@tanstack/react-query"
+import { getLeagues } from "@/api/teams"
+import { getLeagueDisplayName, getSportDisplayName } from "@/lib/utils"
+import { useSports } from "@/hooks/useSports"
 import { TemplateAssignmentManager } from "@/components/TemplateAssignmentModal"
 import { useSubscription } from "@/hooks/useSubscription"
 
@@ -39,6 +43,16 @@ export function Templates() {
   const subscribedLeagues = subscription?.leagues ?? []
   const createMutation = useCreateTemplate()
   const deleteMutation = useDeleteTemplate()
+
+  // Friendly names for the Usage chips (league slugs like "fifa.world" are
+  // not user-facing). Query is shared/cached with the assignment manager below.
+  const { data: leaguesResponse } = useQuery({ queryKey: ["leagues"], queryFn: () => getLeagues() })
+  const leagueName = (slug: string) => {
+    const lg = leaguesResponse?.leagues?.find((l) => l.slug === slug)
+    return lg ? getLeagueDisplayName(lg, true) : slug.toUpperCase()
+  }
+  const { data: sportsData } = useSports()
+  const sportName = (s: string) => getSportDisplayName(s, sportsData?.sports)
 
   const [deleteConfirm, setDeleteConfirm] = useState<Template | null>(null)
   const [isImporting, setIsImporting] = useState(false)
@@ -106,6 +120,12 @@ export function Templates() {
             idle_content: template.idle_content,
             idle_conditional: template.idle_conditional,
             idle_offseason: template.idle_offseason,
+            // Explicit [] when absent (pre-#420 exports): the schema's seeded
+            // postgame default would otherwise shadow an imported legacy
+            // conditional (non-empty rows win over the legacy shim).
+            pregame_conditional_rows: template.pregame_conditional_rows ?? [],
+            postgame_conditional_rows: template.postgame_conditional_rows ?? [],
+            idle_conditional_rows: template.idle_conditional_rows ?? [],
             conditional_descriptions: template.conditional_descriptions,
             event_channel_name: template.event_channel_name,
             event_channel_logo_url: template.event_channel_logo_url,
@@ -160,6 +180,9 @@ export function Templates() {
         idle_content: fullTemplate.idle_content,
         idle_conditional: fullTemplate.idle_conditional,
         idle_offseason: fullTemplate.idle_offseason,
+        pregame_conditional_rows: fullTemplate.pregame_conditional_rows ?? [],
+        postgame_conditional_rows: fullTemplate.postgame_conditional_rows ?? [],
+        idle_conditional_rows: fullTemplate.idle_conditional_rows ?? [],
         conditional_descriptions: fullTemplate.conditional_descriptions,
         event_channel_name: fullTemplate.event_channel_name,
         event_channel_logo_url: fullTemplate.event_channel_logo_url,
@@ -217,7 +240,7 @@ export function Templates() {
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={handleImportClick} disabled={isImporting}>
             {isImporting ? (
-              <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              <LoaderCircle className="h-4 w-4 mr-1 animate-spin" />
             ) : (
               <Upload className="h-4 w-4 mr-1" />
             )}
@@ -236,6 +259,33 @@ export function Templates() {
           onChange={handleImportFile}
         />
       </div>
+
+      {/* Seeded-set scoping hint (tvnk.1 decision d): shown while any curated
+          starter template is still unassigned. Names mirror the backend set
+          (teamarr/database/default_templates.py). */}
+      {(() => {
+        const SEEDED_NAMES = new Set([
+          "Default Team (Starter)", "Soccer Team (Starter)", "College Team (Starter)",
+          "Default Event (Starter)", "College Event (Starter)", "Soccer Club Event (Starter)",
+          "Combat Event (Starter)", "International Event (Starter)", "Tennis Event (Starter)",
+        ])
+        const unassignedSeeded = (templates ?? []).filter(
+          (t) =>
+            SEEDED_NAMES.has(t.name) &&
+            !(t.team_count && t.team_count > 0) &&
+            !(t.global_assignments && t.global_assignments.length > 0)
+        )
+        if (unassignedSeeded.length === 0) return null
+        return (
+          <Alert variant="info" className="mb-3">
+            {unassignedSeeded.length} starter template{unassignedSeeded.length !== 1 ? "s are" : " is"} not
+            assigned yet. Recommended scoping — Default Team/Event: global defaults ·
+            Soccer Team/Club Event: soccer leagues · College Team/Event: NCAA ·
+            Combat: UFC/boxing · International: national-team tournaments ·
+            Tennis: ATP/WTA. Assign below or via Template Assignments.
+          </Alert>
+        )
+      })()}
 
       <div className="border border-border rounded-lg overflow-hidden">
           {isLoading ? (
@@ -286,14 +336,14 @@ export function Templates() {
                               if (a.leagues?.length) {
                                 return (
                                   <Badge key={i} variant="outline" className="text-xs">
-                                    {a.leagues.join(", ")}
+                                    {a.leagues.map(leagueName).join(", ")}
                                   </Badge>
                                 )
                               }
                               if (a.sports?.length) {
                                 return (
                                   <Badge key={i} variant="outline" className="text-xs">
-                                    {a.sports.join(", ")}
+                                    {a.sports.map(sportName).join(", ")}
                                   </Badge>
                                 )
                               }
@@ -410,7 +460,7 @@ export function Templates() {
               onClick={handleDelete}
               disabled={deleteMutation.isPending}
             >
-              {deleteMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              {deleteMutation.isPending && <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />}
               Delete
             </Button>
           </DialogFooter>

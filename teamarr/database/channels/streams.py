@@ -38,7 +38,7 @@ def add_stream_to_channel(
         ID of created stream record
     """
     columns = ["managed_channel_id", "dispatcharr_stream_id", "priority"]
-    values = [managed_channel_id, dispatcharr_stream_id, priority]
+    values: list = [managed_channel_id, dispatcharr_stream_id, priority]
 
     if stream_name:
         columns.append("stream_name")
@@ -70,6 +70,7 @@ def add_stream_to_channel(
         values,
     )
     stream_id = cursor.lastrowid
+    assert stream_id is not None  # just-inserted row always has a rowid
     logger.debug(
         "[ATTACHED] Stream %d to channel %d priority=%d",
         dispatcharr_stream_id,
@@ -178,17 +179,29 @@ def compute_stream_priority_from_rules(
     stream_name: str | None = None,
     m3u_account_name: str | None = None,
     source_group_id: int | None = None,
+    match_type: str = "event",
+    match_method: str | None = None,
+    dispatcharr_channel_group: str | None = None,
 ) -> int:
     """Compute priority for a stream based on ordering rules.
 
     If rules are defined, computes priority based on first matching rule.
     If no rules or no match, returns 999 (sort to end).
 
+    Callers should pass every field they have (#379): rule types match on
+    match_type (stream_type rules), match_method (epg_match rules), and
+    dispatcharr_channel_group (dispatcharr_group rules) — omitting them makes
+    those rules silently non-matching at attach time, so the order pushed to
+    Dispatcharr is wrong until the end-of-generation reorder pass corrects it.
+
     Args:
         conn: Database connection
         stream_name: Stream display name (for regex matching)
         m3u_account_name: M3U account name (for m3u type matching)
         source_group_id: Source group ID (for group type matching)
+        match_type: 'event' or 'team' (for stream_type rules)
+        match_method: 'epg', 'fuzzy', etc. (for epg_match rules)
+        dispatcharr_channel_group: DP channel group name (for dispatcharr_group rules)
 
     Returns:
         Computed priority (lower = higher priority)
@@ -209,6 +222,9 @@ def compute_stream_priority_from_rules(
         stream_name=stream_name,
         m3u_account_name=m3u_account_name,
         source_group_id=source_group_id,
+        match_type=match_type,
+        match_method=match_method,
+        dispatcharr_channel_group=dispatcharr_channel_group,
     )
 
     return ordering_service.compute_priority(temp_stream)
@@ -264,6 +280,51 @@ def update_stream_name(
             managed_channel_id,
             dispatcharr_stream_id,
             new_name,
+        )
+    return cursor.rowcount > 0
+
+
+def update_stream_account_name(
+    conn: Connection,
+    managed_channel_id: int,
+    dispatcharr_stream_id: int,
+    account_name: str,
+    account_id: int | None = None,
+) -> bool:
+    """Refresh the stored M3U account name (and optionally id) for an active stream.
+
+    Self-heal for #297: rows attached before per-stream account resolution carry
+    the group's single configured account name, mislabeling multi-login streams.
+    Called each generation for already-attached streams; the WHERE guard makes it
+    a no-op when the stored values already match.
+
+    Returns:
+        True if a row was updated (values actually changed), False otherwise
+    """
+    cursor = conn.execute(
+        """UPDATE managed_channel_streams
+           SET m3u_account_name = ?,
+               m3u_account_id = COALESCE(?, m3u_account_id)
+           WHERE managed_channel_id = ? AND dispatcharr_stream_id = ?
+             AND removed_at IS NULL
+             AND (m3u_account_name IS NOT ?
+                  OR (? IS NOT NULL AND m3u_account_id IS NOT ?))""",
+        (
+            account_name,
+            account_id,
+            managed_channel_id,
+            dispatcharr_stream_id,
+            account_name,
+            account_id,
+            account_id,
+        ),
+    )
+    if cursor.rowcount > 0:
+        logger.debug(
+            "Updated M3U account for channel=%d stream=%d: %s",
+            managed_channel_id,
+            dispatcharr_stream_id,
+            account_name,
         )
     return cursor.rowcount > 0
 

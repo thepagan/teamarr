@@ -4,6 +4,7 @@ These variables provide home/away context, positional team references,
 and feed team data for streams broken out into home/away channels.
 """
 
+from teamarr.core.naming import matchup_connector, ranked_with_article, team_with_article
 from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
     Category,
@@ -86,13 +87,16 @@ def extract_home_away_text(ctx: TemplateContext, game_ctx: GameContext | None) -
     name="vs_at",
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
-    description="'vs' if home, 'at' if away",
+    description="'vs' if home, 'at' if away; neutral-site games read 'vs'",
     scope=TemplateScope.TEAM_ONLY,
 )
 def extract_vs_at(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_home(ctx, game_ctx)
     if is_home is None:
         return ""
+    # Neutral site: "at Opponent" misframes a game nobody hosts (#355 item 3).
+    if game_ctx and game_ctx.event and game_ctx.event.neutral_site:
+        return "vs"
     return "vs" if is_home else "at"
 
 
@@ -100,13 +104,15 @@ def extract_vs_at(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     name="vs_@",
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
-    description="'vs' if home, '@' if away",
+    description="'vs' if home, '@' if away; neutral-site games read 'vs'",
     scope=TemplateScope.TEAM_ONLY,
 )
 def extract_vs_symbol(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     is_home = _is_home(ctx, game_ctx)
     if is_home is None:
         return ""
+    if game_ctx and game_ctx.event and game_ctx.event.neutral_site:
+        return "vs"
     return "vs" if is_home else "@"
 
 
@@ -158,28 +164,44 @@ def extract_away_team_short(ctx: TemplateContext, game_ctx: GameContext | None) 
     return game_ctx.event.away_team.short_name
 
 
+def _abbrev_or_name(team) -> str:
+    """Abbreviation (uppercased) with a graceful fallback for leagues whose
+    teams have none: short_name, then full name — kept as-is (uppercasing a
+    full club name would shout). Retires the need for a separate "No-Abbrev"
+    template variant (#329)."""
+    if team.abbreviation:
+        return team.abbreviation.upper()
+    return team.short_name or team.name
+
+
 @register_variable(
     name="home_team_abbrev",
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
-    description="Home team abbreviation uppercase",
+    description=(
+        "Home team abbreviation uppercase (falls back to short/full name "
+        "when the league has none)"
+    ),
 )
 def extract_home_team_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx or not game_ctx.event:
         return ""
-    return game_ctx.event.home_team.abbreviation.upper()
+    return _abbrev_or_name(game_ctx.event.home_team)
 
 
 @register_variable(
     name="away_team_abbrev",
     category=Category.HOME_AWAY,
     suffix_rules=SuffixRules.ALL,
-    description="Away team abbreviation uppercase",
+    description=(
+        "Away team abbreviation uppercase (falls back to short/full name "
+        "when the league has none)"
+    ),
 )
 def extract_away_team_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx or not game_ctx.event:
         return ""
-    return game_ctx.event.away_team.abbreviation.upper()
+    return _abbrev_or_name(game_ctx.event.away_team)
 
 
 @register_variable(
@@ -191,7 +213,7 @@ def extract_away_team_abbrev(ctx: TemplateContext, game_ctx: GameContext | None)
 def extract_home_team_abbrev_lower(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx or not game_ctx.event:
         return ""
-    return game_ctx.event.home_team.abbreviation.lower()
+    return _abbrev_or_name(game_ctx.event.home_team).lower()
 
 
 @register_variable(
@@ -203,7 +225,7 @@ def extract_home_team_abbrev_lower(ctx: TemplateContext, game_ctx: GameContext |
 def extract_away_team_abbrev_lower(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not game_ctx or not game_ctx.event:
         return ""
-    return game_ctx.event.away_team.abbreviation.lower()
+    return _abbrev_or_name(game_ctx.event.away_team).lower()
 
 
 @register_variable(
@@ -334,10 +356,7 @@ def extract_feed_team_logo(ctx: TemplateContext, game_ctx: GameContext | None) -
 def extract_is_home_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team or not game_ctx or not game_ctx.event:
         return ""
-    is_home = (
-        game_ctx.event.home_team
-        and game_ctx.event.home_team.id == ctx.feed_team.id
-    )
+    is_home = game_ctx.event.home_team and game_ctx.event.home_team.id == ctx.feed_team.id
     return "true" if is_home else "false"
 
 
@@ -351,10 +370,7 @@ def extract_is_home_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> 
 def extract_is_away_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team or not game_ctx or not game_ctx.event:
         return ""
-    is_away = (
-        game_ctx.event.away_team
-        and game_ctx.event.away_team.id == ctx.feed_team.id
-    )
+    is_away = game_ctx.event.away_team and game_ctx.event.away_team.id == ctx.feed_team.id
     return "true" if is_away else "false"
 
 
@@ -368,10 +384,7 @@ def extract_is_away_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> 
 def extract_feed_home_away(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team or not game_ctx or not game_ctx.event:
         return ""
-    is_home = (
-        game_ctx.event.home_team
-        and game_ctx.event.home_team.id == ctx.feed_team.id
-    )
+    is_home = game_ctx.event.home_team and game_ctx.event.home_team.id == ctx.feed_team.id
     return "Home" if is_home else "Away"
 
 
@@ -393,10 +406,7 @@ def extract_feed_home_away(ctx: TemplateContext, game_ctx: GameContext | None) -
 def extract_broadcast_feed(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team or not game_ctx or not game_ctx.event:
         return ""
-    is_home = (
-        game_ctx.event.home_team
-        and game_ctx.event.home_team.id == ctx.feed_team.id
-    )
+    is_home = game_ctx.event.home_team and game_ctx.event.home_team.id == ctx.feed_team.id
     return "Home Team Feed" if is_home else "Away Team Feed"
 
 
@@ -407,9 +417,103 @@ def extract_broadcast_feed(ctx: TemplateContext, game_ctx: GameContext | None) -
     description="'{Team Name} Feed' (e.g., 'Seattle Mariners Feed') or '' if no feed",
     scope=TemplateScope.EVENT_ONLY,
 )
-def extract_broadcast_feed_team(
-    ctx: TemplateContext, game_ctx: GameContext | None
-) -> str:
+def extract_broadcast_feed_team(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
     if not ctx.feed_team:
         return ""
     return f"{ctx.feed_team.name} Feed"
+
+
+# --- Article-aware naming + matchup connector (tvnk.7, #329) ---
+# Gracenote convention: clubs/franchises take "the", national teams and
+# individual-sport competitors don't. Lowercase "the" — the resolver
+# capitalizes a leading "the " when it opens the rendered text.
+
+
+@register_variable(
+    name="home_team_the",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.ALL,
+    description="Home team name with Gracenote-convention article — "
+    "'the Detroit Pistons' for clubs, 'Netherlands' for national teams",
+)
+def extract_home_team_the(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    if not game_ctx or not game_ctx.event:
+        return ""
+    event = game_ctx.event
+    return team_with_article(event.home_team.name, event.league, event.sport)
+
+
+@register_variable(
+    name="away_team_the",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.ALL,
+    description="Away team name with Gracenote-convention article — "
+    "'the Green Bay Packers' for clubs, 'Japan' for national teams",
+)
+def extract_away_team_the(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    if not game_ctx or not game_ctx.event:
+        return ""
+    event = game_ctx.event
+    return team_with_article(event.away_team.name, event.league, event.sport)
+
+
+@register_variable(
+    name="home_team_ranked_the",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.ALL,
+    description="Home team with rank and Gracenote article composed — "
+    "'the No. 16 Commodores' ranked, 'the Michigan Wolverines' unranked",
+)
+def extract_home_team_ranked_the(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    if not game_ctx or not game_ctx.event:
+        return ""
+    from teamarr.templates.variables.rankings import extract_home_team_rank
+
+    event = game_ctx.event
+    rank = extract_home_team_rank(ctx, game_ctx)
+    return ranked_with_article(event.home_team.name, event.league, event.sport, rank)
+
+
+@register_variable(
+    name="away_team_ranked_the",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.ALL,
+    description="Away team with rank and Gracenote article composed — "
+    "'the No. 14 Buckeyes' ranked, 'the Ohio State Buckeyes' unranked",
+)
+def extract_away_team_ranked_the(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    if not game_ctx or not game_ctx.event:
+        return ""
+    from teamarr.templates.variables.rankings import extract_away_team_rank
+
+    event = game_ctx.event
+    rank = extract_away_team_rank(ctx, game_ctx)
+    return ranked_with_article(event.away_team.name, event.league, event.sport, rank)
+
+
+@register_variable(
+    name="at_vs",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.ALL,
+    description="Perspective-free matchup connector between away and home — "
+    "'at' for US team sports ('Mystics at Liberty'), 'vs.' otherwise "
+    "('Scotland vs. Morocco'); neutral-site games always read 'vs.'",
+)
+def extract_at_vs(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    if not game_ctx or not game_ctx.event:
+        return ""
+    return matchup_connector(game_ctx.event.sport, game_ctx.event.neutral_site)
+
+
+@register_variable(
+    name="home_away_verb",
+    category=Category.HOME_AWAY,
+    suffix_rules=SuffixRules.ALL,
+    description="Prose verb from the team's perspective: 'host' at home, 'visit' away",
+    scope=TemplateScope.TEAM_ONLY,
+)
+def extract_home_away_verb(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    is_home = _is_home(ctx, game_ctx)
+    if is_home is None:
+        return ""
+    return "host" if is_home else "visit"

@@ -251,6 +251,138 @@ class TestDetectTeamInStreamName:
         )
         assert result == home_team
 
+    def test_team_branded_channel_token(self, home_team, away_team):
+        """'Yankees.TV' is a team-specific feed even with no feed keyword (#343)."""
+        from teamarr.consumers.event_group_processor import EventGroupProcessor
+
+        result = EventGroupProcessor._detect_team_in_stream_name(
+            "mlb 04: yankees @ orioles (yankees.tv)", home_team, away_team
+        )
+        assert result == away_team
+
+    def test_team_branded_channel_token_variants(self, home_team, away_team):
+        """Spaced and run-together forms count too: 'Yankees TV', 'YankeesTV'."""
+        from teamarr.consumers.event_group_processor import EventGroupProcessor
+
+        for variant in ("yankees @ orioles yankees tv", "yankees @ orioles (yankeestv)"):
+            result = EventGroupProcessor._detect_team_in_stream_name(
+                variant, home_team, away_team
+            )
+            assert result == away_team, variant
+
+    def test_team_branded_domain_suffix(self, home_team, away_team):
+        """Whitelisted domain-style tokens count: 'Yankees.US', 'Yankees.Live'."""
+        from teamarr.consumers.event_group_processor import EventGroupProcessor
+
+        for variant in (
+            "yankees @ orioles (yankees.us)",
+            "yankees @ orioles yankees.live",
+        ):
+            result = EventGroupProcessor._detect_team_in_stream_name(
+                variant, home_team, away_team
+            )
+            assert result == away_team, variant
+
+    def test_dot_separated_stream_name_not_a_feed(self, home_team, away_team):
+        """Dot-separated provider naming ('MLB.Yankees.Orioles.720p') must not
+        read 'Yankees.Orioles' as a domain token — TLDs are whitelisted."""
+        from teamarr.consumers.event_group_processor import EventGroupProcessor
+
+        result = EventGroupProcessor._detect_team_in_stream_name(
+            "mlb.yankees.orioles.720p", home_team, away_team
+        )
+        assert result is None
+
+
+# ===========================================================================
+# Broadcast-market feed detection (#343)
+# ===========================================================================
+
+
+class TestDetectFeedFromBroadcastMarkets:
+    """_detect_feed_from_broadcast_markets() maps ESPN broadcasts[].market
+    names found in the stream name to that side's team."""
+
+    @pytest.fixture
+    def event(self):
+        @dataclass
+        class MockEvent:
+            home_team: object
+            away_team: object
+            broadcast_markets: dict
+
+        return MockEvent(
+            home_team=MockTeam(
+                id="1", provider="espn", name="Chicago Cubs", short_name="Cubs",
+                abbreviation="CHC", league="mlb", sport="baseball",
+            ),
+            away_team=MockTeam(
+                id="2", provider="espn", name="Milwaukee Brewers", short_name="Brewers",
+                abbreviation="MIL", league="mlb", sport="baseball",
+            ),
+            broadcast_markets={
+                "MLB.TV": "national",
+                "Brewers.TV": "away",
+                "Marquee Sports Network": "home",
+            },
+        )
+
+    def _detect(self, stream_name, event):
+        from teamarr.consumers.event_group_processor import EventGroupProcessor
+
+        return EventGroupProcessor._detect_feed_from_broadcast_markets(
+            stream_name.lower(), event
+        )
+
+    def test_away_market_name_matches(self, event):
+        """The #343 report: 'Brewers.TV' resolves to the away feed."""
+        assert self._detect("MLB 04: MIL @ CHC (Brewers.TV)", event) == event.away_team
+
+    def test_home_market_name_matches(self, event):
+        """Regional networks with no team token resolve via market too."""
+        assert self._detect("MIL @ CHC Marquee Sports Network", event) == event.home_team
+
+    def test_national_market_never_makes_a_feed(self, event):
+        assert self._detect("MIL @ CHC MLB.TV", event) is None
+
+    def test_both_sides_matching_is_ambiguous(self, event):
+        assert self._detect("Brewers.TV / Marquee Sports Network combo", event) is None
+
+    def test_no_broadcast_data(self, event):
+        event.broadcast_markets = {}
+        assert self._detect("MIL @ CHC (Brewers.TV)", event) is None
+
+    def test_short_names_skipped(self, event):
+        """Names under 3 chars are skipped (false-positive guard)."""
+        event.broadcast_markets = {"TV": "away"}
+        assert self._detect("some tv stream", event) is None
+
+    # -- fuzzy tiers (#343 follow-up): streams rarely quote the listing --
+
+    def test_punctuation_variant_matches(self, event):
+        """'Brewers.TV' listed, stream says 'BREWERS TV'."""
+        assert self._detect("MLB 04: MIL @ CHC BREWERS TV", event) == event.away_team
+
+    def test_run_together_variant_matches(self, event):
+        """'Brewers.TV' listed, stream says 'BrewersTV'."""
+        assert self._detect("MLB 04: MIL @ CHC (BrewersTV)", event) == event.away_team
+
+    def test_abbreviated_multiword_name_fuzzy_matches(self, event):
+        """'Bally Sports Wisconsin' listed, stream says 'Bally Sports WI'."""
+        event.broadcast_markets = {"Bally Sports Wisconsin": "away"}
+        assert self._detect("MIL @ CHC | Bally Sports WI", event) == event.away_team
+
+    def test_short_single_token_stays_exact(self, event):
+        """'YES' must not fuzzy-match into unrelated words."""
+        event.broadcast_markets = {"YES": "home"}
+        assert self._detect("yesterday replay: MIL @ CHC", event) is None
+        assert self._detect("MIL @ CHC on YES", event) == event.home_team
+
+    def test_matchup_team_name_alone_does_not_match(self, event):
+        """'Brewers.TV' listed: a plain matchup title mentioning the Brewers
+        (no channel token) must not become a team feed."""
+        assert self._detect("Milwaukee Brewers @ Chicago Cubs", event) is None
+
 
 # ===========================================================================
 # Feed label generation

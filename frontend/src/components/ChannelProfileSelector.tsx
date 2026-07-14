@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { toast } from "sonner"
-import { Plus, X, Loader2 } from "lucide-react"
+import { Plus, X, LoaderCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -149,7 +149,7 @@ export function ChannelProfileSelector({
   if (isLoading) {
     return (
       <div className={cn("flex items-center justify-center py-4", className)}>
-        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        <LoaderCircle className="h-4 w-4 animate-spin text-muted-foreground" />
       </div>
     )
   }
@@ -221,7 +221,7 @@ export function ChannelProfileSelector({
             disabled={creating || !newName.trim()}
             onClick={handleCreate}
           >
-            {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
+            {creating ? <LoaderCircle className="h-4 w-4 animate-spin" /> : "Create"}
           </Button>
           <Button
             type="button"
@@ -381,56 +381,4 @@ export function ChannelProfileSelector({
       )}
     </div>
   )
-}
-
-/**
- * Convert selected IDs to API format.
- * - All profiles selected (no wildcards) → null (backend will use all)
- * - No selections at all → [] (no profiles)
- * - Any specific selections → those IDs/wildcards
- */
-export function profileIdsToApi(
-  selectedIds: (number | string)[],
-  allProfileIds: number[]
-): (number | string)[] | null {
-  if (selectedIds.length === 0) {
-    return [] // No profiles
-  }
-
-  // Separate numeric IDs from wildcards
-  const numericIds = selectedIds.filter((x): x is number => typeof x === "number")
-  const wildcardIds = selectedIds.filter((x): x is string => typeof x === "string")
-
-  // Check if all profiles are selected AND no wildcards
-  const selectedSet = new Set(numericIds)
-  const allSelected = allProfileIds.length > 0 &&
-    allProfileIds.every(id => selectedSet.has(id))
-
-  // If all profiles selected with no wildcards, return null (meaning all)
-  if (allSelected && wildcardIds.length === 0) {
-    return null
-  }
-
-  return selectedIds
-}
-
-/**
- * Convert API format to selected IDs for display.
- * - null → select all profiles (no wildcards)
- * - [] → select none
- * - [...] → those specific IDs/wildcards
- */
-export function apiToProfileIds(
-  apiValue: (number | string)[] | null | undefined,
-  allProfileIds: number[]
-): (number | string)[] {
-  if (apiValue === null || apiValue === undefined) {
-    // null = all profiles (no wildcards)
-    return [...allProfileIds]
-  }
-  if (apiValue.length === 1 && apiValue[0] === 0) {
-    // [0] sentinel = all profiles (legacy format)
-    return [...allProfileIds]
-  }
-  return apiValue
 }

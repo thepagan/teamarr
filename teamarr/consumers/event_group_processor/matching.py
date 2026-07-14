@@ -7,6 +7,7 @@ resolution and UFC/racing segment expansion of the matched-stream list.
 import logging
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from teamarr.consumers.matching import BatchMatchResult, StreamCategory, StreamMatcher
 from teamarr.database.groups import EventEPGGroup
@@ -23,6 +24,16 @@ class StreamMatching:
     ``_db_factory``, ``_dispatcharr_client``, ``_service``,
     ``_shared_events`` and ``_generation`` attributes.
     """
+
+    if TYPE_CHECKING:
+        # Provided by the EventGroupProcessor coordinator / sibling mixins.
+        # Declared for type-checkers only — no runtime effect.
+        _db_factory: Any
+        _dispatcharr_client: Any
+        _service: Any
+        _shared_events: Any
+        _get_all_known_leagues: Any
+        _load_sport_durations: Any
 
     def _match_streams(
         self,
@@ -53,7 +64,8 @@ class StreamMatching:
             row = conn.execute(
                 "SELECT include_final_events, "
                 "epg_xtream_fallback_enabled, epg_xtream_cache_hours, "
-                "event_match_days_back, event_match_days_ahead "
+                "event_match_days_back, event_match_days_ahead, "
+                "tennis_majors_only "
                 "FROM settings WHERE id = 1"
             ).fetchone()
             include_final_events = (
@@ -63,6 +75,7 @@ class StreamMatching:
             xtream_cache_hours = (row["epg_xtream_cache_hours"] if row else 24) or 24
             match_days_back = (row["event_match_days_back"] if row else 7) or 7
             match_days_ahead = (row["event_match_days_ahead"] if row else 3) or 3
+            tennis_majors_only = bool(row["tennis_majors_only"]) if row else False
 
             # Load feed separation settings
             feed_settings = get_feed_separation_settings(conn)
@@ -121,6 +134,7 @@ class StreamMatching:
             feed_home_terms=feed_home_terms,
             feed_away_terms=feed_away_terms,
             name_match_enabled=group.name_match_enabled,
+            tennis_majors_only=tennis_majors_only,
             team_streams_enabled=group.team_streams_enabled,
             epg_index=epg_index,
         )
@@ -273,7 +287,7 @@ class StreamMatching:
         except Exception as e:
             logger.debug("[XTREAM-EPG] group=%s account fetch failed: %s", group.id, e)
             return
-        if not is_xtream_account(account):
+        if account is None or not is_xtream_account(account):
             return
 
         already = set(index.tvg_ids())
@@ -281,8 +295,13 @@ class StreamMatching:
         if not wanted:
             return
 
+        url = xmltv_url(account)
+        if url is None:
+            # Unreachable in practice — account already passed is_xtream_account,
+            # which is xmltv_url's own precondition. Guard keeps the type sound.
+            return
         programs = fetch_xtream_programs(
-            xmltv_url(account),
+            url,
             cache_key=f"acct{account_id}",
             wanted_tvg_ids=wanted,
             window_start=window_start,
@@ -371,10 +390,14 @@ class StreamMatching:
     ) -> list[dict]:
         """Resolve feed hints to actual teams (Phase 2 feed separation).
 
-        For each matched stream:
-        - feed_hint="home" → feed_team = event.home_team
-        - feed_hint="away" → feed_team = event.away_team
-        - No hint + detect_team_names → scan stream name for team name/short_name
+        For each matched stream, in precedence order:
+        - feed_hint="home"/"away" (explicit HOME/AWAY term) → that side's team
+        - No hint → match the stream name against the event's home/away-market
+          broadcast names (ESPN broadcasts[].market: 'Brewers.TV' → away,
+          'YES' → home) — catches team-branded and regional channels no term
+          list or team name covers (#343)
+        - Still nothing + detect_team_names → scan stream name for team
+          name/short_name in a feed-specific context
         - No match → feed_team = None (normal channel)
 
         Args:
@@ -385,17 +408,21 @@ class StreamMatching:
             event = entry.get("event")
             feed_hint = entry.get("feed_hint")
             feed_team = None
+            source = feed_hint
 
             if event and feed_hint == "home":
                 feed_team = event.home_team
             elif event and feed_hint == "away":
                 feed_team = event.away_team
-            elif event and not feed_hint and detect_team_names:
-                # Scan stream name for team name/short_name
+            elif event and not feed_hint:
                 stream_name = entry["stream"]["name"].lower()
-                feed_team = self._detect_team_in_stream_name(
-                    stream_name, event.home_team, event.away_team
-                )
+                feed_team = self._detect_feed_from_broadcast_markets(stream_name, event)
+                source = "broadcast_market"
+                if feed_team is None and detect_team_names:
+                    feed_team = self._detect_team_in_stream_name(
+                        stream_name, event.home_team, event.away_team
+                    )
+                    source = "team_name_detect"
 
             entry["feed_team"] = feed_team
 
@@ -404,10 +431,93 @@ class StreamMatching:
                     "[FEED] Stream '%s' → feed_team=%s (hint=%s)",
                     entry["stream"]["name"][:50],
                     feed_team.name,
-                    feed_hint or "team_name_detect",
+                    source,
                 )
 
         return matched_streams
+
+    @staticmethod
+    def _broadcast_name_in_stream(name_norm: str, stream_norm: str) -> bool:
+        """Fuzzy-tolerant presence check for a normalized broadcast name in
+        a normalized stream name (#343). Stream names rarely quote the ESPN
+        listing verbatim, so three tiers:
+
+        1. Exact normalized phrase (word-boundary) — punctuation/case
+           variants ('Brewers.TV' ↔ 'BREWERS TV'); the ONLY tier for short
+           single-token names ('YES'), which fuzzier tiers would over-match.
+        2. Collapsed substring (≥5 chars) — run-together forms ('BrewersTV').
+        3. Token window for multi-word names — each name token must match
+           the aligned stream token exactly, by prefix ('WI' ↔ 'Wisconsin'),
+           or fuzzily (rapidfuzz ratio ≥ 80 for tokens ≥ 4 chars): covers
+           abbreviated/near-miss forms ('Bally Sports WI').
+        """
+        import re
+
+        if not name_norm:
+            return False
+        if re.search(rf"\b{re.escape(name_norm)}\b", stream_norm):
+            return True
+        collapsed = name_norm.replace(" ", "")
+        if len(collapsed) >= 5 and collapsed in stream_norm.replace(" ", ""):
+            return True
+
+        name_tokens = name_norm.split()
+        if len(name_tokens) < 2:
+            return False
+        stream_tokens = stream_norm.split()
+        n = len(name_tokens)
+        return any(
+            all(
+                StreamMatching._broadcast_tokens_match(nt, st)
+                for nt, st in zip(name_tokens, stream_tokens[i : i + n], strict=True)
+            )
+            for i in range(len(stream_tokens) - n + 1)
+        )
+
+    @staticmethod
+    def _broadcast_tokens_match(a: str, b: str) -> bool:
+        """Single-token equivalence for the broadcast token window."""
+        from rapidfuzz import fuzz
+
+        if a == b:
+            return True
+        if len(a) >= 2 and len(b) >= 2 and (a.startswith(b) or b.startswith(a)):
+            return True
+        return len(a) >= 4 and len(b) >= 4 and fuzz.ratio(a, b) >= 80
+
+    @staticmethod
+    def _detect_feed_from_broadcast_markets(stream_name_lower: str, event):
+        """Match the stream name against the event's home/away-market
+        broadcast names (ESPN broadcasts[].market, #343).
+
+        Matching is fuzzy-tolerant (see _broadcast_name_in_stream) since
+        stream names rarely quote the listing verbatim. 'national' names
+        never make a team feed; a stream matching BOTH sides' names is
+        ambiguous and stays a normal channel. Names shorter than 3
+        characters are skipped (false-positive guard, same threshold as
+        team abbreviations).
+        """
+        from teamarr.utilities.fuzzy_match import normalize_text
+
+        markets = getattr(event, "broadcast_markets", None) or {}
+        if not markets:
+            return None
+        stream_norm = normalize_text(stream_name_lower)
+        matched_sides: set[str] = set()
+        for name, market in markets.items():
+            if market not in ("home", "away"):
+                continue
+            name_norm = normalize_text(name)
+            if len(name_norm) < 3:
+                continue
+            if StreamMatching._broadcast_name_in_stream(name_norm, stream_norm):
+                matched_sides.add(market)
+
+        if matched_sides == {"home"}:
+            return event.home_team
+        if matched_sides == {"away"}:
+            return event.away_team
+        return None
 
     @staticmethod
     def _detect_team_in_stream_name(
@@ -420,6 +530,7 @@ class StreamMatching:
         - With feed keyword: "Penguins Feed", "Penguins Broadcast"
         - After pipe/dash at end: "Game | Penguins", "Game - Penguins"
         - With home/away: "Penguins Home", "Home Penguins"
+        - Team-branded channel token: "Penguins.TV", "Penguins.US" (#343)
 
         Does NOT match team names that just appear in a matchup title like
         "Penguins vs Jets" — that's a shared feed, not team-specific.
@@ -452,6 +563,15 @@ class StreamMatching:
                     rf"\b(?:feed|broadcast)[:\s]+{esc}\b",
                     rf"\b{esc}\s+(?:home|away)\b",
                     rf"\b(?:home|away)\s+{esc}\b",
+                    # Team-branded channel token: "Brewers.TV" / "Brewers TV"
+                    # / "BrewersTV" (#343)
+                    rf"\b{esc}[.\s]?tv\b",
+                    # Domain-style token: "Brewers.US", "Brewers.Live". DOT
+                    # form with whitelisted TLDs only — a spaced variant
+                    # would false-positive on matchup connectors ("Brewers
+                    # vs Cubs") and an open [a-z]+ suffix on dot-separated
+                    # stream names ("MLB.Brewers.Cubs.720p").
+                    rf"\b{esc}\.(?:us|com|net|org|live|io|app|stream)\b",
                 ]
 
                 for pattern in patterns:
@@ -525,26 +645,48 @@ class StreamMatching:
         if not matched_streams:
             return matched_streams
 
+        # Refresh each unique event once, in parallel. The service coalesces
+        # repeated refreshes of the same event within a run (single-flight in
+        # get_event), so this is safe across threads — the dedupe here just
+        # avoids queueing redundant no-op calls.
+        from concurrent.futures import ThreadPoolExecutor
+
+        unique_events = {}
+        for match in matched_streams:
+            event = match.get("event")
+            if event:
+                unique_events.setdefault((event.league, event.id), event)
+
+        refreshed_by_key = {}
+        if unique_events:
+            workers = min(10, len(unique_events))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for key, refreshed in zip(
+                    unique_events.keys(),
+                    executor.map(
+                        self._service.refresh_event_status, unique_events.values()
+                    ),
+                    strict=True,
+                ):
+                    old = unique_events[key]
+                    old_status = old.status.state if old.status else "N/A"
+                    new_status = refreshed.status.state if refreshed.status else "N/A"
+                    if old_status != new_status:
+                        logger.debug(
+                            "[ENRICH] event=%s status changed: %s → %s",
+                            old.id,
+                            old_status,
+                            new_status,
+                        )
+                    refreshed_by_key[key] = refreshed
+
         enriched = []
         for match in matched_streams:
             event = match.get("event")
             if event:
-                old_status = event.status.state if event.status else "N/A"
-                # Refresh event status from provider. The service coalesces
-                # repeated refreshes of the same event within a run, so an event
-                # matched to many channels triggers a single provider fetch.
-                refreshed = self._service.refresh_event_status(event)
-                new_status = refreshed.status.state if refreshed.status else "N/A"
-                if old_status != new_status:
-                    logger.debug(
-                        "[ENRICH] event=%s status changed: %s → %s",
-                        event.id,
-                        old_status,
-                        new_status,
-                    )
                 # Preserve all keys (including segment info for UFC)
                 enriched_match = dict(match)
-                enriched_match["event"] = refreshed
+                enriched_match["event"] = refreshed_by_key[(event.league, event.id)]
                 enriched.append(enriched_match)
             else:
                 enriched.append(match)

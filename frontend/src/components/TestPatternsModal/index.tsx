@@ -9,7 +9,7 @@
  * 5. Syncs patterns bidirectionally with the form (reads on open, writes on Apply)
  */
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback } from "react"
 import { useQuery } from "@tanstack/react-query"
 import {
   Dialog,
@@ -24,7 +24,7 @@ import { getRawStreams } from "@/api/groups"
 import { StreamList } from "./StreamList"
 import { PatternPanel } from "./PatternPanel"
 import { InteractiveSelector } from "./InteractiveSelector"
-import { FlaskConical, Loader2 } from "lucide-react"
+import { FlaskConical, LoaderCircle } from "lucide-react"
 
 // ---------------------------------------------------------------------------
 // Types — shared across child components
@@ -56,7 +56,7 @@ export interface PatternState {
   custom_regex_event_name_enabled: boolean
 }
 
-export const EMPTY_PATTERNS: PatternState = {
+const EMPTY_PATTERNS: PatternState = {
   skip_builtin_filter: false,
   stream_include_regex: null,
   stream_include_regex_enabled: false,
@@ -116,12 +116,20 @@ export function TestPatternsModal({
     streamName: string
   } | null>(null)
 
-  // Sync form → modal when opening
-  useEffect(() => {
+  // Sync form → modal when opening. Seeded during render (React's "adjusting
+  // state when a prop changes" pattern) — fires on exactly the same trigger as
+  // the previous effect: any change to `open` or `initialPatterns`, seeding
+  // only while the modal is open, without the extra effect render pass.
+  const [syncedSeedProps, setSyncedSeedProps] = useState<{
+    open: boolean
+    initialPatterns: Partial<PatternState> | undefined
+  }>({ open: false, initialPatterns: undefined })
+  if (open !== syncedSeedProps.open || initialPatterns !== syncedSeedProps.initialPatterns) {
+    setSyncedSeedProps({ open, initialPatterns })
     if (open && initialPatterns) {
       setPatterns({ ...EMPTY_PATTERNS, ...initialPatterns })
     }
-  }, [open, initialPatterns])
+  }
 
   // Fetch raw streams
   const {
@@ -186,7 +194,7 @@ export function TestPatternsModal({
           <div className="flex-1 flex flex-col min-w-0">
             {isLoading && (
               <div className="flex-1 flex items-center justify-center">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                <LoaderCircle className="h-6 w-6 animate-spin text-muted-foreground" />
                 <span className="ml-2 text-sm text-muted-foreground">
                   Loading streams...
                 </span>
@@ -230,7 +238,8 @@ export function TestPatternsModal({
           <div className="flex items-center justify-between w-full">
             <span className="text-xs text-muted-foreground">
               Patterns are tested client-side using JavaScript regex.
-              Named groups use Python syntax (?P&lt;name&gt;...) for backend compatibility.
+              Named groups accept both (?&lt;name&gt;...) and Python&apos;s
+              (?P&lt;name&gt;...) — they are converted automatically.
             </span>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={handleClose}>

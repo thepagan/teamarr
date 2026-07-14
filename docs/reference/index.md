@@ -13,11 +13,12 @@ Developer documentation covering Teamarr's architecture, data providers, databas
 
 | Section | Contents |
 |---------|----------|
-| [Supported Leagues](supported-leagues) | All 140 pre-configured leagues and ~250 discovered soccer leagues, organized by sport |
+| [Supported Leagues](supported-leagues) | All 142 pre-configured leagues and ~250 discovered soccer leagues, organized by sport |
 | [Providers](providers/) | Data provider system — ESPN, Squiggle, MLB Stats, HockeyTech, TheSportsDB, Supabase — priority chain, API details, rate limiting |
 | [Architecture](architecture/) | API layer, consumer layer, Dispatcharr integration, detection keywords, database, template engine, migrations |
 | [Frontend](frontend/) | React + TypeScript + Vite architecture, component library, state management |
 | [Deployment](deployment/) | Environment variables, Docker configuration, logging |
+| [Gracenote EPG Reference](gracenote-categories) | Captured Gracenote field-shape conventions per sport — the model the default templates target |
 
 ## Stack
 

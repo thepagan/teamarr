@@ -48,6 +48,42 @@ SAMPLE_DATA: dict[str, dict[str, str]] = {
     "opponent.last": {
         "NBA": "Cleveland Cavaliers",
     },
+    "team_name_the": {
+        "NBA": "the Detroit Pistons",
+    },
+    "opponent_the": {
+        "NBA": "the Chicago Bulls",
+    },
+    "opponent_the.next": {
+        "NBA": "the Milwaukee Bucks",
+    },
+    "opponent_the.last": {
+        "NBA": "the Cleveland Cavaliers",
+    },
+    "home_team_the": {
+        "NBA": "the Detroit Pistons",
+    },
+    "away_team_the": {
+        "NBA": "the Chicago Bulls",
+    },
+    "at_vs": {
+        "NBA": "at",
+    },
+    "at_vs.next": {
+        "NBA": "at",
+    },
+    "at_vs.last": {
+        "NBA": "at",
+    },
+    "home_away_verb": {
+        "NBA": "host",
+    },
+    "home_away_verb.next": {
+        "NBA": "visit",
+    },
+    "home_away_verb.last": {
+        "NBA": "visit",
+    },
     "opponent_abbrev": {
         "NBA": "CHI",
     },
@@ -77,15 +113,18 @@ SAMPLE_DATA: dict[str, dict[str, str]] = {
     },
     "matchup": {
         "NBA": "Chicago Bulls @ Detroit Pistons",
-        "UFC": "Alex Volkanovski vs Diego Lopes",
+        "UFC": "Diego Lopes @ Alex Volkanovski",
     },
     "matchup.next": {
         "NBA": "Detroit Pistons @ Milwaukee Bucks",
-        "UFC": "Islam Makhachev vs Arman Tsarukyan",
+        "UFC": "Arman Tsarukyan @ Islam Makhachev",
     },
     "matchup.last": {
         "NBA": "Detroit Pistons @ Cleveland Cavaliers",
-        "UFC": "Jon Jones vs Stipe Miocic",
+        "UFC": "Stipe Miocic @ Jon Jones",
+    },
+    "matchup_combat": {
+        "UFC": "Alex Volkanovski vs Diego Lopes",
     },
     "matchup_abbrev": {
         "NBA": "CHI @ DET",
@@ -1269,6 +1308,12 @@ SAMPLE_DATA: dict[str, dict[str, str]] = {
     "fighter1": {
         "UFC": "Alex Volkanovski",
     },
+    "fighter1_last": {
+        "UFC": "Volkanovski",
+    },
+    "fighter2_last": {
+        "UFC": "Lopes",
+    },
     "fighter2": {
         "UFC": "Diego Lopes",
     },
@@ -1512,6 +1557,16 @@ _SHAPE_OVERRIDES: dict[str, dict[str, str]] = {
         "matchup_short": "Mean Time @ Tropics",
         "matchup_short.next": "Tropics @ Pinchy Crabs",
         "matchup_short.last": "Tropics @ Mile High Club",
+        "team_name_the": "the Flint Tropics",
+        "opponent_the": "the Greenwich Mean Time",
+        "opponent_the.next": "the Baltimore Pinchy Crabs",
+        "opponent_the.last": "the Denver Mile High Club",
+        "home_team_the": "the Flint Tropics",
+        "home_team_the.next": "the Baltimore Pinchy Crabs",
+        "home_team_the.last": "the Denver Mile High Club",
+        "away_team_the": "the Greenwich Mean Time",
+        "away_team_the.next": "the Flint Tropics",
+        "away_team_the.last": "the Flint Tropics",
         # --- league / sport identity ---
         "league": "Placeholder Premier League",
         "league_name": "Placeholder Premier League",
@@ -1579,6 +1634,12 @@ _SHAPE_OVERRIDES: dict[str, dict[str, str]] = {
         "game_preview": "The Tropics look to close out the series against the Mean Time.",
         "game_preview.next": "Flint visits the Pinchy Crabs to open the next round.",
         "series_summary": "Tropics lead series 3-1",
+        "home_last_five": "4-1",
+        "away_last_five": "2-3",
+        "last_five_summary": (
+            "the Greenwich Mean Time have won 2 of their last five; "
+            "the Flint Tropics have won 4 of their last five."
+        ),
         "series_summary.last": "Tropics won series 4-2",
         # --- scores / outcome ---
         "team_score": "3",
@@ -1698,6 +1759,24 @@ _SHAPE_OVERRIDES: dict[str, dict[str, str]] = {
         "away_team_rank": "14",
         "away_team_rank.next": "7",
         "away_team_rank.last": "7",
+        "home_team_rank_display": "No. 7",
+        "home_team_rank_display.next": "No. 5",
+        "home_team_rank_display.last": "No. 9",
+        "away_team_rank_display": "No. 14",
+        "away_team_rank_display.next": "No. 7",
+        "away_team_rank_display.last": "No. 7",
+        # Composed rank+article names (#359). The .next opponent is deliberately
+        # unranked so the preview demonstrates the graceful article fallback.
+        "home_team_ranked_the": "the No. 7 Flint Tropics",
+        "home_team_ranked_the.next": "the Baltimore Pinchy Crabs",
+        "home_team_ranked_the.last": "the No. 9 Denver Mile High Club",
+        "away_team_ranked_the": "the No. 14 Greenwich Mean Time",
+        "away_team_ranked_the.next": "the No. 7 Flint Tropics",
+        "away_team_ranked_the.last": "the No. 7 Flint Tropics",
+        "team_name_ranked_the": "the No. 7 Flint Tropics",
+        "opponent_ranked_the": "the No. 14 Greenwich Mean Time",
+        "opponent_ranked_the.next": "the Baltimore Pinchy Crabs",
+        "opponent_ranked_the.last": "the No. 9 Denver Mile High Club",
         # --- odds (de-NBA the spread/details so no DET sneaks in) ---
         "odds_details": "FLT -3.5, O/U 210.5",
         "odds_details.next": "FLT -1.5, O/U 214.5",
@@ -1717,9 +1796,10 @@ _SHAPE_OVERRIDES: dict[str, dict[str, str]] = {
         "fighter2_record": "27-1-0",
         "event_title": "WVBA Title Night",
         "event_number": "1",
-        "matchup": "Little Mac vs Super Macho Man",
-        "matchup.next": "King Hippo vs Bald Bull",
-        "matchup.last": "Soda Popinski vs Glass Joe",
+        "matchup": "Super Macho Man @ Little Mac",
+        "matchup.next": "Bald Bull @ King Hippo",
+        "matchup.last": "Glass Joe @ Soda Popinski",
+        "matchup_combat": "Little Mac vs Super Macho Man",
         "weight_class": "Heavyweight",
         "weight_class_short": "HW",
         "fight_result": "KO",

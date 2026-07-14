@@ -1,27 +1,48 @@
-"""Stream fetching/filtering and provider event fetching for event groups."""
+"""M3U stream fetching/filtering and known-league lookup for event groups."""
 
 import logging
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from typing import TYPE_CHECKING, Any
 
-from teamarr.core import Event
 from teamarr.database.groups import EventEPGGroup
 from teamarr.services.stream_filter import FilterResult, StreamFilter, StreamFilterConfig
 
 logger = logging.getLogger(__name__)
 
-# Number of parallel workers for event fetching
-# Configurable via ESPN_MAX_WORKERS for users with DNS throttling (PiHole, AdGuard)
-MAX_WORKERS = int(os.environ.get("ESPN_MAX_WORKERS", 100))
-
 
 class StreamFetcher:
-    """Fetches M3U streams from Dispatcharr and events from data providers.
+    """Fetches and filters M3U streams from Dispatcharr for event groups.
 
     Mixin for EventGroupProcessor — relies on the coordinator's
     ``_db_factory``, ``_dispatcharr_client`` and ``_service`` attributes.
     """
+
+    if TYPE_CHECKING:
+        # Provided by the EventGroupProcessor coordinator / sibling mixins.
+        # Declared for type-checkers only — no runtime effect.
+        _db_factory: Any
+        _dispatcharr_client: Any
+        _service: Any
+        _active_epg_source_ids: Any
+
+    def _account_names(self) -> dict[int, str]:
+        """Map M3U account id → name, cached per processor instance.
+
+        Streams from Dispatcharr carry only ``m3u_account_id``; the display
+        name must be resolved here so identically named streams from multiple
+        logins are attributed to their OWN account (#297) — falling back to the
+        group's single configured account name mislabels every stream in the
+        group and mis-evaluates m3u-type stream-ordering rules.
+        """
+        cache = getattr(self, "_account_name_cache", None)
+        if cache is None:
+            try:
+                accounts = self._dispatcharr_client.m3u.list_accounts(include_custom=True)
+                cache = {a.id: a.name for a in accounts}
+            except Exception as e:
+                logger.warning("[EVENT_EPG] Failed to list M3U accounts: %s", e)
+                cache = {}
+            self._account_name_cache = cache
+        return cache
 
     def _fetch_streams(self, group: EventEPGGroup) -> list[dict]:
         """Fetch M3U streams from Dispatcharr for the group.
@@ -48,6 +69,7 @@ class StreamFetcher:
                 streams = m3u_manager.list_streams()
 
             # Convert to dicts for matcher (sorted by name for consistent order)
+            account_names = self._account_names()
             stream_dicts = [
                 {
                     "id": s.id,
@@ -57,6 +79,7 @@ class StreamFetcher:
                     "channel_group": s.channel_group,
                     "channel_group_id": s.channel_group_id,
                     "m3u_account_id": s.m3u_account_id,
+                    "m3u_account_name": account_names.get(s.m3u_account_id),
                     "is_stale": s.is_stale,
                 }
                 for s in streams
@@ -131,6 +154,16 @@ class StreamFetcher:
             logger.warning("[CHANNEL_SOURCE] Failed to list streams: %s", e)
             detail_by_id = {}
 
+        # DP channel group id -> name (#379). The channels API returns only
+        # channel_group_id; the name (which dispatcharr_group ordering rules
+        # match on, and which the rule-builder dropdown shows) lives in the
+        # groups endpoint.
+        try:
+            dp_group_names = {g.id: g.name for g in client.m3u.list_groups()}
+        except Exception as e:
+            logger.warning("[CHANNEL_SOURCE] Failed to list channel groups: %s", e)
+            dp_group_names = {}
+
         candidates: list[dict] = []
         seen: set[int] = set()
         skipped_teamarr = 0
@@ -164,6 +197,7 @@ class StreamFetcher:
                 skipped_overlap += 1
                 continue
             seen.add(stream_id)
+            account_id = getattr(detail, "m3u_account_id", None) if detail else None
             candidates.append(
                 {
                     "id": stream_id,
@@ -180,8 +214,11 @@ class StreamFetcher:
                     # The DP CHANNEL's own group (channel organization), distinct from
                     # the M3U stream group above — drives scoping + the sorting rule.
                     "dp_channel_group_id": dp_group_id,
-                    "dp_channel_group": ch.get("channel_group_name"),
-                    "m3u_account_id": getattr(detail, "m3u_account_id", None) if detail else None,
+                    "dp_channel_group": dp_group_names.get(dp_group_id),
+                    "m3u_account_id": account_id,
+                    "m3u_account_name": self._account_names().get(account_id)
+                    if account_id is not None
+                    else None,
                     "is_stale": getattr(detail, "is_stale", False) if detail else False,
                 }
             )
@@ -292,71 +329,3 @@ class StreamFetcher:
         with self._db_factory() as conn:
             cursor = conn.execute("SELECT league_slug FROM league_cache")
             return [row[0] for row in cursor.fetchall()]
-
-    def _fetch_events(self, leagues: list[str], target_date: date) -> list[Event]:
-        """Fetch events from data providers for leagues in parallel.
-
-        Uses a fixed 7-day lookback (for weekly sports like NFL) and
-        event_match_days_ahead setting for future events.
-        """
-        if not leagues:
-            return []
-
-        all_events: list[Event] = []
-        num_workers = min(MAX_WORKERS, len(leagues))
-
-        # Load date range settings
-        # Note: days_back is hardcoded to 7 for weekly sports like NFL
-        with self._db_factory() as conn:
-            row = conn.execute(
-                "SELECT event_match_days_ahead FROM settings WHERE id = 1"
-            ).fetchone()
-            days_back = 7  # Hardcoded for weekly sports
-            days_ahead = (
-                row["event_match_days_ahead"] if row and row["event_match_days_ahead"] else 3
-            )
-
-        # Build date range: [target - days_back, target + days_ahead]
-        dates_to_fetch = [
-            target_date + timedelta(days=offset) for offset in range(-days_back, days_ahead + 1)
-        ]
-        logger.debug(
-            "[EVENT_EPG] Fetching events from %s to %s (%d days)",
-            dates_to_fetch[0],
-            dates_to_fetch[-1],
-            len(dates_to_fetch),
-        )
-
-        def fetch_league_events(league: str, fetch_date: date) -> tuple[str, date, list[Event]]:
-            """Fetch events for a single league/date (for parallel execution)."""
-            try:
-                # TSDB leagues: cache-only (don't hit API during EPG generation)
-                # TSDB cache builds organically from startup/scheduled refresh
-                is_tsdb = self._service.get_provider_name(league) == "tsdb"
-                events = self._service.get_events(league, fetch_date, cache_only=is_tsdb)
-                return (league, fetch_date, events)
-            except Exception as e:
-                logger.warning(
-                    "[EVENT_EPG] Failed to fetch events for %s on %s: %s", league, fetch_date, e
-                )
-                return (league, fetch_date, [])
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            # Create tasks for all league/date combinations
-            futures = {}
-            for league in leagues:
-                for fetch_date in dates_to_fetch:
-                    future = executor.submit(fetch_league_events, league, fetch_date)
-                    futures[future] = (league, fetch_date)
-
-            for future in as_completed(futures):
-                try:
-                    league, fetch_date, events = future.result()
-                    all_events.extend(events)
-                except Exception as e:
-                    league, fetch_date = futures[future]
-                    logger.warning(
-                        "[EVENT_EPG] Failed to fetch events for %s on %s: %s", league, fetch_date, e
-                    )
-
-        return all_events

@@ -1,13 +1,13 @@
 import { useState, useMemo } from "react"
 import { useQuery } from "@tanstack/react-query"
 import {
-  CheckCircle,
-  XCircle,
+  CircleCheckBig,
+  CircleX,
   Ban,
-  Loader2,
+  LoaderCircle,
   Clock,
   Search,
-  AlertTriangle,
+  TriangleAlert,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -61,13 +61,13 @@ function callsPerChannelClass(ratio: number): string {
 function StatusIcon({ status }: { status: string }) {
   switch (status) {
     case "completed":
-      return <CheckCircle className="h-4 w-4 text-green-600" />
+      return <CircleCheckBig className="h-4 w-4 text-green-600" />
     case "failed":
-      return <XCircle className="h-4 w-4 text-red-600" />
+      return <CircleX className="h-4 w-4 text-red-600" />
     case "cancelled":
       return <Ban className="h-4 w-4 text-orange-500" />
     case "running":
-      return <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+      return <LoaderCircle className="h-4 w-4 animate-spin text-blue-600" />
     default:
       return <Clock className="h-4 w-4 text-muted-foreground" />
   }
@@ -158,37 +158,41 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
     staleTime: 5 * 60 * 1000,
   })
 
+  const leagues = leaguesData?.leagues
+  const matchedStreams = matchedData?.streams
+  const failedFailures = failedData?.failures
+
   // League display lookup
   const getLeagueDisplay = useMemo(() => {
     const map = new Map<string, string>()
-    if (leaguesData?.leagues) {
-      for (const league of leaguesData.leagues) {
+    if (leagues) {
+      for (const league of leagues) {
         map.set(league.slug, getLeagueDisplayName(league, true))
       }
     }
     return (code: string | null) => (code ? (map.get(code) ?? code) : "-")
-  }, [leaguesData?.leagues])
+  }, [leagues])
 
   // Group dropdowns
   const matchedGroups = useMemo(() => {
-    if (!matchedData?.streams) return []
+    if (!matchedStreams) return []
     const groups = new Set<string>()
-    for (const s of matchedData.streams) if (s.group_name) groups.add(s.group_name)
+    for (const s of matchedStreams) if (s.group_name) groups.add(s.group_name)
     return Array.from(groups).sort()
-  }, [matchedData?.streams])
+  }, [matchedStreams])
 
   const failedGroups = useMemo(() => {
-    if (!failedData?.failures) return []
+    if (!failedFailures) return []
     const groups = new Set<string>()
-    for (const f of failedData.failures) if (f.group_name) groups.add(f.group_name)
+    for (const f of failedFailures) if (f.group_name) groups.add(f.group_name)
     return Array.from(groups).sort()
-  }, [failedData?.failures])
+  }, [failedFailures])
 
   // Filtered data
   const filteredMatchedStreams = useMemo(() => {
-    if (!matchedData?.streams) return []
+    if (!matchedStreams) return []
     const q = matchedFilter.toLowerCase()
-    return matchedData.streams.filter((s) => {
+    return matchedStreams.filter((s) => {
       if (matchedGroupFilter !== "all" && s.group_name !== matchedGroupFilter) return false
       if (!q) return true
       return (
@@ -199,12 +203,12 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
         s.league?.toLowerCase().includes(q)
       )
     })
-  }, [matchedData?.streams, matchedFilter, matchedGroupFilter])
+  }, [matchedStreams, matchedFilter, matchedGroupFilter])
 
   const filteredFailedMatches = useMemo(() => {
-    if (!failedData?.failures) return []
+    if (!failedFailures) return []
     const q = failedFilter.toLowerCase()
-    return failedData.failures.filter((f) => {
+    return failedFailures.filter((f) => {
       if (failedGroupFilter !== "all" && f.group_name !== failedGroupFilter) return false
       if (!q) return true
       return (
@@ -215,7 +219,7 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
         f.reason.toLowerCase().includes(q)
       )
     })
-  }, [failedData?.failures, failedFilter, failedGroupFilter])
+  }, [failedFailures, failedFilter, failedGroupFilter])
 
   const closeMatchedModal = () => {
     setMatchedModalRunId(null)
@@ -355,7 +359,7 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
         <DialogContent onClose={closeMatchedModal} className="max-w-6xl h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <CheckCircle className="h-5 w-5 text-green-600" />
+              <CircleCheckBig className="h-5 w-5 text-green-600" />
               Matched Streams
             </DialogTitle>
             <DialogDescription>
@@ -387,7 +391,7 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
 
           {matchedLoading ? (
             <div className="flex-1 flex items-center justify-center py-8">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              <LoaderCircle className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : filteredMatchedStreams.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -465,7 +469,7 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
                           onClick={() => onFixStream(stream)}
                           title="Correct this match"
                         >
-                          <AlertTriangle className="h-4 w-4" />
+                          <TriangleAlert className="h-4 w-4" />
                         </Button>
                       ),
                     }]
@@ -490,7 +494,7 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
         <DialogContent onClose={closeFailedModal} className="max-w-6xl h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <XCircle className="h-5 w-5 text-red-600" />
+              <CircleX className="h-5 w-5 text-red-600" />
               Failed Matches
             </DialogTitle>
             <DialogDescription>
@@ -522,7 +526,7 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
 
           {failedLoading ? (
             <div className="flex-1 flex items-center justify-center py-8">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              <LoaderCircle className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : filteredFailedMatches.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -572,7 +576,7 @@ export function RunHistoryTable({ runs, onFixStream }: RunHistoryTableProps) {
                           onClick={() => onFixStream(failure)}
                           title="Fix this stream's match"
                         >
-                          <AlertTriangle className="h-4 w-4" />
+                          <TriangleAlert className="h-4 w-4" />
                         </Button>
                       ),
                     }]

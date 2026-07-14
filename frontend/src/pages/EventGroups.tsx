@@ -6,11 +6,11 @@ import {
   Search,
   Trash2,
   Pencil,
-  Loader2,
+  LoaderCircle,
   Plus,
   X,
   Check,
-  AlertCircle,
+  CircleAlert,
   GripVertical,
   ArrowUp,
   ArrowDown,
@@ -118,16 +118,17 @@ export function EventGroups() {
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [showBulkEdit, setShowBulkEdit] = useState(false)
   // Filter groups
+  const allGroups = data?.groups
   const filteredGroups = useMemo(() => {
-    if (!data?.groups) return []
+    if (!allGroups) return []
 
-    return data.groups.filter((group) => {
+    return allGroups.filter((group) => {
       if (nameFilter && !group.name.toLowerCase().includes(nameFilter.toLowerCase())) return false
       if (statusFilter === "enabled" && !group.enabled) return false
       if (statusFilter === "disabled" && group.enabled) return false
       return true
     })
-  }, [data?.groups, nameFilter, statusFilter])
+  }, [allGroups, nameFilter, statusFilter])
 
   // Column sort: 3-click cycle (asc → desc → reset to persisted sort_order).
   // DnD reordering is only active while unsorted.
@@ -141,8 +142,9 @@ export function EventGroups() {
 
   const isDndActive = sortColumn === null
 
-  // Sort icon component
-  const SortIcon = ({ column }: { column: "name" | "matched" | "status" }) => {
+  // Sort icon — a plain render helper, not a component (components created
+  // during render reset identity; react-hooks/static-components).
+  const sortIcon = (column: "name" | "matched" | "status") => {
     if (sortColumn !== column) return <ArrowUpDown className="h-3 w-3 ml-1 opacity-30" />
     return sortDirection === "asc" ? (
       <ArrowUp className="h-3 w-3 ml-1" />
@@ -373,7 +375,7 @@ export function EventGroups() {
       {staleGroups.length > 0 && (
         <Alert
           variant="warning"
-          icon={<AlertCircle />}
+          icon={<CircleAlert />}
           title={`${staleGroups.length} stream source${staleGroups.length === 1 ? "" : "s"} missing from Dispatcharr`}
         >
           <div className="space-y-2">
@@ -483,7 +485,7 @@ export function EventGroups() {
                     onClick={() => handleSort("name")}
                   >
                     <div className="flex items-center">
-                      Name <SortIcon column="name" />
+                      Name {sortIcon("name")}
                     </div>
                   </TableHead>
                   <TableHead
@@ -491,7 +493,7 @@ export function EventGroups() {
                     onClick={() => handleSort("matched")}
                   >
                     <div className="flex items-center justify-center">
-                      Matched <SortIcon column="matched" />
+                      Matched {sortIcon("matched")}
                     </div>
                   </TableHead>
                   <TableHead
@@ -499,7 +501,7 @@ export function EventGroups() {
                     onClick={() => handleSort("status")}
                   >
                     <div className="flex items-center">
-                      Status <SortIcon column="status" />
+                      Status {sortIcon("status")}
                     </div>
                   </TableHead>
                   <TableHead className="w-28 text-right">
@@ -744,7 +746,7 @@ export function EventGroups() {
                         >
                           {previewMutation.isPending &&
                           previewMutation.variables === group.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <LoaderCircle className="h-4 w-4 animate-spin" />
                           ) : (
                             <Search className="h-4 w-4" />
                           )}
@@ -759,7 +761,7 @@ export function EventGroups() {
                         >
                           {clearCacheMutation.isPending &&
                           clearCacheMutation.variables === group.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <LoaderCircle className="h-4 w-4 animate-spin" />
                           ) : (
                             <RotateCcw className="h-4 w-4" />
                           )}
@@ -931,7 +933,7 @@ export function EventGroups() {
                           {stream.matched ? (
                             <Check className="h-4 w-4 text-green-600 dark:text-green-400" />
                           ) : (
-                            <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                            <CircleAlert className="h-4 w-4 text-amber-600 dark:text-amber-400" />
                           )}
                         </TableCell>
                         <TableCell className="font-mono text-xs">

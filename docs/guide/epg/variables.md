@@ -11,7 +11,7 @@ redirect_from:
 
 # Template Variables
 
-Templates use variables enclosed in curly braces that get replaced with real data when EPG is generated. Teamarr provides 240 variables across 20 categories.
+Templates use variables enclosed in curly braces that get replaced with real data when EPG is generated. Teamarr provides 260 variables across 20 categories.
 
 ## Team vs Event Templates
 
@@ -25,7 +25,7 @@ If you hand-type a scope-restricted variable into a template where it doesn't be
 
 ## Previewing Templates
 
-The template editor renders a live preview of every field as you type. The **Preview** selector in the variable sidebar lets you choose which league to preview against — the leagues you've subscribed to (from the [Subscriptions](../subscriptions) tab, plus the leagues of teams you follow) are listed with their logos, grouped by sport and searchable. Before you've subscribed to anything, all available leagues are shown.
+The template editor renders a live preview of every field as you type. The **Previewing as** bar above the tabs picks which league to preview against — the leagues you've subscribed to (from the [Subscriptions](../subscriptions) tab, plus the leagues of teams you follow) are listed with their logos, grouped by sport and searchable. Before you've subscribed to anything, all available leagues are shown. It drives every preview on the page: the inline per-field previews, the condition trace on the Conditions tab, and the **Guide Preview** card in the right rail — an EPG-style card showing the title, subtitle, and description exactly as a viewer's guide would, including any [conditional rows](conditions.md) that win a field for the preview event (marked with a green target).
 
 **Live by default.** The preview tries to render **real data** for a recent or upcoming event in the selected league, and the badge turns green **Live** with a coverage count (e.g. `137/181 variables live · 44 gaps`) — how many of the variables that apply to this kind of event the real event actually populated. A "gap" is a variable that *could* apply but the event didn't provide (variables for other sports aren't counted). If no event is available or the provider can't be reached, it falls back automatically to sample data and the badge reads **No event**.
 
@@ -42,6 +42,9 @@ Click the badge to toggle to **Sample** mode, which uses generic, intentionally-
 | `.last` | Most recent game | `{opponent.last}` |
 
 **Event templates** don't need suffixes - each channel exists for a single game, so there's no "next" or "last" to reference.
+
+{: .note }
+> **When there's no next (or last) game** — offseason, end of a season — suffixed variables resolve to empty and the usual cleanup removes leftover wrappers, so raw `{…}` braces never reach your guide. A misspelled variable name, or a suffix the variable doesn't support, still renders literally so you can spot the mistake. For a proper offseason message, use the **Offseason** idle register on the Fillers tab (enabled with generic content by default on new templates).
 
 In the tables below, the **Suffixes** column indicates which suffixes are available:
 - **base** = no suffix (current game)
@@ -93,11 +96,15 @@ Core identifiers for teams, leagues, and matchups.
 | Variable | Description | Suffixes | Sample |
 |----------|-------------|----------|--------|
 | `{team_name}` | Team display name | base | `Detroit Lions` |
+| `{team_name_the}` | Team name with Gracenote-convention article (clubs get 'the', national teams don't) | base | `the Detroit Lions` |
+| `{team_name_ranked_the}` | Team name with rank and article composed (article survives when unranked) | base | `the No. 7 Detroit Lions` |
 | `{team_abbrev}` | Team abbreviation uppercase | base | `DET` |
 | `{team_abbrev_lower}` | Team abbreviation lowercase | base | `det` |
 | `{team_name_pascal}` | Team name in PascalCase for channel IDs | base | `DetroitLions` |
 | `{team_short}` | Team short name | base | `Lions` |
 | `{opponent}` | Opponent team name | base, .next, .last | `Chicago Bears` |
+| `{opponent_the}` | Opponent name with Gracenote-convention article | base, .next, .last | `the Chicago Bears` |
+| `{opponent_ranked_the}` | Opponent with rank and article composed | base, .next, .last | `the No. 14 Chicago Bears` |
 | `{opponent_abbrev}` | Opponent team abbreviation uppercase | base, .next, .last | `CHI` |
 | `{opponent_abbrev_lower}` | Opponent abbreviation lowercase | base, .next, .last | `chi` |
 | `{opponent_short}` | Opponent short name | base, .next, .last | `Bears` |
@@ -110,7 +117,7 @@ Core identifiers for teams, leagues, and matchups.
 | `{league_code}` | Raw league code | base | `nfl` |
 | `{sport}` | Sport display name | base | `Football` |
 | `{sport_lower}` | Sport in lowercase | base | `football` |
-| `{gracenote_category}` | Gracenote category for EPG | base | `NFL Football` |
+| `{gracenote_category}` | Gracenote category for EPG; customizable per league (Settings → Advanced → Gracenote Category Overrides) | base | `NFL Football` |
 | `{exception_keyword}` | Exception keyword label (e.g., 'Spanish', '4K') | base | `4K` |
 
 ---
@@ -154,12 +161,16 @@ Positional team references and home/away context.
 | Variable | Description | Suffixes | Sample |
 |----------|-------------|----------|--------|
 | `{home_team}` | Home team name (positional) | base, .next, .last | `Detroit Lions` |
+| `{home_team_the}` | Home team name with Gracenote-convention article | base, .next, .last | `the Detroit Lions` |
+| `{home_team_ranked_the}` | Home team with rank and article composed (rank slots after the article; article survives when unranked) | base, .next, .last | `the No. 20 Arkansas Razorbacks` |
 | `{home_team_abbrev}` | Home team abbreviation uppercase | base, .next, .last | `DET` |
 | `{home_team_abbrev_lower}` | Home team abbreviation lowercase | base, .next, .last | `det` |
 | `{home_team_pascal}` | Home team name in PascalCase | base, .next, .last | `DetroitLions` |
 | `{home_team_short}` | Home team short name | base, .next, .last | `Lions` |
 | `{home_team_logo}` | Home team logo URL | base, .next, .last | ESPN logo URL |
 | `{away_team}` | Away team name (positional) | base, .next, .last | `Chicago Bears` |
+| `{away_team_the}` | Away team name with Gracenote-convention article | base, .next, .last | `the Chicago Bears` |
+| `{away_team_ranked_the}` | Away team with rank and article composed | base, .next, .last | `the No. 14 Texas A&M Aggies` |
 | `{away_team_abbrev}` | Away team abbreviation uppercase | base, .next, .last | `CHI` |
 | `{away_team_abbrev_lower}` | Away team abbreviation lowercase | base, .next, .last | `chi` |
 | `{away_team_pascal}` | Away team name in PascalCase | base, .next, .last | `ChicagoBears` |
@@ -168,8 +179,17 @@ Positional team references and home/away context.
 | `{is_home}` | 'true' if team is home, 'false' if away | base, .next, .last | `true` |
 | `{is_away}` | 'true' if team is away, 'false' if home | base, .next, .last | `false` |
 | `{home_away_text}` | 'at home' or 'on the road' | base, .next, .last | `at home` |
-| `{vs_at}` | 'vs' if home, 'at' if away | base, .next, .last | `vs` |
-| `{vs_@}` | 'vs' if home, '@' if away | base, .next, .last | `vs` |
+| `{vs_at}` | 'vs' if home, 'at' if away; neutral-site games read 'vs' | base, .next, .last | `vs` |
+| `{at_vs}` | Perspective-free connector: 'at' for US team sports, 'vs.' otherwise; neutral-site games always read 'vs.' | base, .next, .last | `at` |
+| `{home_away_verb}` | 'host' at home, 'visit' away | base, .next, .last | `host` |
+| `{vs_@}` | 'vs' if home, '@' if away; neutral-site games read 'vs' | base, .next, .last | `vs` |
+
+{: .note }
+The `_the` variables emit a lowercase `the` for mid-sentence use ("take on
+the Detroit Pistons"). When one opens a title or description, the renderer
+capitalizes it automatically ("The Detroit Pistons host…"). National teams
+("Netherlands") and individual-sport competitors never get the article,
+matching Gracenote convention.
 
 ### Feed Team
 
@@ -377,9 +397,12 @@ Provider editorial/context copy for a game, passed through raw. These are **spar
 | `{game_preview}` | Pregame preview blurb. Empty once a game is final (use `{game_recap}` then) | base, .next, .last | `Toronto Blue Jays (35-38) vs. Boston Red Sox` |
 | `{game_event_note}` | Marquee/playoff designation. Empty for ordinary regular-season games | base, .next, .last | `NBA Finals - Game 5` |
 | `{series_summary}` | Playoff/season-series state. Empty when there's no series context | base, .next, .last | `Series tied 1-1` |
+| `{home_last_five}` | Home team's W-L over its last five games (populates days ahead) | base, .next, .last | `4-1` |
+| `{away_last_five}` | Away team's W-L over its last five games | base, .next, .last | `2-3` |
+| `{last_five_summary}` | Recent-form prose for both teams; empty without data — pair with `has_structured_preview` | base, .next, .last | `The Rays have won 2 of their last five; the Red Sox have won 4 of their last five.` |
 
 {: .note }
-Because these populate only for some games, pair them with other content or a static fallback so a template never renders blank. `{game_recap}` and `{game_event_note}` come free from the scoreboard; `{game_preview}` and `{series_summary}` come from the per-event summary fetch that EPG generation already makes (no extra API calls).
+Because these populate only for some games, pair them with other content or a static fallback so a template never renders blank. In main descriptions, gate them with condition rows (`has_preview`, `has_recap`, …); in filler registers, use [filler condition rows](conditions#filler-condition-rows) — the starter set's postgame `has_recap → {game_recap.last}` row is the canonical example. `{game_recap}` and `{game_event_note}` come free from the scoreboard; `{game_preview}` and `{series_summary}` come from the per-event summary fetch that EPG generation already makes (no extra API calls).
 
 ---
 
@@ -398,6 +421,8 @@ College rankings (NCAAF, NCAAM, NCAAW).
 | `{is_ranked_matchup}` | 'true' if both teams are ranked | base, .next, .last | `` |
 | `{home_team_rank}` | Home team's ranking for this game | base, .next, .last | `` |
 | `{away_team_rank}` | Away team's ranking for this game | base, .next, .last | `` |
+| `{home_team_rank_display}` | Home team's rank in Gracenote prose form ('No. 20'), empty when unranked | base, .next, .last | `No. 20` |
+| `{away_team_rank_display}` | Away team's rank in Gracenote prose form ('No. 15'), empty when unranked | base, .next, .last | `No. 15` |
 
 ---
 
@@ -468,7 +493,9 @@ UFC and MMA-specific variables for event templates. These are **event-only** (no
 |----------|-------------|--------|
 | `{fighter1}` | First fighter name (headline bout) | `Alex Volkanovski` |
 | `{fighter2}` | Second fighter name (headline bout) | `Diego Lopes` |
-| `{matchup}` | Full matchup string | `Alex Volkanovski vs Diego Lopes` |
+| `{fighter1_last}` | First fighter surname | `Volkanovski` |
+| `{fighter2_last}` | Second fighter surname | `Lopes` |
+| `{matchup_combat}` | Fight matchup — headline fighter first with 'vs' | `Alex Volkanovski vs Diego Lopes` |
 | `{event_number}` | UFC event number (e.g., '314' from 'UFC 314') | `314` |
 | `{event_title}` | Full event title | `UFC 314: Volkanovski vs Lopes` |
 
@@ -493,7 +520,7 @@ UFC and MMA-specific variables for event templates. These are **event-only** (no
 | `{early_prelims_bouts}` | Early prelims bouts only | `Mauricio Ruffy vs Jamie Mullarkey` |
 
 {: .note }
-UFC events are split into segments (Early Prelims, Prelims, Main Card). When using segment-based channel routing, each channel gets a `{card_segment}` value indicating which segment it covers. The `{fighter1}` and `{fighter2}` variables always refer to the headline (main event) bout.
+UFC events are split into segments (Early Prelims, Prelims, Main Card). When using segment-based channel routing, each channel gets a `{card_segment}` value indicating which segment it covers. The `{fighter1}` and `{fighter2}` variables always refer to the headline (main event) bout. Use `{matchup_combat}` for the fight-conventional "Volkanovski vs Lopes" form — the generic `{matchup}` renders `{away} @ {home}` ("Lopes @ Volkanovski") for every sport, combat included.
 
 ---
 
@@ -568,9 +595,11 @@ surname). These variables add the tournament context and are **event-only**.
 | `{player1_last}` | First player's surname (multi-word preserved) | `Cobolli` |
 | `{player2_last}` | Second player's surname | `de Minaur` |
 | `{tournament_name}` | Tournament name | `Wimbledon` |
+| `{tournament_name_the}` | Tournament name with its natural article | `the US Open`, `Wimbledon` |
 | `{tennis_round}` | Round within the draw | `Round 4`, `Quarterfinals` |
 | `{tennis_court}` | Assigned court | `Centre Court`, `No. 1 Court` |
 | `{tennis_draw}` | Draw type | `Men's Singles`, `Mixed Doubles` |
+| `{tennis_result}` | Prose match result once final (empty before) | `Zverev defeats Fery 6-3, 6-4, 7-6(5)` |
 
 {: .note }
 Example: `{tournament_name} {tennis_draw}: {player1_last} vs {player2_last}` renders as `Wimbledon Men's Singles: Cobolli vs de Minaur`. Like combat's `{fighter1}`/`{fighter2}`, the player variables are the idiomatic choice — the underlying home/away team variables also resolve, but tennis has no real home player.

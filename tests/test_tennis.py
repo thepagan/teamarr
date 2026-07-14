@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from teamarr.consumers.matching.classifier import (
+    CustomRegexConfig,
     StreamCategory,
     classify_stream,
     is_racing,
@@ -19,6 +20,7 @@ from teamarr.consumers.matching.tennis_matcher import TennisMatcher
 from teamarr.core.types import Event, EventStatus, Team
 from teamarr.providers.espn.tennis import TennisParserMixin, _tennis_surnames
 from teamarr.services.detection_keywords import DetectionKeywordService
+from teamarr.utilities.fuzzy_match import normalize_text
 
 
 def setup_function():
@@ -116,12 +118,22 @@ class _Parser(TennisParserMixin):
 def test_parser_expands_matches_and_gender_filters_atp():
     events = _Parser()._parse_tennis_matches(WIMBLEDON, "atp", "tennis", date(2026, 7, 6))
     # atp keeps mens-singles + mixed-doubles; womens sliced out; 07-05 match sliced out
-    assert {e.id for e in events} == {"188-2026-177486", "188-2026-177500"}
+    assert {e.short_name for e in events} == {
+        "F. Cobolli vs A. de Minaur",
+        "Laura Siegemund / Edouard Roger-Vasselin vs John Peers / Katie Swan",
+    }
+    # Deterministic ids (#316): tournament + UTC date + player-pair digest —
+    # NOT ESPN's unstable competition id
+    for e in events:
+        assert e.id.startswith("188-2026-20260706-")
+    # Stable across re-parses (ESPN comp-id churn must not change identity)
+    again = _Parser()._parse_tennis_matches(WIMBLEDON, "atp", "tennis", date(2026, 7, 6))
+    assert {e.id for e in events} == {e.id for e in again}
 
 
 def test_parser_gender_filters_wta():
     events = _Parser()._parse_tennis_matches(WIMBLEDON, "wta", "tennis", date(2026, 7, 6))
-    assert {e.id for e in events} == {"188-2026-180100"}
+    assert {e.short_name for e in events} == {"A. Anisimova vs S. Kenin"}
 
 
 def test_atp_wta_grand_slam_split_is_disjoint():
@@ -132,7 +144,7 @@ def test_atp_wta_grand_slam_split_is_disjoint():
 
 def test_parser_match_fields():
     events = _Parser()._parse_tennis_matches(WIMBLEDON, "atp", "tennis", date(2026, 7, 6))
-    e = next(ev for ev in events if ev.id == "188-2026-177486")
+    e = next(ev for ev in events if ev.short_name == "F. Cobolli vs A. de Minaur")
     assert e.name == "Wimbledon: Flavio Cobolli vs Alex de Minaur"
     assert e.short_name == "F. Cobolli vs A. de Minaur"
     assert e.tournament_name == "Wimbledon"
@@ -151,7 +163,7 @@ def test_parser_match_fields():
 
 def test_parser_doubles_roster():
     events = _Parser()._parse_tennis_matches(WIMBLEDON, "atp", "tennis", date(2026, 7, 6))
-    e = next(ev for ev in events if ev.id == "188-2026-177500")
+    e = next(ev for ev in events if "Siegemund" in ev.short_name)
     assert e.away_team.name == "Laura Siegemund / Edouard Roger-Vasselin"
     assert e.away_team.abbreviation == "Siegemund/Roger-Vasselin"
 
@@ -214,10 +226,8 @@ def test_player_variables_match_title_order():
     )
 
     events = _Parser()._parse_tennis_matches(WIMBLEDON, "atp", "tennis", date(2026, 7, 6))
-    e = next(ev for ev in events if ev.id == "188-2026-177486")
-    ctx = TemplateContext(
-        game_context=GameContext(event=e), team_config=None, team_stats=None
-    )
+    e = next(ev for ev in events if ev.short_name == "F. Cobolli vs A. de Minaur")
+    ctx = TemplateContext(game_context=GameContext(event=e), team_config=None, team_stats=None)
     game_ctx = ctx.game_context
 
     # Title is "Wimbledon: Flavio Cobolli vs Alex de Minaur" — player1 = Cobolli
@@ -236,9 +246,7 @@ def test_player_variables_empty_for_non_tennis():
         "x", _player("A B", "B"), _player("C D", "D"), datetime(2026, 7, 6, tzinfo=ZoneInfo("UTC"))
     )
     hockey.sport = "hockey"
-    ctx = TemplateContext(
-        game_context=GameContext(event=hockey), team_config=None, team_stats=None
-    )
+    ctx = TemplateContext(game_context=GameContext(event=hockey), team_config=None, team_stats=None)
     assert extract_player1(ctx, ctx.game_context) == ""
 
 
@@ -277,6 +285,81 @@ def test_court_day_feed_classifies_tennis_without_players():
     assert c.category == StreamCategory.TENNIS_MATCH
     assert not (c.team1 and c.team2)
     assert c.event_hint
+
+
+def test_comma_form_player_pair_classifies():
+    """'Surname, First - Surname, First' provider format (#439)."""
+    c = classify_stream(
+        "Tennis 06: Live & Upcoming: Stefanini, Lucrezia - Maria, Tatjana 07-10 13:20",
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    assert c.category == StreamCategory.TENNIS_MATCH
+    assert c.team1 and "stefanini" in c.team1.lower()
+    assert c.team2 and "maria" in c.team2.lower()
+    assert c.separator_found == " - "
+
+
+def test_comma_form_requires_commas_on_both_sides():
+    """Hyphenated schedule labels must stay court/round feeds (#439 guard)."""
+    for name in (
+        "ATP 250 - Day 3, Court 2",  # comma only on the right side
+        "Roland Garros - Second Round",  # no commas at all
+    ):
+        c = classify_stream(name, league_event_type="event", event_league_sport="tennis")
+        assert c.category == StreamCategory.TENNIS_MATCH
+        assert not (c.team1 and c.team2), name
+
+
+def test_custom_teams_regex_reachable_on_tennis_path():
+    """The tennis step claims streams before the cascade's custom-regex step,
+    so it must consult the custom teams pattern itself (#439)."""
+    cfg = CustomRegexConfig(
+        teams_pattern=(r"Upcoming:\s*(?P<team1>[^-]+?)\s*-\s*(?P<team2>.+?)\s*\d{2}-\d{2}"),
+        teams_enabled=True,
+    )
+    c = classify_stream(
+        "Tennis 06: Live & Upcoming: Stefanini, Lucrezia - Maria, Tatjana 07-10 13:20",
+        league_event_type="event",
+        event_league_sport="tennis",
+        custom_regex=cfg,
+    )
+    assert c.category == StreamCategory.TENNIS_MATCH
+    assert c.custom_regex_used
+    assert c.team1 and "stefanini" in c.team1.lower()
+    assert c.team2 and "maria" in c.team2.lower()
+
+
+def test_custom_teams_regex_miss_falls_through_to_builtin():
+    """A non-matching custom pattern must not block builtin extraction."""
+    cfg = CustomRegexConfig(
+        teams_pattern=r"NEVER (?P<team1>x) MATCHES (?P<team2>y)",
+        teams_enabled=True,
+    )
+    c = classify_stream(
+        "Wimbledon: Zheng vs Norrie",
+        league_event_type="event",
+        event_league_sport="tennis",
+        custom_regex=cfg,
+    )
+    assert c.category == StreamCategory.TENNIS_MATCH
+    assert not c.custom_regex_used
+    assert c.team1 and "zheng" in c.team1.lower()
+    assert c.team2 and "norrie" in c.team2.lower()
+
+
+def test_comma_form_names_score_against_players():
+    """Extracted comma-form sides keep the comma; surname scoring must not
+    care ('Maria, Tatjana' still surname-subset-hits 'Maria')."""
+    stefanini = _player("Lucrezia Stefanini", "Stefanini")
+    maria = _player("Tatjana Maria", "Maria")
+    score = _TM._pair_score(
+        normalize_text("Stefanini, Lucrezia"),
+        normalize_text("Maria, Tatjana"),
+        maria,
+        stefanini,
+    )
+    assert score == 100
 
 
 def test_tennis_group_does_not_classify_racing():
@@ -374,9 +457,7 @@ def test_side_score_multiword_surname():
 
 
 def test_side_score_doubles_with_underscores():
-    player = _player(
-        "Edouard Roger-Vasselin / Laura Siegemund", "Roger-Vasselin/Siegemund"
-    )
+    player = _player("Edouard Roger-Vasselin / Laura Siegemund", "Roger-Vasselin/Siegemund")
     assert _TM._side_score("roger_vasselin siegemund", player) >= 75
 
 
@@ -524,9 +605,11 @@ def test_court_extraction_from_real_stream_names():
         "12",
     }
     assert _extract_courts("wimbledon day 5 centre court ft djokovic sabalenka") == {"centre"}
-    assert _extract_courts(
-        "wimbledon day 6 court 18 court 16 no 2 court ft fernandez doubles"
-    ) == {"18", "16", "2"}
+    assert _extract_courts("wimbledon day 6 court 18 court 16 no 2 court ft fernandez doubles") == {
+        "18",
+        "16",
+        "2",
+    }
     assert _extract_courts("wimbledon second round") == set()
 
 
@@ -620,9 +703,7 @@ def test_round_feed_fans_out_to_rounds_matches():
         league_event_type="event",
         event_league_sport="tennis",
     )
-    outcomes = tm.match_feed(
-        c, ["atp", "wta"], date(2026, 7, 2), stream_id=1, user_tz=tz
-    )
+    outcomes = tm.match_feed(c, ["atp", "wta"], date(2026, 7, 2), stream_id=1, user_tz=tz)
     assert {o.event.id for o in outcomes if o.is_matched} == {"r1", "r2"}
 
 
@@ -652,3 +733,215 @@ def test_court_feed_no_matches_on_court_fails():
     outcomes = tm.match_feed(c, ["atp"], date(2026, 7, 4), stream_id=1, user_tz=tz)
     assert len(outcomes) == 1 and not outcomes[0].is_matched
     assert "No tennis matches on" in (outcomes[0].detail or "")
+
+
+# ---------------------------------------------------------------------------
+# Feed fan-out guards (#316): tournament + draw
+# ---------------------------------------------------------------------------
+
+
+def _tournament_event(eid, tournament, court, start, draw="Men's Singles", round_name="Semifinals"):
+    e = _court_event(eid, "atp", court, start, round_name=round_name)
+    e.tournament_name = tournament
+    e.draw_type = draw
+    return e
+
+
+def test_court_feed_does_not_cross_tournaments():
+    """A Wimbledon court stream must not join Court 1 at other tournaments."""
+    tz = ZoneInfo("America/New_York")
+    day = datetime(2026, 7, 6, 8, 0, tzinfo=tz)
+    events = [
+        _tournament_event("wim1", "Wimbledon", "No. 1 Court", day),
+        _tournament_event("nor1", "Nordea Open", "Court 1", day.replace(hour=9)),
+        _tournament_event(
+            "hof1",
+            "Cerity Partners Hall of Fame Open for the Van Alen Cup",
+            "Court 1",
+            day.replace(hour=10),
+        ),
+    ]
+    tm = TennisMatcher(service=_PoolService(events), cache=_NoCache())
+    c = classify_stream(
+        "Wimbledon Day #8 No 1 Court ft De Minaur Fritz @ Jul 6 8:00 AM :Tennis  05",
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    outcomes = tm.match_feed(c, ["atp"], date(2026, 7, 6), stream_id=1, user_tz=tz)
+    assert {o.event.id for o in outcomes if o.is_matched} == {"wim1"}
+
+
+def test_court_feed_without_tournament_hint_is_unfiltered():
+    """No tournament named in the stream → pool passes through (old behavior)."""
+    tz = ZoneInfo("America/New_York")
+    day = datetime(2026, 7, 6, 8, 0, tzinfo=tz)
+    events = [
+        _tournament_event("a1", "Wimbledon", "Court 2", day),
+        _tournament_event("b1", "Nordea Open", "Court 2", day.replace(hour=9)),
+    ]
+    tm = TennisMatcher(service=_PoolService(events), cache=_NoCache())
+    c = classify_stream(
+        "Day #8 No 2 Court @ Jul 6 8:00 AM :Tennis  02",
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    outcomes = tm.match_feed(c, ["atp"], date(2026, 7, 6), stream_id=1, user_tz=tz)
+    assert {o.event.id for o in outcomes if o.is_matched} == {"a1", "b1"}
+
+
+def test_generic_tournament_tokens_do_not_create_hints():
+    """'Open'/'Masters' alone must not read as naming a tournament."""
+    tz = ZoneInfo("America/New_York")
+    day = datetime(2026, 7, 6, 8, 0, tzinfo=tz)
+    events = [
+        _tournament_event("a1", "Nordea Open", "Court 2", day),
+    ]
+    tm = TennisMatcher(service=_PoolService(events), cache=_NoCache())
+    c = classify_stream(
+        "Open Day #8 No 2 Court @ Jul 6 8:00 AM",  # "Open" is generic
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    outcomes = tm.match_feed(c, ["atp"], date(2026, 7, 6), stream_id=1, user_tz=tz)
+    assert {o.event.id for o in outcomes if o.is_matched} == {"a1"}
+
+
+def test_round_feed_respects_declared_draw():
+    """'Ladies' Singles Semifinals' must not fan onto the men's doubles semi."""
+    tz = ZoneInfo("America/New_York")
+    day = datetime(2026, 7, 9, 7, 0, tzinfo=tz)
+    events = [
+        _tournament_event("ls1", "Wimbledon", "Centre Court", day, draw="Ladies' Singles"),
+        _tournament_event(
+            "ls2", "Wimbledon", "No. 1 Court", day.replace(hour=9), draw="Women's Singles"
+        ),
+        _tournament_event(
+            "md1", "Wimbledon", "No. 1 Court", day.replace(hour=8), draw="Gentlemen's Doubles"
+        ),
+    ]
+    tm = TennisMatcher(service=_PoolService(events), cache=_NoCache())
+    c = classify_stream(
+        "Ladies' Singles Semifinals @ Jul 9 7:00 AM :Tennis  01",
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    outcomes = tm.match_feed(c, ["atp"], date(2026, 7, 9), stream_id=1, user_tz=tz)
+    assert {o.event.id for o in outcomes if o.is_matched} == {"ls1", "ls2"}
+
+
+def test_court_feed_ft_suffix_does_not_scope_draw():
+    """Court feeds cover the court's whole slate — 'ft Doubles Semifinals' is
+    marketing, not scope; singles on the same court must stay."""
+    tz = ZoneInfo("America/New_York")
+    day = datetime(2026, 7, 9, 8, 0, tzinfo=tz)
+    events = [
+        _tournament_event("s1", "Wimbledon", "No. 1 Court", day, draw="Gentlemen's Singles"),
+        _tournament_event(
+            "d1", "Wimbledon", "No. 1 Court", day.replace(hour=10), draw="Gentlemen's Doubles"
+        ),
+    ]
+    tm = TennisMatcher(service=_PoolService(events), cache=_NoCache())
+    c = classify_stream(
+        "Wimbledon Day #11 No 1 Court ft Doubles Semifinals @ Jul 9 8:00 AM :Tennis  06",
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    outcomes = tm.match_feed(c, ["atp"], date(2026, 7, 9), stream_id=1, user_tz=tz)
+    assert {o.event.id for o in outcomes if o.is_matched} == {"s1", "d1"}
+
+
+def test_draw_hint_extraction():
+    from teamarr.consumers.matching.tennis_matcher import _extract_draw_hints
+
+    assert _extract_draw_hints("ladies singles semifinals") == ("women", "singles")
+    assert _extract_draw_hints("gentlemens doubles semifinals") == ("men", "doubles")
+    assert _extract_draw_hints("womens doubles") == ("women", "doubles")
+    # "womens" must not read as "mens"
+    assert _extract_draw_hints("womens singles")[0] == "women"
+    assert _extract_draw_hints("mixed doubles final") == (None, "mixed")
+    assert _extract_draw_hints("wimbledon day 8 no 1 court") == (None, None)
+
+
+def test_parser_dedups_duplicate_competition_entries():
+    """ESPN sometimes lists one match twice — deterministic ids collapse it."""
+    import copy
+
+    doubled = copy.deepcopy(WIMBLEDON)
+    grouping = doubled["groupings"][0]
+    dup = copy.deepcopy(grouping["competitions"][0])
+    dup["id"] = "999999"  # different unstable comp id, same players/time
+    grouping["competitions"].append(dup)
+
+    events = _Parser()._parse_tennis_matches(doubled, "atp", "tennis", date(2026, 7, 6))
+    names = [e.short_name for e in events]
+    assert names.count("F. Cobolli vs A. de Minaur") == 1
+
+
+# ---------------------------------------------------------------------------
+# Majors-only subscription (#283 first slice)
+# ---------------------------------------------------------------------------
+
+
+def test_parser_carries_major_flag():
+    import copy
+
+    slam = copy.deepcopy(WIMBLEDON)
+    slam["major"] = True
+    events = _Parser()._parse_tennis_matches(slam, "atp", "tennis", date(2026, 7, 6))
+    assert events and all(e.is_major for e in events)
+
+    minor = copy.deepcopy(WIMBLEDON)
+    minor["major"] = False
+    events = _Parser()._parse_tennis_matches(minor, "atp", "tennis", date(2026, 7, 6))
+    assert events and not any(e.is_major for e in events)
+
+
+def test_majors_only_filters_feed_fanout():
+    tz = ZoneInfo("America/New_York")
+    day = datetime(2026, 7, 6, 8, 0, tzinfo=tz)
+    slam = _tournament_event("wim1", "Wimbledon", "No. 1 Court", day)
+    slam.is_major = True
+    minor = _tournament_event("nor1", "Nordea Open", "Court 1", day.replace(hour=9))
+    minor.is_major = False
+
+    tm = TennisMatcher(service=_PoolService([slam, minor]), cache=_NoCache(), majors_only=True)
+    # Generic court feed with no tournament hint — majors filter must still
+    # keep Nordea out of the pool entirely.
+    c = classify_stream(
+        "Day #8 No 1 Court @ Jul 6 8:00 AM :Tennis  02",
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    outcomes = tm.match_feed(c, ["atp"], date(2026, 7, 6), stream_id=1, user_tz=tz)
+    assert {o.event.id for o in outcomes if o.is_matched} == {"wim1"}
+
+    # Same court key for both — filter must be the reason Nordea is out
+    tm_off = TennisMatcher(service=_PoolService([slam, minor]), cache=_NoCache(), majors_only=False)
+    outcomes_off = tm_off.match_feed(c, ["atp"], date(2026, 7, 6), stream_id=1, user_tz=tz)
+    assert {o.event.id for o in outcomes_off if o.is_matched} == {"wim1", "nor1"}
+
+
+def test_majors_only_filters_player_matching():
+    tz = ZoneInfo("America/New_York")
+    day = datetime(2026, 7, 6, 12, 0, tzinfo=tz)
+    minor = _tennis_event(
+        "nor2", _player("Casper Ruud", "Ruud"), _player("Holger Rune", "Rune"), day
+    )
+    minor.is_major = False
+
+    tm = TennisMatcher(service=_PoolService([minor]), cache=_NoCache(), majors_only=True)
+    c = classify_stream(
+        "Nordea Open: Ruud vs Rune @ Jul 6 12:00 PM",
+        league_event_type="event",
+        event_league_sport="tennis",
+    )
+    outcome = tm.match(
+        c,
+        "atp",
+        date(2026, 7, 6),
+        group_id=1,
+        stream_id=1,
+        generation=1,
+        user_tz=tz,
+    )
+    assert not outcome.is_matched

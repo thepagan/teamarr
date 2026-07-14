@@ -122,6 +122,17 @@ class Event:
     season_year: int | None = None
     season_type: str | None = None
 
+    # Neutral-site flag (ESPN competitions[].neutralSite): bowls, CFP/NCAA
+    # tournament rounds, showcase games. Flips matchup framing to 'vs.' and
+    # drops host framing (Gracenote convention, #355 item 3).
+    neutral_site: bool = False
+
+    # Broadcast name → market ('national'/'home'/'away') from ESPN
+    # broadcasts[] — data-driven feed discrimination for team-branded and
+    # regional channels ('Brewers.TV', 'YES') that carry no HOME/AWAY term
+    # (#343). broadcasts above keeps the flat name list for display.
+    broadcast_markets: dict[str, str] = field(default_factory=dict)
+
     # Betting odds (from scoreboard API, usually same-day only)
     odds_data: dict | None = None
 
@@ -136,6 +147,11 @@ class Event:
     # which already fetches it, so zero extra calls).
     game_preview: str = ""  # summary article[type=Preview].description (pregame)
     series_summary: str = ""  # summary seasonseries[0].summary, e.g. "Series tied 1-1"
+    # Structured preview (tvnk.15): recent form from summary lastFiveGames —
+    # W-L over each team's last five ("4-1"). Available days ahead, unlike
+    # preview prose which only populates ~T-0/T-1.
+    home_last_five: str = ""
+    away_last_five: str = ""
 
     # MMA-specific: when main card begins (prelims start at start_time)
     main_card_start: datetime | None = None
@@ -180,6 +196,7 @@ class Event:
     round_name: str | None = None  # e.g., "Round 4", "Qualifying 1st Round"
     court: str | None = None  # e.g., "Centre Court", "No. 1 Court"
     draw_type: str | None = None  # e.g., "Men's Singles", "Mixed Doubles"
+    is_major: bool = False  # ESPN tournament major flag (grand slams)
 
 
 @dataclass(frozen=True)

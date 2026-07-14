@@ -8,6 +8,8 @@ from fastapi import APIRouter, HTTPException, status
 from teamarr.api.models import (
     TemplateCreate,
     TemplateFullResponse,
+    TemplatePreviewRequest,
+    TemplatePreviewResponse,
     TemplateResponse,
     TemplateUpdate,
     TemplateValidateRequest,
@@ -30,6 +32,9 @@ from teamarr.database.templates import (
 from teamarr.database.templates import (
     update_template as db_update,
 )
+from teamarr.templates.conditions import get_condition_selector
+from teamarr.templates.preview import build_live_context, build_static_samples
+from teamarr.templates.resolver import TemplateResolver
 from teamarr.templates.validation import (
     validate_conditional_descriptions,
     validate_fields,
@@ -66,6 +71,18 @@ def _log_validation_warnings(template_type: str | None, data: dict) -> None:
     for field, warnings in results.items():
         for w in warnings:
             logger.warning("[template-validation] %s: %s", field, w.message)
+    # Filler condition rows (#420) — same row shape, validated per register.
+    for rows_field in (
+        "pregame_conditional_rows",
+        "postgame_conditional_rows",
+        "idle_conditional_rows",
+    ):
+        rows = data.get(rows_field)
+        if not rows:
+            continue
+        for field, warnings in validate_conditional_descriptions(rows, is_event).items():
+            for w in warnings:
+                logger.warning("[template-validation] %s.%s: %s", rows_field, field, w.message)
 
 # JSON fields that need serialization from Pydantic models to strings
 _JSON_FIELDS = {
@@ -80,6 +97,9 @@ _JSON_FIELDS = {
     "idle_content",
     "idle_conditional",
     "idle_offseason",
+    "pregame_conditional_rows",
+    "postgame_conditional_rows",
+    "idle_conditional_rows",
     "conditional_descriptions",
 }
 
@@ -133,6 +153,107 @@ def validate_template(req: TemplateValidateRequest):
         validate_conditional_descriptions(req.conditional_descriptions or [], is_event)
     )
     return {"valid": not results, "warnings": warnings_as_dicts(results)}
+
+
+@router.post("/templates/preview", response_model=TemplatePreviewResponse)
+def preview_template(req: TemplatePreviewRequest):
+    """Render template strings through the real resolver, with condition trace (#357).
+
+    The source of truth for the editor's preview: runs the SAME
+    TemplateResolver (substitution, cleanup, suffix handling) and conditional
+    selector that EPG generation uses, against a real live event for the
+    league when available (same cached machinery as /variables/samples),
+    falling back to static sample data otherwise.
+
+    ``fields`` keys are opaque to the server and echoed back — callers may key
+    by field name or by the template string itself. ``conditional`` reports
+    which description row fired and a per-row why (largely closing #355 item
+    12's silent-condition gap).
+    """
+
+    ctx = build_live_context(req.league) if (req.live and req.league) else None
+    resolver = TemplateResolver()
+
+    if ctx is not None:
+        rendered = {k: resolver.resolve(v or "", ctx) for k, v in req.fields.items()}
+        samples = None
+    else:
+        samples = build_static_samples(req.league)
+        rendered = {k: resolver.resolve_with_map(v or "", samples) for k, v in req.fields.items()}
+
+    def _render(tmpl: str) -> str:
+        if ctx is not None:
+            return resolver.resolve(tmpl, ctx)
+        return resolver.resolve_with_map(tmpl, samples or {})
+
+    game_ctx = ctx.game_context if ctx else None
+
+    conditional = None
+    if req.conditional_descriptions is not None:
+        selected_fields, trace = get_condition_selector().select_fields_with_trace(
+            req.conditional_descriptions, ctx, game_ctx
+        )
+
+        def _index_for(field: str) -> int | None:
+            return next((r["index"] for r in trace if field in r["selected_for"]), None)
+
+        conditional = {
+            "rendered": _render(selected_fields.get("description", "")),
+            "selected_index": _index_for("description"),
+            "rendered_title": (
+                _render(selected_fields["title"]) if "title" in selected_fields else None
+            ),
+            "selected_title_index": _index_for("title"),
+            "rendered_subtitle": (
+                _render(selected_fields["subtitle"]) if "subtitle" in selected_fields else None
+            ),
+            "selected_subtitle_index": _index_for("subtitle"),
+            "rows": trace,
+        }
+
+    # Filler condition rows per register (#428). Rows evaluate against the
+    # preview event's game context — an approximation of generation's
+    # reference game (pregame → next, postgame/idle → last), which is exactly
+    # right for event channels and close for team channels since the sample
+    # picker prefers a just-completed game. The description walks the same
+    # cascade generation uses: winning row → other matching rows; None means
+    # the register's base description renders.
+    filler_conditional = None
+    if req.filler_conditional_rows:
+        filler_conditional = {}
+        for register, rows in req.filler_conditional_rows.items():
+            if not rows:
+                continue
+            fields, runner_ups, trace = get_condition_selector().select_filler_fields(
+                rows, ctx, game_ctx
+            )
+            rendered_desc = None
+            if "description" in fields:
+                for candidate in (fields["description"], *runner_ups):
+                    text = _render(candidate)
+                    if text.strip():
+                        rendered_desc = text
+                        break
+            fired = sorted(f for f in fields if f != "description")
+            if rendered_desc is not None:
+                fired.append("description")
+            filler_conditional[register] = {
+                "rendered_description": rendered_desc,
+                "rendered_title": _render(fields["title"]) if "title" in fields else None,
+                "rendered_subtitle": (
+                    _render(fields["subtitle"]) if "subtitle" in fields else None
+                ),
+                "fired": fired,
+                "rows": trace,
+            }
+
+    return {
+        "live": ctx is not None,
+        "league": req.league,
+        "fields": rendered,
+        "conditional": conditional,
+        "filler_conditional": filler_conditional,
+    }
 
 
 @router.post("/templates", response_model=TemplateResponse, status_code=status.HTTP_201_CREATED)

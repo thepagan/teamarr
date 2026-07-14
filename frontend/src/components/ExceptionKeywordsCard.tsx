@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { toast } from "sonner"
-import { Check, X, Pencil, Trash2, Loader2, Plus } from "lucide-react"
+import { Check, X, Pencil, Trash2, LoaderCircle, Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -80,7 +80,7 @@ export function ExceptionKeywordsCard() {
       keywordsQuery.refetch()
       setEditingKeyword(null)
       toast.success("Keyword updated")
-    } catch (err) {
+    } catch {
       toast.error("Failed to update keyword")
     }
   }
@@ -156,7 +156,7 @@ export function ExceptionKeywordsCard() {
                           })
                           keywordsQuery.refetch()
                           toast.success(`Updated behavior to "${newBehavior}"`)
-                        } catch (err) {
+                        } catch {
                           toast.error("Failed to update keyword behavior")
                         }
                       }}
@@ -239,7 +239,7 @@ export function ExceptionKeywordsCard() {
           </Select>
           <Button onClick={handleAddKeyword} disabled={createKeyword.isPending} className="w-full sm:w-auto">
             {createKeyword.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
+              <LoaderCircle className="h-4 w-4 animate-spin" />
             ) : (
               <Plus className="h-4 w-4" />
             )}
