@@ -973,6 +973,53 @@ def test_rebuild_skipped_when_check_current():
     assert conn.execute("SELECT COUNT(*) FROM stream_match_cache").fetchone()[0] == 2
 
 
+class _PostgresConstraintCursor:
+    def __init__(self, row=None):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _PostgresConstraintConnection:
+    dialect = "postgres"
+
+    def __init__(self, check_clause):
+        self.check_clause = check_clause
+        self.statements = []
+
+    def execute(self, statement, params=None):
+        self.statements.append(statement)
+        if "information_schema.table_constraints" in statement:
+            return _PostgresConstraintCursor(
+                ("stream_match_cache_match_method_check", self.check_clause)
+            )
+        return _PostgresConstraintCursor()
+
+
+def test_postgres_refreshes_stale_check_constraint_in_place():
+    conn = _PostgresConstraintConnection(
+        "match_method IN ('cache', 'fuzzy', 'no_match')"
+    )
+
+    _migrate_stream_match_cache_check(conn)
+
+    sql = "\n".join(conn.statements)
+    assert 'DROP CONSTRAINT "stream_match_cache_match_method_check"' in sql
+    assert "'direct'" in sql
+    assert "'epg'" in sql
+
+
+def test_postgres_keeps_current_check_constraint():
+    conn = _PostgresConstraintConnection(
+        "match_method IN ('cache', 'fuzzy', 'direct', 'epg')"
+    )
+
+    _migrate_stream_match_cache_check(conn)
+
+    assert len(conn.statements) == 1
+
+
 # ---------------------------------------------------------------------------
 # v80: filler final/not-final conditionals -> condition rows (#420)
 # ---------------------------------------------------------------------------

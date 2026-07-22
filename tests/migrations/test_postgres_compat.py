@@ -129,3 +129,21 @@ def test_qualified_upsert_boolean_guard_is_translated_for_postgres():
 
     assert "VALUES (%s, %s, FALSE)" in translated
     assert "WHERE stream_match_cache.user_corrected = FALSE" in translated
+
+
+def test_null_safe_parameter_comparisons_are_translated_for_postgres():
+    wrapper = _wrapper_with_columns({})
+
+    translated = wrapper._translate_query(
+        """
+        UPDATE managed_channel_streams
+        SET m3u_account_name = ?
+        WHERE m3u_account_name IS NOT ?
+          OR attach_at IS ?
+          OR removed_at IS NOT NULL
+        """
+    )
+
+    assert "m3u_account_name IS DISTINCT FROM %s" in translated
+    assert "attach_at IS NOT DISTINCT FROM %s" in translated
+    assert "removed_at IS NOT NULL" in translated

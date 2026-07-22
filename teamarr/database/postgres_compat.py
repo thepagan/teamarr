@@ -8,8 +8,12 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime, time
 from typing import Any
 
-_INSERT_TABLE_RE = re.compile(r"^\s*INSERT\s+INTO\s+(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)", re.IGNORECASE)
-_PRAGMA_TABLE_INFO_RE = re.compile(r"^\s*PRAGMA\s+table_info\((?P<table>[^)]+)\)\s*$", re.IGNORECASE)
+_INSERT_TABLE_RE = re.compile(
+    r"^\s*INSERT\s+INTO\s+(?P<table>[a-zA-Z_][a-zA-Z0-9_]*)", re.IGNORECASE
+)
+_PRAGMA_TABLE_INFO_RE = re.compile(
+    r"^\s*PRAGMA\s+table_info\((?P<table>[^)]+)\)\s*$", re.IGNORECASE
+)
 _SQLITE_MASTER_TABLE_RE = re.compile(
     r"""
     ^\s*SELECT\s+(?P<select>.+?)
@@ -107,7 +111,7 @@ class StaticCursorWrapper:
 class PostgresCursorWrapper:
     """sqlite-style cursor adapter for psycopg2 cursors."""
 
-    def __init__(self, connection: "PostgresConnectionWrapper", cursor: Any):
+    def __init__(self, connection: PostgresConnectionWrapper, cursor: Any):
         self._connection = connection
         self._cursor = cursor
         self.lastrowid = None
@@ -359,13 +363,22 @@ class PostgresConnectionWrapper:
         wrapped = [
             DBRow(
                 ["cid", "name", "type", "notnull", "dflt_value", "pk"],
-                [ordinal - 1, name, data_type, 0 if is_nullable == "YES" else 1, default, 1 if is_pk else 0],
+                [
+                    ordinal - 1,
+                    name,
+                    data_type,
+                    0 if is_nullable == "YES" else 1,
+                    default,
+                    1 if is_pk else 0,
+                ],
             )
             for name, data_type, is_nullable, default, ordinal, is_pk in rows
         ]
         return StaticCursorWrapper(wrapped)
 
-    def _sqlite_master_cursor(self, select_expr: str, table_name: str | None) -> StaticCursorWrapper:
+    def _sqlite_master_cursor(
+        self, select_expr: str, table_name: str | None
+    ) -> StaticCursorWrapper:
         select_expr = " ".join(select_expr.split()).upper()
         if table_name is None:
             with self._raw_connection.cursor() as cur:
@@ -415,6 +428,7 @@ class PostgresConnectionWrapper:
         translated = self._translate_boolean_update_literals(translated)
         translated = self._translate_boolean_coalesce_literals(translated)
         translated = self._translate_boolean_comparisons(translated)
+        translated = _translate_null_safe_placeholder_comparisons(translated)
         if translate_placeholders:
             translated = _translate_placeholders(translated)
         return translated
@@ -828,6 +842,27 @@ def _translate_placeholders(query: str) -> str:
         output.append(char)
 
     return "".join(output)
+
+
+def _translate_null_safe_placeholder_comparisons(query: str) -> str:
+    """Translate SQLite's null-safe IS/IS NOT parameter comparisons.
+
+    PostgreSQL only accepts ``IS [NOT] NULL`` (and boolean predicates), while
+    SQLite also allows a bound value on the right-hand side. PostgreSQL's
+    ``IS [NOT] DISTINCT FROM`` has the same null-safe value semantics.
+    """
+    translated = re.sub(
+        r"\bIS\s+NOT\s+\?",
+        "IS DISTINCT FROM ?",
+        query,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"\bIS\s+\?",
+        "IS NOT DISTINCT FROM ?",
+        translated,
+        flags=re.IGNORECASE,
+    )
 
 
 def _find_values_clause_end(query: str, start: int) -> int:

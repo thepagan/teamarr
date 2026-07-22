@@ -218,6 +218,10 @@ def _migrate_stream_match_cache_check(conn: sqlite3.Connection) -> None:
     restored in _run_migrations — algorithmic rows are disposable cache and
     re-derive on the next run.
     """
+    if getattr(conn, "dialect", None) == "postgres":
+        _migrate_postgres_stream_match_cache_check(conn)
+        return
+
     try:
         row = conn.execute(
             "SELECT sql FROM sqlite_master "
@@ -239,4 +243,45 @@ def _migrate_stream_match_cache_check(conn: sqlite3.Connection) -> None:
     logger.info(
         "[PRE-MIGRATE] stream_match_cache dropped to refresh stale "
         "match_method CHECK constraint (user corrections backed up)"
+    )
+
+
+def _migrate_postgres_stream_match_cache_check(conn) -> None:
+    """Refresh the match-method CHECK in place on PostgreSQL.
+
+    PostgreSQL's sqlite_master compatibility view cannot expose CREATE TABLE
+    SQL, so the SQLite rebuild path above cannot detect a stale constraint.
+    Altering the constraint in place preserves both pinned and disposable cache
+    rows and works even when schema_version was already advanced to v77.
+    """
+    row = conn.execute(
+        """
+        SELECT tc.constraint_name, cc.check_clause
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.check_constraints cc
+          ON cc.constraint_schema = tc.constraint_schema
+         AND cc.constraint_name = tc.constraint_name
+        WHERE tc.table_schema = current_schema()
+          AND tc.table_name = 'stream_match_cache'
+          AND tc.constraint_type = 'CHECK'
+          AND cc.check_clause LIKE '%match_method%'
+        """
+    ).fetchone()
+    if not row or "'direct'" in row[1]:
+        return
+
+    constraint_name = str(row[0]).replace('"', '""')
+    conn.execute(
+        f'ALTER TABLE stream_match_cache DROP CONSTRAINT "{constraint_name}"'
+    )
+    conn.execute(
+        """
+        ALTER TABLE stream_match_cache
+        ADD CONSTRAINT stream_match_cache_match_method_check
+        CHECK(match_method IN ('cache', 'user_corrected', 'alias', 'pattern',
+                               'fuzzy', 'keyword', 'no_match', 'direct', 'epg'))
+        """
+    )
+    logger.info(
+        "[PRE-MIGRATE] Refreshed PostgreSQL stream_match_cache match_method CHECK"
     )
