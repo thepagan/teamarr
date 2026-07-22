@@ -167,7 +167,7 @@ class TeamFilterSettings:
     include_teams: list[dict] | None = None
     exclude_teams: list[dict] | None = None
     mode: str = "include"  # 'include' or 'exclude'
-    bypass_filter_for_playoffs: bool = False  # Include all playoff games regardless of filter
+    bypass_filter_for_playoffs: bool = False  # Include all playoff/All-Star games regardless
 
 
 @dataclass
@@ -302,10 +302,10 @@ class FeedSeparationSettings:
 
 
 @dataclass
-class EmbySettings:
-    """Emby integration settings for Live TV guide refresh."""
+class MediaServerEntry:
+    """One Emby/Jellyfin server target for post-generation guide refresh (#471)."""
 
-    enabled: bool = False
+    name: str = ""
     url: str | None = None
     username: str | None = None
     password: str | None = None
@@ -324,24 +324,47 @@ class DatabaseSettings:
 
 
 @dataclass
-class JellyfinSettings:
-    """Jellyfin integration settings for Live TV guide refresh."""
+class EmbySettings:
+    """Emby integration settings for Live TV guide refresh.
+
+    Multi-server (#471): refresh fans out over every entry in `servers`.
+    """
 
     enabled: bool = False
+    servers: list[MediaServerEntry] = field(default_factory=list)
+
+
+@dataclass
+class JellyfinSettings:
+    """Jellyfin integration settings for Live TV guide refresh.
+
+    Multi-server (#471): refresh fans out over every entry in `servers`.
+    """
+
+    enabled: bool = False
+    servers: list[MediaServerEntry] = field(default_factory=list)
+
+
+@dataclass
+class ChannelsDVRServer:
+    """One Channels DVR server target for post-generation refresh (#381)."""
+
+    name: str = ""
     url: str | None = None
-    username: str | None = None
-    password: str | None = None
-    api_key: str | None = None
+    source_name: str | None = None
+    lineup_id: str | None = None
 
 
 @dataclass
 class ChannelsDVRSettings:
-    """Channels DVR integration settings for M3U + XMLTV refresh."""
+    """Channels DVR integration settings for M3U + XMLTV refresh.
+
+    Multi-server (#381): refresh fans out over every entry in `servers`.
+    All servers receive the same channel set/EPG from one Dispatcharr.
+    """
 
     enabled: bool = False
-    url: str | None = None
-    source_name: str | None = None
-    lineup_id: str | None = None
+    servers: list[ChannelsDVRServer] = field(default_factory=list)
 
 
 @dataclass

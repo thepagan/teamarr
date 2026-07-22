@@ -237,12 +237,20 @@ export interface FeedSeparationSettingsUpdate {
   label_style?: "team_name" | "short_name" | "home_away"
 }
 
-export interface EmbySettings {
-  enabled: boolean
+// One Emby/Jellyfin server target (#471). Secrets round-trip masked
+// ("********") for untouched rows; the backend merges stored values back.
+export interface MediaServerEntry {
+  name: string
   url: string | null
   username: string | null
   password: string | null
   api_key: string | null
+}
+
+export interface EmbySettings {
+  enabled: boolean
+  // Full-replace on update: send the complete list
+  servers: MediaServerEntry[]
 }
 
 export interface EmbyTestResponse {
@@ -254,10 +262,7 @@ export interface EmbyTestResponse {
 
 export interface JellyfinSettings {
   enabled: boolean
-  url: string | null
-  username: string | null
-  password: string | null
-  api_key: string | null
+  servers: MediaServerEntry[]
 }
 
 export interface JellyfinTestResponse {
@@ -267,11 +272,17 @@ export interface JellyfinTestResponse {
   error?: string | null
 }
 
-export interface ChannelsDVRSettings {
-  enabled: boolean
+export interface ChannelsDVRServer {
+  name: string
   url: string | null
   source_name: string | null
   lineup_id: string | null
+}
+
+export interface ChannelsDVRSettings {
+  enabled: boolean
+  // Full-replace on update: send the complete list
+  servers: ChannelsDVRServer[]
 }
 
 export interface ChannelsDVRTestResponse {

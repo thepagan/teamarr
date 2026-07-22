@@ -2,7 +2,7 @@
   <img src="docs/assets/images/teamarr_electric_blue.png" alt="Teamarr — Sports Channel Management for Dispatcharr" width="420">
 </p>
 
-<p align="center"><strong>Dynamic EPG Generator for Sports Channels</strong></p>
+<p align="center"><strong>Sports Channel Management for <a href="https://github.com/Dispatcharr/Dispatcharr">Dispatcharr</a></strong></p>
 
 ## Quick Start
 
@@ -75,7 +75,6 @@ If you're upgrading from 1.x, you have two options:
 |-----|-------------|
 | `latest` | Stable release |
 | `dev` | Development builds |
-| `1.4.9-archive` | Final 1.x release (no longer maintained) |
 
 ## Documentation
 

@@ -268,7 +268,7 @@ CREATE TABLE IF NOT EXISTS settings (
     default_exclude_teams JSON,                  -- Global exclude filter (same format)
     default_team_filter_mode TEXT DEFAULT 'include' CHECK(default_team_filter_mode IN ('include', 'exclude')),
     team_filter_enabled BOOLEAN DEFAULT 1,       -- Master toggle to enable/disable team filtering
-    default_bypass_filter_for_playoffs BOOLEAN DEFAULT 0, -- Include all playoff games regardless of team filter
+    default_bypass_filter_for_playoffs BOOLEAN DEFAULT 0, -- Include all playoff and All-Star games regardless of team filter
 
     -- Scheduled Generation
     cron_expression TEXT DEFAULT '0 * * * *',    -- Cron for auto EPG generation
@@ -439,11 +439,11 @@ CREATE TABLE IF NOT EXISTS settings (
         CHECK(feed_label_style IN ('team_name', 'short_name', 'home_away')),
 
     -- Emby Integration (Live TV Guide Refresh)
+    -- emby_servers is a JSON list of {name, url, username, password, api_key}
+    -- entries (#471 multi-server fan-out). Pre-v83 scalar columns may linger
+    -- in upgraded databases; they are unread.
     emby_enabled BOOLEAN DEFAULT 0,
-    emby_url TEXT,
-    emby_username TEXT,
-    emby_password TEXT,
-    emby_api_key TEXT,
+    emby_servers JSON,
 
     -- Database Configuration (stored in UI; runtime backend still selected at startup)
     database_backend TEXT DEFAULT 'sqlite' CHECK(database_backend IN ('sqlite', 'postgresql')),
@@ -453,23 +453,22 @@ CREATE TABLE IF NOT EXISTS settings (
     postgres_password TEXT,
 
     -- Jellyfin Integration (Live TV Guide Refresh)
+    -- jellyfin_servers: same shape as emby_servers (#471)
     jellyfin_enabled BOOLEAN DEFAULT 0,
-    jellyfin_url TEXT,
-    jellyfin_username TEXT,
-    jellyfin_password TEXT,
-    jellyfin_api_key TEXT,
+    jellyfin_servers JSON,
 
     -- Channels DVR Integration (M3U Source + XMLTV Lineup Refresh)
     -- Local API is unauthenticated by Channels DVR design; no credentials stored.
-    -- channelsdvr_lineup_id refreshes the XMLTV guide; without it CDVR
-    -- updates channels but leaves the EPG stale.
+    -- channelsdvr_servers is a JSON list of {name, url, source_name, lineup_id}
+    -- entries (#381 multi-server fan-out); each lineup_id refreshes that
+    -- server's XMLTV guide — without it CDVR updates channels but leaves the
+    -- EPG stale. Pre-v82 scalar columns (channelsdvr_url/source_name/lineup_id)
+    -- may linger in upgraded databases; they are unread.
     channelsdvr_enabled BOOLEAN DEFAULT 0,
-    channelsdvr_url TEXT,
-    channelsdvr_source_name TEXT,
-    channelsdvr_lineup_id TEXT,
+    channelsdvr_servers JSON,
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 81
+    schema_version INTEGER DEFAULT 83
 );
 
 -- Insert default settings
@@ -534,6 +533,14 @@ CREATE TABLE IF NOT EXISTS event_epg_groups (
     m3u_account_id INTEGER,                  -- Dispatcharr M3U account ID
     m3u_account_name TEXT,                   -- M3U account name for display
 
+    -- Group-name pattern binding (#450): when enabled, the source is bound to a
+    -- regex over live M3U group NAMES instead of the pinned m3u_group_id. The
+    -- pattern re-resolves to live group ids at stream-fetch time, so provider
+    -- renames (which always spawn a NEW Dispatcharr group id) re-bind
+    -- automatically. Scope: M3U-provided groups only.
+    m3u_group_name_pattern TEXT,
+    m3u_group_name_pattern_enabled BOOLEAN DEFAULT 0,
+
     -- Stale-source detection (lylt): a group is "stale" when its M3U source
     -- channel-group no longer exists in Dispatcharr (deleted/renamed). Distinct
     -- from off-season (group exists, zero current streams). Updated during the
@@ -583,7 +590,7 @@ CREATE TABLE IF NOT EXISTS event_epg_groups (
     exclude_teams JSON,                          -- Teams to exclude: same format
     team_filter_mode TEXT DEFAULT 'include'      -- 'include' (whitelist) or 'exclude' (blacklist)
         CHECK(team_filter_mode IN ('include', 'exclude')),
-    bypass_filter_for_playoffs BOOLEAN,          -- NULL=use default, 0=disabled, 1=enabled (include all playoff games)
+    bypass_filter_for_playoffs BOOLEAN,          -- NULL=use default, 0=disabled, 1=enabled (include all playoff and All-Star games)
     name_match_enabled BOOLEAN DEFAULT 1,        -- (ahow) Match streams whose name identifies a specific event (TEAM_VS_TEAM/EVENT_CARD/RACING) — the default matching type. DEFAULT 1 backfills existing sources on upgrade. One of three declared matching types alongside team_streams_enabled (Team) and epg_match_enabled (EPG).
     team_streams_enabled BOOLEAN DEFAULT 0,      -- Allow team-branded streams (e.g. "NHL | Toronto Maple Leafs") to match events
     epg_match_enabled BOOLEAN DEFAULT 0,         -- (183.6) Use Dispatcharr EPG program data to match static-named linear streams (ESPN, NBA1) and time-window them. Requires a Dispatcharr build with /api/epg/programs/search/ (0.24.0+). No global switch — per-source opt-in (3lp1).
@@ -1107,6 +1114,11 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('mex.1', 'espn', 'soccer/mex.1', NULL, 'Liga MX', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/22.png', NULL, 1, NULL, 'ligamx', 'team_vs_team', 'Liga MX Soccer', NULL, NULL, NULL, 1),
     ('arg.1', 'espn', 'soccer/arg.1', NULL, 'Argentine Liga Profesional', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/1.png', NULL, 1, 'LPA', 'lpa', 'team_vs_team', 'Argentine Liga Profesional Soccer', NULL, NULL, NULL, 1),
     ('bra.1', 'espn', 'soccer/bra.1', NULL, 'Brazilian Serie A', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/85.png', NULL, 1, 'Brasileirao', 'brasileirao', 'team_vs_team', 'Brazilian Serie A Soccer', NULL, NULL, NULL, 1),
+    -- Brazilian state championships (#60) — ESPN covers these 4 (free, richer data); the other 23 are TSDB-only (see premium block below)
+    ('bra.camp.carioca', 'espn', 'soccer/bra.camp.carioca', NULL, 'Brazilian Campeonato Carioca', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2265.png', NULL, 1, 'Carioca', 'carioca', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('bra.camp.paulista', 'espn', 'soccer/bra.camp.paulista', NULL, 'Brazilian Campeonato Paulista', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2322.png', NULL, 1, 'Paulista', 'paulista', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('bra.camp.gaucho', 'espn', 'soccer/bra.camp.gaucho', NULL, 'Brazilian Campeonato Gaucho', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2272.png', NULL, 1, 'Gaucho', 'gaucho', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('bra.camp.mineiro', 'espn', 'soccer/bra.camp.mineiro', NULL, 'Brazilian Campeonato Mineiro', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/2360.png', NULL, 1, 'Mineiro', 'mineiro', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('col.1', 'espn', 'soccer/col.1', NULL, 'Colombian Primera A', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/1543.png', NULL, 1, NULL, 'dimayor', 'team_vs_team', 'Colombian Primera A Soccer', NULL, NULL, NULL, 1),
     ('conmebol.libertadores', 'espn', 'soccer/conmebol.libertadores', NULL, 'Copa Libertadores', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/13.png', NULL, 1, 'Libertadores', 'libertadores', 'team_vs_team', 'Copa Libertadores Soccer', NULL, NULL, NULL, 1),
     ('conmebol.sudamericana', 'espn', 'soccer/conmebol.sudamericana', NULL, 'Copa Sudamericana', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/49.png', NULL, 1, 'Sudamericana', 'sudamericana', 'team_vs_team', 'Copa Sudamericana Soccer', NULL, NULL, NULL, 1),
@@ -1118,6 +1130,30 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     -- uru.2: ESPN data is severely stale (2011 roster, 2010 scoreboard) — TSDB only
     ('uru.2', 'tsdb', '5072', 'Uruguayan Segunda División', 'AUF Segunda', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/htc3kb1740672581.png', NULL, 1, NULL, 'uru.2', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
     ('svenska-cupen', 'tsdb', '4756', 'Svenska Cupen', 'Svenska Cupen', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/p37u1n1694211430.png', NULL, 1, NULL, 'svenska-cupen', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    -- Brazilian state championships (#60) — the 23 states ESPN does NOT cover (Carioca/Paulista/Gaucho/Mineiro live on ESPN above); idLeague + badge validated against TSDB search_all_leagues.php, 2026 fixtures confirmed
+    ('bra.camp.acreano', 'tsdb', '5676', 'Brazilian Campeonato Acreano', 'Brazilian Campeonato Acreano', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/4d9le21754492204.png', NULL, 1, 'Acreano', 'acreano', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.alagoano', 'tsdb', '5677', 'Brazilian Campeonato Alagoano', 'Brazilian Campeonato Alagoano', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/2tcrj61767438744.png', NULL, 1, 'Alagoano', 'alagoano', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.amapaense', 'tsdb', '5678', 'Brazilian Campeonato Amapaense', 'Brazilian Campeonato Amapaense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/6sy3xd1754493984.png', NULL, 1, 'Amapaense', 'amapaense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.amazonense', 'tsdb', '5679', 'Brazilian Campeonato Amazonense', 'Brazilian Campeonato Amazonense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/t9nfej1754494955.png', NULL, 1, 'Amazonense', 'amazonense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.baiano', 'tsdb', '5684', 'Brazilian Campeonato Baiano', 'Brazilian Campeonato Baiano', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/ehk7hw1756631450.png', NULL, 1, 'Baiano', 'baiano', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.brasiliense', 'tsdb', '5685', 'Brazilian Campeonato Brasiliense', 'Brazilian Campeonato Brasiliense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/7z9n1v1756632496.png', NULL, 1, 'Brasiliense', 'brasiliense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.capixaba', 'tsdb', '5686', 'Brazilian Campeonato Capixaba', 'Brazilian Campeonato Capixaba', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/5f2rcm1756633054.png', NULL, 1, 'Capixaba', 'capixaba', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.catarinense', 'tsdb', '5687', 'Brazilian Campeonato Catarinense', 'Brazilian Campeonato Catarinense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/rvn16n1756635839.png', NULL, 1, 'Catarinense', 'catarinense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.cearense', 'tsdb', '5689', 'Brazilian Campeonato Cearense', 'Brazilian Campeonato Cearense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/gm4k7s1756639011.png', NULL, 1, 'Cearense', 'cearense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.goiano', 'tsdb', '5760', 'Brazilian Campeonato Goiano', 'Brazilian Campeonato Goiano', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/8c7y7a1766562491.png', NULL, 1, 'Goiano', 'goiano', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.maranhense', 'tsdb', '5761', 'Brazilian Campeonato Maranhense', 'Brazilian Campeonato Maranhense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/elyo6m1766564369.png', NULL, 1, 'Maranhense', 'maranhense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.matogrossense', 'tsdb', '5762', 'Brazilian Campeonato MatoGrossense', 'Brazilian Campeonato MatoGrossense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/sdodne1766565649.png', NULL, 1, 'MatoGrossense', 'matogrossense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.paraense', 'tsdb', '5764', 'Brazilian Campeonato Paraense', 'Brazilian Campeonato Paraense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/2l12dd1766567504.png', NULL, 1, 'Paraense', 'paraense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.paraibano', 'tsdb', '5765', 'Brazilian Campeonato Paraibano', 'Brazilian Campeonato Paraibano', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/35w0h11766570162.png', NULL, 1, 'Paraibano', 'paraibano', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.paranaense', 'tsdb', '5766', 'Brazilian Campeonato Paranaense', 'Brazilian Campeonato Paranaense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/fp5qis1766570793.png', NULL, 1, 'Paranaense', 'paranaense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.pernambucano', 'tsdb', '5768', 'Brazilian Campeonato Pernambucano', 'Brazilian Campeonato Pernambucano', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/2rleuk1766573797.png', NULL, 1, 'Pernambucano', 'pernambucano', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.piauiense', 'tsdb', '5769', 'Brazilian Campeonato Piauiense', 'Brazilian Campeonato Piauiense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/xvlw7i1766575848.png', NULL, 1, 'Piauiense', 'piauiense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.potiguar', 'tsdb', '5770', 'Brazilian Campeonato Potiguar', 'Brazilian Campeonato Potiguar', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/dw5y8q1766577811.png', NULL, 1, 'Potiguar', 'potiguar', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.rondoniense', 'tsdb', '5771', 'Brazilian Campeonato Rondoniense', 'Brazilian Campeonato Rondoniense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/vnv80t1766578247.png', NULL, 1, 'Rondoniense', 'rondoniense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.roraimense', 'tsdb', '5772', 'Brazilian Campeonato Roraimense', 'Brazilian Campeonato Roraimense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/rxf2n11766581225.png', NULL, 1, 'Roraimense', 'roraimense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.sergipano', 'tsdb', '5773', 'Brazilian Campeonato Sergipano', 'Brazilian Campeonato Sergipano', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/g5e1ig1766584230.png', NULL, 1, 'Sergipano', 'sergipano', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.sulmatogrossense', 'tsdb', '5774', 'Brazilian Campeonato SulMatoGrossense', 'Brazilian Campeonato SulMatoGrossense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/rzdwrs1766584859.png', NULL, 1, 'SulMatoGrossense', 'sulmatogrossense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
+    ('bra.camp.tocantinense', 'tsdb', '5775', 'Brazilian Campeonato Tocantinense', 'Brazilian Campeonato Tocantinense', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/ghbod11766585463.png', NULL, 1, 'Tocantinense', 'tocantinense', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
     -- Community league requests (#220-229) — provider_league_name validated against TSDB lookupleague.php (strLeague exact)
     ('can.1', 'tsdb', '4820', 'Canadian Premier League', 'Canadian Premier League', 'soccer', 'https://r2.thesportsdb.com/images/media/league/logo/7jqvqs1589104556.png', NULL, 1, NULL, 'can.1', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
     ('swe.2', 'tsdb', '4403', 'Swedish Superettan', 'Swedish Superettan', 'soccer', 'https://r2.thesportsdb.com/images/media/league/badge/uvzmu21707459258.png', NULL, 1, NULL, 'swe.2', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
@@ -1666,6 +1702,19 @@ CREATE TABLE IF NOT EXISTS condition_presets (
     -- Condition configuration (JSON array)
     -- e.g., [{"condition": "win_streak", "value": "5", "priority": 10, "template": "..."}]
     conditions JSON NOT NULL DEFAULT '[]'
+);
+
+
+-- =============================================================================
+-- DELETED_DEFAULT_TEMPLATES TABLE (#487)
+-- Tombstones for starter-set template names the user deleted or renamed
+-- away. seed_default_templates skips these, so user intent survives
+-- restarts. Cleared by the explicit "Restore starter templates" action.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS deleted_default_templates (
+    name TEXT PRIMARY KEY,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 

@@ -23,6 +23,8 @@ Variables are scoped to the template type they make sense in. The template edito
 
 If you hand-type a scope-restricted variable into a template where it doesn't belong (e.g., `{team}` in an event template), it will still resolve (backward compatibility), but the picker won't offer it. Use the picker to stay within the intended scope.
 
+Hovering any variable in the picker shows its description and an example value drawn from the current preview (so with a live preview selected, the example is real data from that event). Variables insert at the cursor of the last field you clicked into — the picker reminds you to click into a field first when none is focused.
+
 ## Previewing Templates
 
 The template editor renders a live preview of every field as you type. The **Previewing as** bar above the tabs picks which league to preview against — the leagues you've subscribed to (from the [Subscriptions](../subscriptions) tab, plus the leagues of teams you follow) are listed with their logos, grouped by sport and searchable. Before you've subscribed to anything, all available leagues are shown. It drives every preview on the page: the inline per-field previews, the condition trace on the Conditions tab, and the **Guide Preview** card in the right rail — an EPG-style card showing the title, subtitle, and description exactly as a viewer's guide would, including any [conditional rows](conditions.md) that win a field for the preview event (marked with a green target).
@@ -86,6 +88,25 @@ The same reconstructed URL is sent everywhere it's needed — the EPG `<icon>` *
 Dispatcharr channel logo — so the guide artwork and the channel logo always match. The
 live preview in the template editor applies the base URL too, so what you see matches the
 generated output (and renders the actual image so you can confirm the link resolves).
+
+### URL-encoding variable values (`|urlencode`)
+
+When a variable value goes into the **query string** of an art URL, characters like
+spaces and `&` need to be percent-encoded — otherwise a value such as
+`{race_name}` = `Pit Stop & Podium` truncates the URL at the `&`, so only the first
+part reaches Game-Thumbs. Add the `|urlencode` filter (short alias `|url`) to any
+variable to encode its value:
+
+```
+/f1/cover?title={race_name|urlencode}&subtitle={session_name|urlencode}&iconurl=
+```
+
+- The filter encodes **only the variable's value** — the template's own `?`, `&`, and
+  `=` that form the URL structure stay literal.
+- It's **opt-in**: variables without the filter are unchanged, so a variable that already
+  holds a full URL is never double-encoded.
+- A misspelled filter (e.g. `|urlencodee`) renders literally, just like a misspelled
+  variable name, so you can spot the typo. The live preview applies the filter too.
 
 ---
 
