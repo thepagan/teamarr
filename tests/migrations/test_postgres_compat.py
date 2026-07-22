@@ -1,3 +1,7 @@
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+from teamarr.database import connection
 from teamarr.database.postgres_compat import DBRow, PostgresConnectionWrapper, StaticCursorWrapper
 
 
@@ -147,3 +151,52 @@ def test_null_safe_parameter_comparisons_are_translated_for_postgres():
     assert "m3u_account_name IS DISTINCT FROM %s" in translated
     assert "attach_at IS NOT DISTINCT FROM %s" in translated
     assert "removed_at IS NOT NULL" in translated
+
+
+def test_postgres_init_runs_structural_migrations_before_schema(monkeypatch):
+    calls = []
+
+    class FakeConnection:
+        def executescript(self, _script):
+            calls.append("schema")
+
+        def execute(self, _query, _params=None):
+            return StaticCursorWrapper([])
+
+        def commit(self):
+            calls.append("commit")
+
+    @contextmanager
+    def fake_get_db(_db_path=None):
+        yield FakeConnection()
+
+    monkeypatch.setattr(connection, "get_database_url", lambda: "postgresql://test")
+    monkeypatch.setattr(connection, "get_db", fake_get_db)
+    monkeypatch.setattr(connection, "build_postgres_schema", lambda _sql: "SCHEMA")
+    monkeypatch.setattr(
+        connection,
+        "run_pre_migrations",
+        lambda _conn: calls.append("pre_migrations"),
+    )
+    monkeypatch.setattr(connection, "_normalize_postgres_schema", lambda _conn: None)
+    monkeypatch.setattr(connection, "_run_migrations", lambda _conn: None)
+    monkeypatch.setattr(connection, "_seed_tsdb_cache_if_needed", lambda _conn: None)
+    monkeypatch.setattr(
+        connection,
+        "_maybe_auto_import_sqlite_into_postgres",
+        lambda _conn, _path: None,
+    )
+
+    from teamarr.database import reconciliation
+
+    monkeypatch.setattr(
+        reconciliation,
+        "reconcile_schema",
+        lambda _conn, _sql: SimpleNamespace(
+            columns_added=0, columns_by_table={}, errors=[]
+        ),
+    )
+
+    connection.init_db()
+
+    assert calls[:2] == ["pre_migrations", "schema"]

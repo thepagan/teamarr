@@ -140,6 +140,10 @@ def init_db(db_path: Path | str | None = None) -> None:
         schema_sql = build_postgres_schema(sqlite_schema_sql)
 
         with get_db(db_path) as conn:
+            # Existing PostgreSQL databases need the same structural repairs as
+            # SQLite before CREATE TABLE IF NOT EXISTS runs. In particular,
+            # stale CHECK constraints cannot be updated by schema application.
+            run_pre_migrations(conn)
             conn.executescript(schema_sql)
             _normalize_postgres_schema(conn)
 
