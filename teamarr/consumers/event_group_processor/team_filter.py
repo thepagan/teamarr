@@ -26,6 +26,71 @@ class TeamFiltering:
         _dispatcharr_client: Any
         _service: Any
 
+    def _filter_by_followed_soccer_teams(
+        self,
+        matched_streams: list[dict],
+        group: "EventEPGGroup",
+        conn,
+    ) -> tuple[list[dict], int]:
+        """Enforce the effective ``Follow Teams`` soccer subscription.
+
+        Team-based soccer subscriptions deliberately discover every league a
+        followed club may enter.  Discovery must not turn into a subscription
+        to every other club in those competitions, though: only matches
+        involving a followed club pass this filter.  Non-soccer events are
+        untouched and can still be governed by the normal default team filter.
+        """
+        from teamarr.database.subscription import get_subscription
+
+        if group.subscription_leagues is not None:
+            soccer_mode = group.subscription_soccer_mode
+            followed_teams = group.subscription_soccer_followed_teams
+        else:
+            subscription = get_subscription(conn)
+            soccer_mode = subscription.soccer_mode
+            followed_teams = subscription.soccer_followed_teams
+
+        if soccer_mode != "teams" or not followed_teams:
+            return matched_streams, 0
+
+        followed_ids = {
+            (str(team.get("provider", "espn")), str(team.get("team_id")))
+            for team in followed_teams
+            if team.get("team_id") is not None
+        }
+        if not followed_ids:
+            return matched_streams, 0
+
+        filtered: list[dict] = []
+        filtered_count = 0
+        for match in matched_streams:
+            event = match.get("event")
+            if not event or str(getattr(event, "sport", "")).lower() != "soccer":
+                filtered.append(match)
+                continue
+
+            teams = (getattr(event, "home_team", None), getattr(event, "away_team", None))
+            if any(
+                team
+                and (
+                    str(getattr(team, "provider", getattr(event, "provider", "espn"))),
+                    str(getattr(team, "id", "")),
+                )
+                in followed_ids
+                for team in teams
+            ):
+                filtered.append(match)
+            else:
+                filtered_count += 1
+
+        if filtered_count:
+            logger.info(
+                "[EVENT_EPG] Followed soccer teams: %d streams excluded, %d remaining",
+                filtered_count,
+                len(filtered),
+            )
+        return filtered, filtered_count
+
     def _filter_by_teams(
         self,
         matched_streams: list[dict],

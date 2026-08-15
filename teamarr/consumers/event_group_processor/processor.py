@@ -746,11 +746,18 @@ class EventGroupProcessor(
                 if (eid := _effective_event_id(m)) and (ev := m.get("event"))
             }
 
-            # Apply team include/exclude filtering
-            matched_streams, filtered_team_count = self._filter_by_teams(
+            # Team-mode soccer subscriptions discover every competition a
+            # followed club may enter, then narrow those competitions back to
+            # matches involving the followed clubs. Non-soccer events pass.
+            matched_streams, followed_soccer_filtered = (
+                self._filter_by_followed_soccer_teams(matched_streams, group, conn)
+            )
+
+            # Apply the independent global/per-group include/exclude filter.
+            matched_streams, default_team_filtered = self._filter_by_teams(
                 matched_streams, group, conn
             )
-            result.filtered_team = filtered_team_count
+            result.filtered_team = followed_soccer_filtered + default_team_filtered
 
             # Build set of event IDs that passed the filter (segment-aware)
             passed_event_ids = {eid for m in matched_streams if (eid := _effective_event_id(m))}

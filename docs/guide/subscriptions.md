@@ -54,11 +54,11 @@ In **Follow Teams** mode, the followed-teams list lives here in Subscriptions be
 ![Soccer tile in Follow Teams mode with followed teams and the league-discovery callout](../assets/images/subscriptions-soccer-follow-teams.png)
 
 {: .note }
-> **Following a soccer team adds *all* the leagues that team could potentially participate in** — its domestic league, cups, and continental/club competitions — not just that team's individual matches. For example, following Barcelona subscribes you to all of La Liga, the Copa del Rey, and the Champions League, so you'll see *every* match in those competitions. To surface events for the followed teams **only**, enable the **Default Team Filter** on the [Teams tab](#default-team-filter), set it to *Include only selected teams*, and select your teams. The filter is league-scoped: leagues where you've selected at least one team show only those teams' games, while leagues with no selections pass through unfiltered.
+> **Following a soccer team discovers all leagues that team could potentially participate in** — its domestic league, cups, and continental/club competitions. Teamarr scans those competitions but generates events only for matches involving a followed team; other clubs' matches are ignored.
 
 ## Default Team Filter
 
-The **Teams** tile adds an optional filter that narrows matched events down to specific teams — useful when a subscription pulls in a whole league (e.g. soccer [Follow Teams mode](#soccer-modes)) but you only care about a few teams in it.
+The **Teams** tile adds an optional filter that narrows matched events down to specific teams — useful when you subscribe to a whole league but only care about a few teams in it. Soccer [Follow Teams mode](#soccer-modes) already limits its auto-discovered competitions to the followed clubs, so it does not require a duplicate selection here.
 
 - **Enabled** toggle — turn the filter on or off without losing your selections.
 - **Filter mode** — *Include only selected teams* (keep just these) or *Exclude selected teams* (drop these).
