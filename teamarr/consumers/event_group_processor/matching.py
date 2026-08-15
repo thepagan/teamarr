@@ -9,6 +9,9 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from teamarr.consumers.event_group_processor.stream_fetcher import (
+    managed_channel_ids,
+)
 from teamarr.consumers.matching import BatchMatchResult, StreamCategory, StreamMatcher
 from teamarr.database.groups import EventEPGGroup
 from teamarr.database.settings import get_feed_separation_settings
@@ -77,10 +80,13 @@ class StreamMatching:
             match_days_ahead = (row["event_match_days_ahead"] if row else 3) or 3
             tennis_majors_only = bool(row["tennis_majors_only"]) if row else False
 
-            # Load feed separation settings
+            # Load feed separation settings. Terms always reach the matcher:
+            # feed identification is unconditional (#527) — the
+            # feed_separation.enabled toggle gates only channel splitting
+            # (see _resolve_feed_teams / processor Step 4a).
             feed_settings = get_feed_separation_settings(conn)
-            feed_home_terms = feed_settings.home_terms if feed_settings.enabled else None
-            feed_away_terms = feed_settings.away_terms if feed_settings.enabled else None
+            feed_home_terms = feed_settings.home_terms
+            feed_away_terms = feed_settings.away_terms
 
         sport_durations = self._load_sport_durations_cached()
 
@@ -191,8 +197,11 @@ class StreamMatching:
         # curated channel fallback). Both are single scoped fetches.
         try:
             epg_data_list = self._dispatcharr_client.channels.get_epg_data_list()
-            stream_channels, channel_by_uuid = (
-                self._dispatcharr_client.channels.get_channel_maps()
+            # Teamarr's own output channels must not claim stream->channel slots
+            # (#512): last-write-wins would let them mask a shared stream's
+            # curated channel and break tier-1 (curated) EPG resolution.
+            stream_channels, channel_by_uuid = self._dispatcharr_client.channels.get_channel_maps(
+                exclude_channel_ids=managed_channel_ids(self._db_factory)
             )
         except Exception as e:
             logger.warning("[EPG-MATCH] Failed to load EPG resolution data: %s", e)
@@ -378,6 +387,10 @@ class StreamMatching:
                             "event": result.event,
                             "card_segment": result.card_segment,  # UFC segment from classifier
                             "feed_hint": result.feed_hint,  # "home", "away", or None
+                            # TEAM_ONLY (#489): which event side the branded team
+                            # is — persisted per-stream as feed_team_id so
+                            # team_feed ordering rules see team streams.
+                            "matched_side": result.matched_side,
                             "match_type": (
                                 "team" if result.category == StreamCategory.TEAM_ONLY else "event"
                             ),
@@ -407,22 +420,35 @@ class StreamMatching:
         self,
         matched_streams: list[dict],
         detect_team_names: bool,
+        separation_enabled: bool,
     ) -> list[dict]:
         """Resolve feed hints to actual teams (Phase 2 feed separation).
 
         For each matched stream, in precedence order:
         - feed_hint="home"/"away" (explicit HOME/AWAY term) → that side's team
-        - No hint → match the stream name against the event's home/away-market
-          broadcast names (ESPN broadcasts[].market: 'Brewers.TV' → away,
-          'YES' → home) — catches team-branded and regional channels no term
-          list or team name covers (#343)
-        - Still nothing + detect_team_names → scan stream name for team
+        - No hint → match the stream's identifiers against the event's
+          home/away-market broadcast names (ESPN broadcasts[].market:
+          'Brewers.TV' → away, 'YES' → home) — catches team-branded and
+          regional channels no term list or team name covers (#343)
+        - Still nothing + detect_team_names → scan the identifiers for team
           name/short_name in a feed-specific context
         - No match → feed_team = None (normal channel)
+
+        Identifiers checked, in order: stream name, tvg-id, tvg-name (#489) —
+        a stream whose tvg-id is 'Brewers.TV' is the Brewers feed even when
+        the display name alone gives no signal.
+
+        Identification is decoupled from feed separation (#527): resolution
+        always runs and the result always lands in 'stream_feed_team' (per-
+        stream feed_team_id → team_feed/not_team_feed ordering rules). The
+        channel-level 'feed_team' key — which splits channels per feed and
+        keys tvg_ids/naming — is populated only when separation_enabled.
 
         Args:
             matched_streams: List of matched stream dicts with 'event', 'stream', 'feed_hint'
             detect_team_names: Whether to scan stream names for team name patterns
+            separation_enabled: Whether resolved teams also create feed-separated
+                channels (feed_separation.enabled master toggle)
         """
         for entry in matched_streams:
             event = entry.get("event")
@@ -435,23 +461,36 @@ class StreamMatching:
             elif event and feed_hint == "away":
                 feed_team = event.away_team
             elif event and not feed_hint:
-                stream_name = entry["stream"]["name"].lower()
-                feed_team = self._detect_feed_from_broadcast_markets(stream_name, event)
-                source = "broadcast_market"
+                stream = entry["stream"]
+                candidates: list[str] = []
+                for key in ("name", "tvg_id", "tvg_name"):
+                    value = stream.get(key)
+                    if value and value.lower() not in candidates:
+                        candidates.append(value.lower())
+                for text in candidates:
+                    feed_team = self._detect_feed_from_broadcast_markets(text, event)
+                    if feed_team:
+                        source = "broadcast_market"
+                        break
                 if feed_team is None and detect_team_names:
-                    feed_team = self._detect_team_in_stream_name(
-                        stream_name, event.home_team, event.away_team
-                    )
-                    source = "team_name_detect"
+                    for text in candidates:
+                        feed_team = self._detect_team_in_stream_name(
+                            text, event.home_team, event.away_team
+                        )
+                        if feed_team:
+                            source = "team_name_detect"
+                            break
 
-            entry["feed_team"] = feed_team
+            entry["stream_feed_team"] = feed_team
+            entry["feed_team"] = feed_team if separation_enabled else None
 
             if feed_team:
                 logger.info(
-                    "[FEED] Stream '%s' → feed_team=%s (hint=%s)",
+                    "[FEED] Stream '%s' → feed_team=%s (hint=%s, separation=%s)",
                     entry["stream"]["name"][:50],
                     feed_team.name,
                     source,
+                    "on" if separation_enabled else "off",
                 )
 
         return matched_streams

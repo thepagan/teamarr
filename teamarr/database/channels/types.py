@@ -48,6 +48,11 @@ class ManagedChannel:
     sport: str | None = None
 
     # Lifecycle
+    # (#522) Session-aware estimated event end, set at creation. The delete-time
+    # recalc applies timing policy to this instead of re-deriving it from
+    # event_date + sport duration, which can't see sessions. None = unknown
+    # (pre-column rows) → recalc falls back to the naive derivation.
+    event_end_estimate: datetime | None = None
     scheduled_delete_at: datetime | None = None
     deleted_at: datetime | None = None
     delete_reason: str | None = None
@@ -96,6 +101,7 @@ class ManagedChannel:
             event_name=row.get("event_name"),
             league=row.get("league"),
             sport=row.get("sport"),
+            event_end_estimate=row.get("event_end_estimate"),
             scheduled_delete_at=row.get("scheduled_delete_at"),
             deleted_at=row.get("deleted_at"),
             delete_reason=row.get("delete_reason"),
@@ -123,6 +129,16 @@ class ManagedChannelStream:
     exception_keyword: str | None = None
     match_type: str = "event"
     match_method: str | None = None  # 'epg', 'fuzzy', etc. — drives the epg_match ordering rule
+    # (#489) Resolved feed/matched team — provider team id, same namespace as
+    # managed_channels.feed_team_id. Drives team_feed/not_team_feed ordering
+    # rules ahead of the name regex. NULL = no team resolved for this stream.
+    feed_team_id: str | None = None
+    # (#533) Which side this feed is: 'home', 'away', or None = UNKNOWN.
+    # Tri-state on purpose — None is a real answer (no feed signal on the
+    # stream, or a sport with no sides at all), NEVER "not home therefore
+    # away". Drives home_feed/away_feed ordering rules; unknown matches
+    # neither and falls to the catch-all band.
+    feed_side: str | None = None
     # DP channel's own group name (channel-source streams) — drives the
     # dispatcharr_group ordering rule (ybt.3). NULL for non-channel-source streams.
     dispatcharr_channel_group: str | None = None
@@ -161,6 +177,8 @@ class ManagedChannelStream:
             exception_keyword=row.get("exception_keyword"),
             match_type=row.get("match_type", "event"),
             match_method=row.get("match_method"),
+            feed_team_id=row.get("feed_team_id"),
+            feed_side=row.get("feed_side"),
             dispatcharr_channel_group=row.get("dispatcharr_channel_group"),
             added_at=row.get("added_at"),
             removed_at=row.get("removed_at"),

@@ -14,6 +14,7 @@ from typing import Any
 from teamarr.core import Event
 
 from ._host import _LifecycleHost
+from .feed_side import resolve_feed_side
 from .timing import compute_stream_window, is_channel_event_live, is_stream_in_window
 from .types import (
     ChannelCreationResult,
@@ -144,6 +145,36 @@ class ChannelCreator(_LifecycleHost):
                         feed_team = matched.get("feed_team")
                         feed_team_id = feed_team.id if feed_team else None
 
+                        # Per-stream resolved team (#489/#527) for team_feed/
+                        # not_team_feed ordering rules. Reads stream_feed_team —
+                        # populated even when feed separation is off; for
+                        # TEAM_ONLY streams fall back to the matched side's
+                        # team. Distinct from feed_team_id above: this is only
+                        # persisted on the stream row and never creates
+                        # feed-separated channels.
+                        stream_feed_team = matched.get("stream_feed_team")
+                        stream_feed_team_id = (
+                            stream_feed_team.id if stream_feed_team else None
+                        )
+                        if stream_feed_team_id is None:
+                            side = matched.get("matched_side")
+                            if side == "home" and event.home_team:
+                                stream_feed_team_id = event.home_team.id
+                            elif side == "away" and event.away_team:
+                                stream_feed_team_id = event.away_team.id
+
+                        # Which side that feed is (#533). Tri-state: 'home',
+                        # 'away', or None = UNKNOWN. Resolved here because the
+                        # event is in scope; persisted so ordering rules read
+                        # it as a lookup instead of re-deriving. None is never
+                        # written — an unknown row stays NULL.
+                        stream_feed_side = resolve_feed_side(
+                            event,
+                            feed_hint=matched.get("feed_hint"),
+                            matched_side=matched.get("matched_side"),
+                            feed_team_id=stream_feed_team_id,
+                        )
+
                         # Stream type tag ('event' or 'team') for ordering rules
                         match_type = matched.get("match_type", "event")
                         # How the stream matched ('epg', 'fuzzy', …) for the
@@ -255,6 +286,8 @@ class ChannelCreator(_LifecycleHost):
                                 segment=segment,
                                 match_type=match_type,
                                 match_method=match_method,
+                                stream_feed_team_id=stream_feed_team_id,
+                                stream_feed_side=stream_feed_side,
                                 attach_at=attach_at,
                                 detach_at=detach_at,
                             )
@@ -331,6 +364,8 @@ class ChannelCreator(_LifecycleHost):
                             feed_label_style=feed_label_style,
                             match_type=match_type,
                             match_method=match_method,
+                            stream_feed_team_id=stream_feed_team_id,
+                            stream_feed_side=stream_feed_side,
                             attach_at=attach_at,
                             detach_at=detach_at,
                         )
@@ -440,6 +475,8 @@ class ChannelCreator(_LifecycleHost):
         segment: str | None = None,
         match_type: str = "event",
         match_method: str | None = None,
+        stream_feed_team_id: str | None = None,
+        stream_feed_side: str | None = None,
         attach_at: str | None = None,
         detach_at: str | None = None,
     ) -> StreamProcessResult | None:
@@ -459,6 +496,8 @@ class ChannelCreator(_LifecycleHost):
             remove_stream_from_channel,
             stream_exists_on_channel,
             update_stream_account_name,
+            update_stream_feed_side,
+            update_stream_feed_team,
             update_stream_window,
         )
 
@@ -552,6 +591,8 @@ class ChannelCreator(_LifecycleHost):
                     match_type=match_type,
                     match_method=match_method,
                     dispatcharr_channel_group=stream.get("dp_channel_group"),
+                    feed_team_id=stream_feed_team_id,
+                    feed_side=stream_feed_side,
                 )
                 if priority is None:
                     priority = get_next_stream_priority(conn, existing.id)
@@ -569,6 +610,8 @@ class ChannelCreator(_LifecycleHost):
                     source_group_id=source_group_id,
                     match_type=match_type,
                     match_method=match_method,
+                    feed_team_id=stream_feed_team_id,
+                    feed_side=stream_feed_side,
                     dispatcharr_channel_group=stream.get("dp_channel_group"),
                     attach_at=attach_at,
                     detach_at=detach_at,
@@ -683,6 +726,20 @@ class ChannelCreator(_LifecycleHost):
                     update_stream_window(
                         conn, existing.id, stream_id, attach_at, detach_at
                     )
+                if stream_feed_team_id:
+                    # Backfill the resolved feed team (#489) so rows attached
+                    # before the column existed feed the team_feed ordering
+                    # rules on the next reorder pass, not only at re-attach.
+                    update_stream_feed_team(
+                        conn, existing.id, stream_id, stream_feed_team_id
+                    )
+                if stream_feed_side:
+                    # Same for the resolved side (#533). Guarded on a value:
+                    # an unknown side leaves the row NULL rather than writing
+                    # over a side resolved on an earlier, better-informed run.
+                    update_stream_feed_side(
+                        conn, existing.id, stream_id, stream_feed_side
+                    )
 
             result.existing.append(
                 {
@@ -758,6 +815,8 @@ class ChannelCreator(_LifecycleHost):
         feed_label_style: str | None = None,
         match_type: str = "event",
         match_method: str | None = None,
+        stream_feed_team_id: str | None = None,
+        stream_feed_side: str | None = None,
         attach_at: str | None = None,
         detach_at: str | None = None,
     ) -> ChannelCreationResult:
@@ -770,6 +829,13 @@ class ChannelCreator(_LifecycleHost):
             feed_team_id: Provider team ID for feed separation (HOME/AWAY channels)
             feed_team: Team object for feed label generation
             feed_label_style: Label style ('team_name', 'short_name', 'home_away')
+            stream_feed_team_id: Resolved feed/matched team persisted on the
+                stream row for team_feed ordering rules (#489) — includes the
+                TEAM_ONLY matched-side fallback, so it can be set when
+                feed_team_id is None and never creates feed-separated channels
+            stream_feed_side: Which side that feed is — 'home', 'away', or None
+                meaning UNKNOWN (#533). None is written as NULL, never coerced
+                to a side; drives home_feed/away_feed ordering rules
         """
         from teamarr.database.channels import (
             add_stream_to_channel,
@@ -809,8 +875,18 @@ class ChannelCreator(_LifecycleHost):
                 error="Could not allocate channel number",
             )
 
-        # Calculate delete time
+        # Calculate delete time, and persist the session-aware event end it was
+        # derived from (#522). The per-run recalc can only see DB columns, so
+        # without this it re-derives the end as event_date + sport duration —
+        # session-blind, and for a multi-day race weekend that lands after
+        # Friday practice instead of Sunday's race.
         delete_time = self._timing_manager.calculate_delete_time(event)
+        # No start time → the end is genuinely unknown, so leave the column
+        # NULL rather than inventing one. The recalc treats NULL as "derive it
+        # the old way", and its loop already skips channels with no event_date.
+        event_end_estimate = (
+            self._timing_manager.get_event_end_time(event) if event.start_time else None
+        )
 
         # Resolve logo URL from template (supports template variables including {exception_keyword})
         logo_url = self._resolve_logo_url(
@@ -934,6 +1010,9 @@ class ChannelCreator(_LifecycleHost):
                 # V1 Parity: Include venue and broadcast
                 venue=event.venue.name if event.venue else None,
                 broadcast=", ".join(event.broadcasts) if event.broadcasts else None,
+                event_end_estimate=(
+                    event_end_estimate.isoformat() if event_end_estimate else None
+                ),
                 scheduled_delete_at=delete_time.isoformat() if delete_time else None,
                 sync_status="in_sync" if dispatcharr_channel_id else "pending",
             )
@@ -955,6 +1034,8 @@ class ChannelCreator(_LifecycleHost):
                 source_group_id=group_id,
                 match_type=match_type,
                 match_method=match_method,
+                feed_team_id=stream_feed_team_id,
+                feed_side=stream_feed_side,
                 dispatcharr_channel_group=stream.get("dp_channel_group"),
                 attach_at=attach_at,
                 detach_at=detach_at,

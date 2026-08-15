@@ -578,7 +578,7 @@ def list_groups(
 
     with get_db() as conn:
         # Hide the system-managed channel-source group (183.9) — it is controlled
-        # via Settings → EPG, not edited as a normal Event Group.
+        # via Matching → 'Dispatcharr as a Stream Source', not edited as a normal Event Group.
         groups = get_all_groups(
             conn, include_disabled=include_disabled, exclude_channel_source=True
         )
@@ -2239,6 +2239,7 @@ def test_extraction(request: TestExtractionRequest):
         extract_league_with_custom_regex,
         extract_teams_with_custom_regex,
         extract_time_with_custom_regex,
+        normalize_regex_syntax,
     )
 
     p = request.patterns
@@ -2277,7 +2278,9 @@ def test_extraction(request: TestExtractionRequest):
     ):
         if enabled and pat:
             try:
-                _re.compile(pat, _re.IGNORECASE)
+                # Same syntax acceptance as the pipeline (#494): JS-style
+                # (?<name> groups are translated before compiling.
+                _re.compile(normalize_regex_syntax(pat), _re.IGNORECASE)
             except _re.error as e:
                 pattern_errors[fname] = str(e)
 

@@ -80,6 +80,9 @@ class FakeEvent:
     venue: str | None = None
     broadcasts: list = field(default_factory=list)
     status: FakeStatus | None = None
+    # Real Event carries this; timing.get_event_end_time() reads it to find a
+    # multi-day event's true end. Empty = no sessions, the common case.
+    sessions: list = field(default_factory=list)
 
 
 def make_event(**overrides) -> FakeEvent:
@@ -123,6 +126,7 @@ class FakeChannel:
     channel_name: str = "Ch"
     league: str | None = None
     event_epg_group_id: int | None = 1
+    event_id: str | None = None
 
 
 @dataclass
@@ -155,6 +159,7 @@ class FakeStream:
 
     dispatcharr_stream_id: int
     source_group_id: int | None
+    stream_name: str | None = None
 
 
 @dataclass

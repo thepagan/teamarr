@@ -287,7 +287,7 @@ CREATE TABLE IF NOT EXISTS settings (
     tsdb_api_key TEXT,
 
     -- Channel ID Format
-    channel_id_format TEXT DEFAULT '{team_name_pascal}.{league_id}',
+    channel_id_format TEXT DEFAULT '{team_name|pascal}.{league_id}',
 
     -- Generation Counter (for cache purging)
     epg_generation_counter INTEGER DEFAULT 0,
@@ -468,7 +468,7 @@ CREATE TABLE IF NOT EXISTS settings (
     channelsdvr_servers JSON,
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 83
+    schema_version INTEGER DEFAULT 84
 );
 
 -- Insert default settings
@@ -771,6 +771,7 @@ CREATE TABLE IF NOT EXISTS managed_channels (
     broadcast TEXT,
 
     -- Lifecycle
+    event_end_estimate TIMESTAMP,            -- (#533/#522) session-aware estimated event end, set at creation from get_event_end_time(). The delete-time recalc applies timing policy to THIS instead of re-deriving start+sport_duration, which is session-blind and would cut a race weekend short after Friday practice. NULL = unknown (pre-column rows) -> recalc falls back to the naive derivation.
     scheduled_delete_at TIMESTAMP,           -- When to delete (based on delete_timing)
     deleted_at TIMESTAMP,                    -- When actually deleted
     delete_reason TEXT,                      -- Why deleted (expired, stream_removed, manual, etc.)
@@ -1193,6 +1194,7 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('wrwc',  'espn', 'rugby/289237',    NULL, 'Women''s Rugby World Cup',        'rugby', 'https://upload.wikimedia.org/wikipedia/commons/6/66/Rugby_World_Cup_footer_logo_%28post-2023%29.svg', NULL, 1, 'WRWC',  'wrwc',  'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('6n',    'espn', 'rugby/180659',    NULL, 'Six Nations',                     'rugby', 'https://upload.wikimedia.org/wikipedia/commons/7/72/Guinness_Six_Nations_logo.png', NULL, 1, '6N',    '6n',    'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('trc',   'espn', 'rugby/244293',    NULL, 'The Rugby Championship',          'rugby', 'https://upload.wikimedia.org/wikipedia/commons/6/69/The_Rugby_Championship_logo_%28white_background%29.png', NULL, 1, 'TRC',   'trc',   'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('natchamp', 'espn', 'rugby/17567',  NULL, 'Nations Championship',            'rugby', 'https://upload.wikimedia.org/wikipedia/commons/2/20/2026_Nations_Championship_Text_Logo.svg', NULL, 1, 'NC', 'natchamp', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('super-rugby', 'espn', 'rugby/242041', NULL, 'Super Rugby Pacific',          'rugby', 'https://upload.wikimedia.org/wikipedia/en/2/25/Super_Rugby_Pacific_logo.png', NULL, 1, 'SRP',   'srp',   'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('urc',   'espn', 'rugby/270557',    NULL, 'United Rugby Championship',       'rugby', 'https://upload.wikimedia.org/wikipedia/commons/d/d5/United_Rugby_Championship_logo.png', NULL, 1, 'URC',   'urc',   'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('prem',  'espn', 'rugby/267979',    NULL, 'Gallagher Premiership',           'rugby', 'https://upload.wikimedia.org/wikipedia/commons/7/76/PREM_Rugby_logo_2025.png', NULL, 1, 'PREM',  'prem',  'team_vs_team', NULL, NULL, NULL, NULL, 1),
@@ -1213,8 +1215,10 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('boxing', 'tsdb', '4445', 'Boxing', 'Boxing', 'boxing', NULL, NULL, 0, NULL, 'boxing', 'event_card', NULL, NULL, NULL, 'free', 1),
 
     -- Motorsports (ESPN) - Race weekends with multi-driver sessions, no home/away
-    -- 'f1' is the fully-implemented reference league; IndyCar/MotoGP session
-    -- structure needs confirmation in a follow-up.
+    -- 'f1' is the fully-implemented reference league. IndyCar verified 2026-07
+    -- (bead h31.3): ESPN exposes the race session ONLY (no practice/qualifying
+    -- anywhere in the payload) — the untyped-competition fallback maps it to a
+    -- single 'race' session by design. MotoGP remains unverified (h31.2, TSDB).
     ('f1', 'espn', 'racing/f1', NULL, 'Formula 1', 'racing', 'https://a.espncdn.com/i/teamlogos/leagues/500/f1.png', NULL, 0, 'F1', 'f1', 'event', 'Formula 1 Racing', NULL, NULL, NULL, 1),
 
     -- Motorsports (NASCAR API) - authoritative session schedules from cf.nascar.com.
@@ -1495,6 +1499,9 @@ CREATE TABLE IF NOT EXISTS managed_channel_streams (
     match_type TEXT DEFAULT 'event'          -- 'event' (TEAM_VS_TEAM) or 'team' (TEAM_ONLY)
         CHECK(match_type IN ('event', 'team')),
     match_method TEXT,                        -- how the stream was matched: 'epg', 'fuzzy', 'cache', etc. (drives the epg_match stream-ordering rule)
+    feed_team_id TEXT,                        -- (#489) resolved feed/matched team (provider team id, same namespace as managed_channels.feed_team_id); drives team_feed/not_team_feed ordering rules ahead of the name regex. NULL = no team resolved.
+    feed_side TEXT                            -- (#533) which side this feed is: 'home', 'away', or NULL = UNKNOWN. Tri-state by design — NULL is a real value (no feed signal, or a sport with no sides), never "not home therefore away". Drives home_feed/away_feed ordering rules; unknown matches neither.
+        CHECK(feed_side IN ('home', 'away')),
     dispatcharr_channel_group TEXT,           -- (ybt.3) the DP channel's own group name, for channel-source streams; drives the 'dispatcharr_group' stream-ordering rule. NULL for non-channel-source streams.
 
     -- Priority (0 = primary, higher = failover)

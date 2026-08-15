@@ -127,7 +127,7 @@ class DisplaySettings:
 
     time_format: str = "12h"
     show_timezone: bool = True
-    channel_id_format: str = "{team_name_pascal}.{league_id}"
+    channel_id_format: str = "{team_name|pascal}.{league_id}"
     xmltv_generator_name: str = "Teamarr"
     xmltv_generator_url: str = "https://github.com/Pharaoh-Labs/teamarr"
     tsdb_api_key: str | None = None
@@ -192,7 +192,10 @@ class StreamOrderingRule:
     deliberately not baked into this storage type, which must preserve old data.
     """
 
-    type: str  # "m3u", "group", "regex", "stream_type", "team_feed", "not_team_feed", "catch_all"
+    # One of VALID_RULE_TYPES below (m3u/group/regex/stream_type/team_feed/
+    # not_team_feed/epg_match/dispatcharr_group/home_feed/away_feed/
+    # stats_metric/catch_all)
+    type: str
     value: str  # Account name, group name, regex pattern, or team key(s)
     priority: int  # 1-99, lower = higher priority (orders 'priority'-mode rules / sets band)
     mode: str = "priority"  # 'priority' (hard, first-match band) or 'score' (soft, additive)
@@ -202,13 +205,14 @@ class StreamOrderingRule:
 VALID_RULE_TYPES: frozenset[str] = frozenset({
     "m3u", "group", "regex", "stream_type",
     "team_feed", "not_team_feed", "epg_match", "dispatcharr_group",
+    "home_feed", "away_feed",
     "stats_metric", "catch_all",
 })
 VALID_RULE_MODES: frozenset[str] = frozenset({"priority", "score"})
 # Legacy rows (pre epic teamarr-5ag) carry no 'mode'; they are hard priority rules.
 LEGACY_RULE_MODE: str = "priority"
 NO_VALUE_RULE_TYPES: frozenset[str] = frozenset(
-    {"team_feed", "not_team_feed", "epg_match", "catch_all"}
+    {"team_feed", "not_team_feed", "epg_match", "home_feed", "away_feed", "catch_all"}
 )
 
 

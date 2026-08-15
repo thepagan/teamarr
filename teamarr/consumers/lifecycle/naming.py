@@ -13,6 +13,7 @@ from teamarr.core import Event
 from teamarr.utilities.art_url import apply_art_base_url
 
 from ._host import _LifecycleHost
+from .feed_side import AWAY, HOME, resolve_feed_side
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,12 @@ FEED_TEMPLATE_VARS = frozenset({
     "feed_team",
     "feed_team_short",
     "feed_team_abbrev",
-    "feed_team_abbrev_lower",
+    "feed_team_abbrev_lower",  # retired alias (#484), may linger in old templates
     "feed_home_away",
     "broadcast_feed",
     "broadcast_feed_team",
+    "broadcast_feed_team_short",
+    "broadcast_feed_team_abbrev",
 })
 
 
@@ -177,8 +180,18 @@ class ChannelNaming(_LifecycleHost):
         Used to suppress the canned feed-label auto-append so users who place
         {feed_team}/{feed_team_short}/etc. in their template don't get a
         duplicated suffix like "Pirates Feed (Pirates)".
+
+        Matched via the resolver's token pattern (not raw containment) so
+        `|filter` modifiers don't hide the variable: {feed_team_abbrev|lower}
+        still counts as a feed reference (#484).
         """
-        return any(f"{{{var}}}" in name_format for var in FEED_TEMPLATE_VARS)
+        from teamarr.templates.resolver import VARIABLE_PATTERN
+
+        names = {
+            m.group(1).partition(".")[0].lower()
+            for m in VARIABLE_PATTERN.finditer(name_format or "")
+        }
+        return not names.isdisjoint(FEED_TEMPLATE_VARS)
 
     @staticmethod
     def _build_feed_label(feed_team, event: Event, style: str) -> str:
@@ -190,15 +203,22 @@ class ChannelNaming(_LifecycleHost):
             style: 'team_name', 'short_name', or 'home_away'
 
         Returns:
-            Label string (e.g., "Orioles Feed", "BAL Feed", "Home Feed")
+            Label string (e.g., "Orioles Feed", "BAL Feed", "Home Feed"), or
+            "" when the style needs a side we don't have — the caller appends
+            nothing rather than guessing.
         """
         if style == "home_away":
-            is_home = (
-                hasattr(event, "home_team")
-                and event.home_team
-                and event.home_team.id == feed_team.id
-            )
-            return "Home Feed" if is_home else "Away Feed"
+            # Tri-state (#533): a feed team that resolves to neither side is
+            # UNKNOWN, not away. Returning "" drops the label instead of
+            # asserting a side we can't support — the previous
+            # `"Home Feed" if is_home else "Away Feed"` labelled every unknown
+            # as Away.
+            side = resolve_feed_side(event, feed_team_id=getattr(feed_team, "id", None))
+            if side == HOME:
+                return "Home Feed"
+            if side == AWAY:
+                return "Away Feed"
+            return ""
         elif style == "short_name":
             abbrev = getattr(feed_team, "abbreviation", None)
             name = abbrev or feed_team.short_name or feed_team.name

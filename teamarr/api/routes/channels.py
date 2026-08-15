@@ -32,6 +32,7 @@ from teamarr.database.settings import get_dispatcharr_settings
 from teamarr.dispatcharr import ChannelManager, get_dispatcharr_client
 from teamarr.services import create_channel_service, create_default_service
 from teamarr.services.stream_ordering import get_stream_ordering_service
+from teamarr.utilities.tz import parse_db_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,20 @@ def _safe_isoformat(value: Any) -> str | None:
     """Safely convert a date/datetime value to ISO format string.
 
     Handles cases where the value might already be a string from the database.
+
+    Strings are normalized through parse_db_timestamp (#511): SQLite-canonical
+    naive UTC gains an explicit +00:00 offset. Without one, JS ``new Date()``
+    parses the string as browser-LOCAL time, so the UI echoed raw UTC digits.
+    Aware inputs keep their instant; non-timestamp strings pass through.
     """
     if value is None:
         return None
     if isinstance(value, str):
-        return value
+        try:
+            parsed = parse_db_timestamp(value)
+        except ValueError:
+            return value
+        return parsed.isoformat() if parsed else value
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     return str(value)
@@ -188,6 +198,10 @@ class ChannelStreamEntry(BaseModel):
     m3u_account_name: str | None = None
     match_method: str | None = None
     match_type: str | None = None
+    # Which side this feed is: 'home', 'away', or None = UNKNOWN (#533).
+    # None is a real answer (no feed signal, or a sport with no sides) — the
+    # UI renders it as "—", never as the opposite side.
+    feed_side: str | None = None
     exception_keyword: str | None = None
     priority: int = 0  # stored sort key from the last generation run
     expected_priority: int = 0  # recomputed under current rules (drives staleness flag)
@@ -408,6 +422,7 @@ def get_managed_channel_streams(channel_id: int):
                 m3u_account_name=s.m3u_account_name,
                 match_method=s.match_method,
                 match_type=s.match_type,
+                feed_side=s.feed_side,
                 exception_keyword=s.exception_keyword,
                 priority=s.priority,
                 expected_priority=expected_by_stream.get(s.dispatcharr_stream_id, s.priority),
