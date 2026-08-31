@@ -868,12 +868,24 @@ def _translate_null_safe_placeholder_comparisons(query: str) -> str:
 def _find_values_clause_end(query: str, start: int) -> int:
     in_single = False
     in_double = False
+    in_line_comment = False
     depth = 0
     i = start
 
     while i < len(query):
         char = query[i]
         next_char = query[i + 1] if i + 1 < len(query) else ""
+
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if not in_single and not in_double and char == "-" and next_char == "-":
+            in_line_comment = True
+            i += 2
+            continue
 
         if char == "'" and not in_double:
             if in_single and next_char == "'":
@@ -912,8 +924,25 @@ def _find_values_clause_end(query: str, start: int) -> int:
 def _rewrite_top_level_value_tuples(query: str, translate_tuple) -> str:
     output: list[str] = []
     i = 0
+    in_line_comment = False
 
     while i < len(query):
+        char = query[i]
+        next_char = query[i + 1] if i + 1 < len(query) else ""
+
+        if in_line_comment:
+            output.append(char)
+            if char == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if char == "-" and next_char == "-":
+            output.extend((char, next_char))
+            in_line_comment = True
+            i += 2
+            continue
+
         if query[i] != "(":
             output.append(query[i])
             i += 1
@@ -923,10 +952,22 @@ def _rewrite_top_level_value_tuples(query: str, translate_tuple) -> str:
         depth = 0
         in_single = False
         in_double = False
+        in_line_comment = False
 
         while i < len(query):
             char = query[i]
             next_char = query[i + 1] if i + 1 < len(query) else ""
+
+            if in_line_comment:
+                if char == "\n":
+                    in_line_comment = False
+                i += 1
+                continue
+
+            if not in_single and not in_double and char == "-" and next_char == "-":
+                in_line_comment = True
+                i += 2
+                continue
 
             if char == "'" and not in_double:
                 if in_single and next_char == "'":

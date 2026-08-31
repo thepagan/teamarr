@@ -43,6 +43,32 @@ def test_insert_literal_boolean_values_are_translated_for_postgres():
     assert "WHERE user_corrected = FALSE" in translated
 
 
+def test_insert_boolean_translation_ignores_sql_line_comment_contents():
+    wrapper = _wrapper_with_columns(
+        {
+            "stream_match_cache": {
+                "fingerprint": "text",
+                "user_corrected": "boolean",
+            }
+        }
+    )
+
+    translated = wrapper._translate_query(
+        """
+        INSERT INTO stream_match_cache (fingerprint, user_corrected) VALUES
+            ('before', 0),
+            -- Women's rows may mention ; RETURNING (anything) in prose.
+            ('after', 1)
+        ON CONFLICT (fingerprint) DO UPDATE SET user_corrected = 0
+        """
+    )
+
+    assert "('before', FALSE)" in translated
+    assert "('after', TRUE)" in translated
+    assert "-- Women's rows may mention ; RETURNING (anything) in prose." in translated
+    assert "ON CONFLICT (fingerprint) DO UPDATE SET user_corrected = FALSE" in translated
+
+
 def test_static_cursor_wrapper_supports_sqlite_style_iteration():
     cursor = StaticCursorWrapper(
         [
