@@ -15,7 +15,11 @@ from enum import Enum
 from re import Pattern
 from typing import cast
 
-from teamarr.consumers.matching.normalizer import NormalizedStream, normalize_stream
+from teamarr.consumers.matching.normalizer import (
+    QUALITY_TOKEN,
+    NormalizedStream,
+    normalize_stream,
+)
 from teamarr.services.detection_keywords import DetectionKeywordService
 
 logger = logging.getLogger(__name__)
@@ -578,14 +582,28 @@ _DATE_FORMAT_CANDIDATES = [
 ]
 
 
-def infer_date_formats(samples: list[str], window_days: int = 60) -> list[str] | None:
+def infer_date_formats(
+    samples: list[str], window_days: int = 60, today: date | None = None
+) -> list[str] | None:
     """Learn the date format a stream source uses (#474).
 
     The custom date regex describes WHERE a source's date lives; this learns
     HOW it is formatted, from the whole batch at once: keep the candidate
-    formats that parse EVERY sample, then break ties by which format lands
-    the most dates near today (sports stream dates cluster around now —
-    "05/07, 06/07, 07/07" in mid-July is day-first, not May/June/July).
+    formats that parse EVERY sample, then rank them by which lands the most
+    dates near today (sports stream dates cluster around now — "05/07, 06/07,
+    07/07" in mid-July is day-first, not May/June/July).
+
+    Ranking is two-key: dates inside the window first, then — among formats
+    that tie on that count — the smallest total distance from today. The
+    count alone does not discriminate, because a scattered reading of
+    consecutive ambiguous dates still lands inside a 60-day window: on
+    2026-08-09, "08/08, 09/08, 10/08" is 3-in-window read day-first (Aug
+    8/9/10) AND month-first (Aug 8, Sep 8, Oct 8). That tie used to fall
+    through to the US-first default and mislearn day-first sources (#553).
+
+    `today` overrides the reference date; production leaves it None. Tests
+    pin it so the ambiguous cases are exercised on every run rather than
+    only on the calendar dates that happen to produce them.
 
     Returns a single-element format list, or None when no candidate parses
     every sample (caller falls back to per-stream guessing).
@@ -602,11 +620,12 @@ def infer_date_formats(samples: list[str], window_days: int = 60) -> list[str] |
     if not cleaned:
         return None
 
-    today = datetime.now().date()
+    if today is None:
+        today = datetime.now().date()
     lo, hi = today - timedelta(days=window_days), today + timedelta(days=window_days)
 
     best_fmt: str | None = None
-    best_in_window = -1
+    best_score: tuple[int, int] | None = None
     for fmt in _DATE_FORMAT_CANDIDATES:
         parsed: list[date] = []
         for sample in cleaned:
@@ -620,10 +639,15 @@ def infer_date_formats(samples: list[str], window_days: int = 60) -> list[str] |
         if len(parsed) != len(cleaned):
             continue  # must explain EVERY sample
         in_window = sum(1 for d in parsed if lo <= d <= hi)
-        # Strictly-greater keeps the earlier (US-first) candidate on ties.
-        if in_window > best_in_window:
+        spread = sum(abs((d - today).days) for d in parsed)
+        # Sorts ascending: most dates in window first, then tightest cluster.
+        # Strictly-less keeps the earlier (US-first) candidate when a later
+        # one is no better — including the genuine ties, e.g. "05/05/2026",
+        # where both readings yield the same dates.
+        score = (-in_window, spread)
+        if best_score is None or score < best_score:
             best_fmt = fmt
-            best_in_window = in_window
+            best_score = score
 
     return [best_fmt] if best_fmt else None
 
@@ -917,6 +941,10 @@ def extract_teams_from_separator(
     return team1, team2
 
 
+# One quality token, optionally bracketed: "HD", "1080p", "[1080p]", "(4K)".
+_QUALITY_TAG = rf"[\(\[]?\s*{QUALITY_TOKEN}\s*[\)\]]?"
+
+
 def _clean_team_name(name: str) -> str:
     """Clean extracted team name."""
     if not name:
@@ -967,9 +995,13 @@ def _clean_team_name(name: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # Remove HD, SD, 4K, UHD quality indicators (at start or end)
-    name = re.sub(r"^\s*\b(HD|SD|FHD|4K|UHD)\b\s*", "", name, flags=re.IGNORECASE)
-    name = re.sub(r"\s+\b(HD|SD|FHD|4K|UHD)\b\s*$", "", name, flags=re.IGNORECASE)
+    # Remove quality indicators at start or end — HD/SD/FHD/4K/UHD and
+    # resolution tags like 1080p/720p/2160p, bare or bracketed (#651). Repeated,
+    # because they stack ("Wagner HD 1080p", "[1080p] HD Wagner"), and the
+    # bracket is consumed with the token so "Wagner []" is never left behind.
+    # A dangling pipe before a trailing tag ("Wagner | 1080p") goes with it.
+    name = re.sub(rf"^\s*(?:{_QUALITY_TAG}\s*)+(?=\S)", "", name, flags=re.IGNORECASE)
+    name = re.sub(rf"(?:\s*\|)?(?:\s*{_QUALITY_TAG})+\s*$", "", name, flags=re.IGNORECASE)
 
     # Remove broadcast network indicators like (CBS), (FOX), (ABC), (NBC), (ESPN)
     name = re.sub(
@@ -1002,7 +1034,9 @@ def _clean_team_name(name: str) -> str:
     name = re.sub(round_pattern, "", name, flags=re.IGNORECASE | re.VERBOSE)
 
     # Handle "|" separator - preserve pipe content for fuzzy matching disambiguation
-    # The matcher will try both sides of the pipe and pick the one that matches.
+    # The matcher trims to the leading segment as its last fallback tier
+    # (TeamMatcher._prepare_pipe_fallback, #652) — that code did not exist when
+    # this comment was written, so the tail simply rode into the team name.
     # Here we only strip OBVIOUS prefix noise (league hints, channel numbers) from the
     # start, keeping the rest intact for the matcher to disambiguate.
     # "NFL | Bills vs Broncos" → "Bills vs Broncos" (NFL is league hint)
@@ -1091,14 +1125,25 @@ def _clean_team_name(name: str) -> str:
 # =============================================================================
 
 
+# Bracket characters that wrap a league tag ("US (MLB) Mariners", "[NBA] Lakers").
+# The built-in hint patterns end in [:\s-], so a bracketed code never matched (#580).
+_BRACKETS_RE = re.compile(r"[()\[\]{}]")
+
+
 def detect_league_hint(text: str) -> str | list[str] | None:
-    """Detect league from stream name patterns.
+    r"""Detect league from stream name patterns.
 
     Examples:
         "NHL: Bruins vs Rangers" → "nhl"
         "EPL - Arsenal vs Chelsea" → "eng.1"
         "UFC 315: Main Card" → "ufc"
         "EFL: Portsmouth vs Southampton" → ["eng.2", "eng.3", "eng.4"]
+        "US (MLB) Seattle Mariners (S)" → "mlb"
+
+    Providers commonly bracket the league tag, which the built-in patterns miss
+    because they require a ``[:\s-]`` delimiter after the code. Detection is
+    retried once on a de-bracketed copy — raw text first, so user-defined hint
+    patterns that contain literal brackets keep winning (#580).
 
     Args:
         text: Stream name (should be normalized)
@@ -1109,7 +1154,15 @@ def detect_league_hint(text: str) -> str | list[str] | None:
     if not text:
         return None
 
-    return DetectionKeywordService.detect_league(text)
+    hint = DetectionKeywordService.detect_league(text)
+    if hint is not None:
+        return hint
+
+    debracketed = _BRACKETS_RE.sub(" ", text)
+    if debracketed == text:
+        return None
+
+    return DetectionKeywordService.detect_league(debracketed)
 
 
 # Gender keywords that indicate women's leagues. English (W)/Women plus

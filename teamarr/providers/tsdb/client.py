@@ -35,7 +35,14 @@ from datetime import date, datetime
 import httpx
 
 from teamarr.core import LeagueMappingSource
-from teamarr.providers.base_client import BaseHTTPClient
+from teamarr.providers.base_client import (
+    BULLPEN_UNAUTHORIZED_ATTEMPTS,
+    BaseHTTPClient,
+    BullpenConfig,
+    bullpen_headers,
+    bullpen_rewrite,
+    is_bullpen_url,
+)
 from teamarr.utilities import call_metrics
 from teamarr.utilities.cache import TTLCache, make_cache_key
 
@@ -119,9 +126,10 @@ class RateLimiter:
 
     Tracks all wait events for UI feedback. Never fails - always waits and continues.
 
-    Rate limits per TSDB tier:
-    - Free: 30 req/min, 10 teams/search, 5 events/day
-    - Premium: 100 req/min, 3000 teams/search, 3000 events/season
+    Rate limits per TSDB tier (measured 2026-08-04):
+    - Free: 30 req/min; rolling 1-event next/past; league-filtered eventsday
+      returns nothing (filter is premium-gated); 15-event season cap
+    - Premium: 100 req/min, 20-event next/past, 3000 events/season
     """
 
     # Cooldown duration when internal limit is hit (seconds)
@@ -214,10 +222,16 @@ class TSDBClient(BaseHTTPClient):
 
     Configure premium key in Settings UI.
 
-    Free tier limitations:
+    Free tier limitations (measured 2026-08-04 — TSDB tightened these in 2026):
     - 30 requests/minute
-    - Team schedule (eventsnext.php) only shows HOME events
-    - No livescores or highlights
+    - eventsnextleague/eventspastleague: 1 event (rolling window). The
+      pipeline's per-date polling still harvests every game as it becomes
+      the league's next (see provider.get_events), but with short lead time.
+    - eventsday WITH a league filter returns nothing — the l= filter is
+      premium-gated (unfiltered free returns the global top-3 events/day).
+      Our get_events_by_date always filters, so it yields 0 keyless; this
+      is why get_team_schedule (eventsday-only) is empty on free.
+    - eventsseason: 15-event cap; all_leagues: sample only
 
     League mappings provided via LeagueMappingSource (no direct database access).
 
@@ -240,17 +254,21 @@ class TSDBClient(BaseHTTPClient):
         retry_count: int = 3,
         retry_delay: float = 1.0,
         requests_per_minute: int = 30,  # TSDB free tier limit
+        bullpen: BullpenConfig | None = None,
     ):
         super().__init__(
             timeout=timeout,
             retry_count=retry_count,
             max_connections=10,
             max_keepalive_connections=5,
+            bullpen=bullpen,
         )
         self._league_mapping_source = league_mapping_source
         self._explicit_key = api_key
         self._retry_delay = retry_delay
         self._requests_per_minute = requests_per_minute
+        self._bullpen_enabled = bullpen is not None
+        self._base_url = bullpen_rewrite(TSDB_BASE_URL, "thesportsdb", bullpen)
         # Rate limiter initialized lazily after we can check is_premium
         self._rate_limiter: RateLimiter | None = None
         self._cache = TTLCache()
@@ -268,8 +286,8 @@ class TSDBClient(BaseHTTPClient):
 
     @property
     def is_premium(self) -> bool:
-        """Check if using premium API key."""
-        return self._api_key != self.FREE_API_KEY
+        """Check if using premium API key or bullpen (bullpen counts as premium)."""
+        return self._bullpen_enabled or self._api_key != self.FREE_API_KEY
 
     def _get_rate_limiter(self) -> RateLimiter:
         """Get or create rate limiter (lazy init to check is_premium)."""
@@ -299,17 +317,36 @@ class TSDBClient(BaseHTTPClient):
         Never fails due to rate limits - always waits and continues.
         All waits are tracked in rate_limit_stats() for UI feedback.
         """
+        if self._bullpen and self._bullpen.disabled:
+            return None
+
         # Wait for rate limit slot (preemptive)
         rate_limiter = self._get_rate_limiter()
         rate_limiter.acquire()
 
-        url = f"{TSDB_BASE_URL}/{self._api_key}/{endpoint}"
+        url = f"{self._base_url}/{self._api_key}/{endpoint}"
         backoff_attempt = 0
 
         for attempt in range(self._retry_count + self.BACKOFF_MAX_RETRIES):
             try:
                 client = self._get_client()
-                response = client.get(url, params=params)
+                headers = bullpen_headers(url, self._bullpen)
+                if headers:
+                    response = client.get(url, params=params, headers=headers)
+                else:
+                    response = client.get(url, params=params)
+
+                if response.status_code == 401 and is_bullpen_url(url, self._bullpen):
+                    if attempt < BULLPEN_UNAUTHORIZED_ATTEMPTS - 1:
+                        time.sleep(self._retry_delay * (attempt + 1))
+                        continue
+                    logger.error(
+                        "[TSDB] Bullpen unauthorized after %d attempts; disabling proxy",
+                        BULLPEN_UNAUTHORIZED_ATTEMPTS,
+                    )
+                    if self._bullpen:
+                        self._bullpen.disable()
+                    return None
 
                 # Handle rate limit response (reactive) with exponential backoff
                 if response.status_code == 429:
@@ -353,7 +390,7 @@ class TSDBClient(BaseHTTPClient):
 
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
-                logger.warning("[TSDB] HTTP %d for %s", status, url)
+                logger.warning("[TSDB] HTTP %d for endpoint %s", status, endpoint)
                 # 404 is deterministic — retrying wastes requests and can trip
                 # the rate limiter (see GH #217). Fail fast.
                 if status == 404:
@@ -366,7 +403,9 @@ class TSDBClient(BaseHTTPClient):
             except (httpx.RequestError, RuntimeError, OSError) as e:
                 # RuntimeError: "Cannot send a request, as the client has been closed"
                 # OSError: "Bad file descriptor" from stale connections
-                logger.warning("[TSDB] Request failed for %s: %s", url, e)
+                logger.warning(
+                    "[TSDB] Request failed for endpoint %s (%s)", endpoint, type(e).__name__
+                )
                 # Don't reset client here - causes race conditions in parallel processing
                 # httpx connection pool handles stale connections automatically
                 if attempt < self._retry_count - 1:
@@ -591,14 +630,14 @@ class TSDBClient(BaseHTTPClient):
     def get_team_next_events(self, team_id: str) -> dict | None:
         """Fetch upcoming events for a team.
 
-        Note: Free tier only returns HOME events.
-
         Args:
             team_id: TSDB team ID
 
         Returns:
             Raw TSDB response or None
         """
+        # TODO: PRUNE? — no in-tree callers (verified Aug 2026), dead along
+        # with get_team_last_events; verify with user
         return self._request("eventsnext.php", {"id": team_id})
 
     def get_team_last_events(self, team_id: str) -> dict | None:

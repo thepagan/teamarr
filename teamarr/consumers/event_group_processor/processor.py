@@ -28,11 +28,9 @@ from teamarr.database.groups import (
     get_all_group_xmltv,
     get_all_groups,
     get_enabled_soccer_leagues,
-    get_group,
     update_group_stats,
 )
 from teamarr.database.settings import get_feed_separation_settings
-from teamarr.database.stats import create_run, save_run
 from teamarr.database.subscription import (
     get_subscription_template_for_event,
     get_subscription_templates,
@@ -80,10 +78,7 @@ class EventGroupProcessor(
             dispatcharr_client=client,
         )
 
-        # Process a single group
-        result = processor.process_group(group_id=1)
-
-        # Process all active groups
+        # Process all active groups (there is no single-group run; #645)
         result = processor.process_all_groups()
     """
 
@@ -220,38 +215,14 @@ class EventGroupProcessor(
             )
         return self._subscription_leagues_cache[cache_key]
 
-    def process_group(
-        self,
-        group_id: int,
-        target_date: date | None = None,
-    ) -> ProcessingResult:
-        """Process a single event group.
-
-        Args:
-            group_id: Group ID to process
-            target_date: Target date (defaults to today)
-
-        Returns:
-            ProcessingResult with all details
-        """
-        target_date = target_date or date.today()
-
-        with self._db_factory() as conn:
-            group = get_group(conn, group_id)
-            if not group:
-                result = ProcessingResult(group_id=group_id, group_name="Unknown")
-                result.errors.append(f"Group {group_id} not found")
-                result.completed_at = now_utc()
-                return result
-
-            return self._process_group_internal(conn, group, target_date)
-
     def process_all_groups(
         self,
         target_date: date | None = None,
         run_enforcement: bool = True,
         progress_callback: Callable[[int, int, str], None] | None = None,
         generation: int | None = None,
+        aggregate_xmltv: bool = True,
+        run_id: int | None = None,
     ) -> BatchProcessingResult:
         """Process all active event groups.
 
@@ -266,6 +237,16 @@ class EventGroupProcessor(
             run_enforcement: Whether to run post-processing enforcement
             progress_callback: Optional callback(current, total, group_name)
             generation: Cache generation counter (shared across all groups)
+            aggregate_xmltv: Whether to populate ``result.total_xmltv`` by
+                merging every group's guide. Full EPG generation passes False:
+                it re-reads team AND group XMLTV from the database and merges
+                those itself, so merging the group half here parses and
+                serializes the whole guide a second time for a value it
+                discards.
+            run_id: processing_runs id of the parent full_epg run. Per-stream
+                match details are keyed on it; when None (tests, ad-hoc
+                callers) no details are persisted. Groups do not get their
+                own run rows (#645) — their counters roll up into the parent.
 
         Returns:
             BatchProcessingResult with all group results and combined XMLTV
@@ -359,6 +340,7 @@ class EventGroupProcessor(
                     target_date,
                     stream_progress_callback=stream_cb,
                     status_callback=status_cb,
+                    run_id=run_id,
                 )
                 batch_result.results.append(result)
                 processed_group_ids.append(group.id)
@@ -371,20 +353,8 @@ class EventGroupProcessor(
                         f"{group.name} {stats}",
                     )
 
-            # Run enforcement (keyword, cross-group, ordering, orphans)
-            if run_enforcement:
-                enforcement_lifecycle = None
-                if self._dispatcharr_client:
-                    enforcement_lifecycle = self._get_lifecycle_service()
-                all_group_ids = [g.id for g in groups]
-                batch_result.enforcement = self._run_enforcement(
-                    conn,
-                    all_group_ids,
-                    lifecycle_service=enforcement_lifecycle,
-                )
-
             # Aggregate XMLTV from all processed groups
-            if processed_group_ids:
+            if aggregate_xmltv and processed_group_ids:
                 xmltv_contents = get_all_group_xmltv(conn, processed_group_ids)
                 if xmltv_contents:
                     from teamarr.database.settings import get_display_settings
@@ -400,12 +370,37 @@ class EventGroupProcessor(
                         f", {len(batch_result.total_xmltv)} bytes"
                     )
 
+        # Enforcement runs AFTER the connection above has closed, and must keep
+        # doing so (#607). Every enforcer opens its own connection, while this
+        # method's connection writes (store_group_xmltv, per group) and does not
+        # commit until its `with` exits — so running them inside that block put
+        # two connections from one thread on either side of the SQLite write
+        # lock. The enforcer would wait out the full 30s busy_timeout and lose
+        # its write, every run, because the lock could not be released until the
+        # block it was blocking exited.
+        #
+        # Closing first also means the enforcers read the run they are enforcing:
+        # a second connection sees only committed state, so while the groups
+        # phase was mid-transaction they were reading the database as it looked
+        # BEFORE this run.
+        #
+        # Nothing here feeds the XMLTV aggregation above — enforcement moves
+        # streams and deletes channels, it never rewrites a group's stored guide
+        # — so the reordering is safe.
+        if run_enforcement:
+            enforcement_lifecycle = None
+            if self._dispatcharr_client:
+                enforcement_lifecycle = self._get_lifecycle_service()
+            batch_result.enforcement = self._run_enforcement(
+                [g.id for g in groups],
+                lifecycle_service=enforcement_lifecycle,
+            )
+
         batch_result.completed_at = now_utc()
         return batch_result
 
     def _run_enforcement(
         self,
-        conn: Connection,
         multi_league_ids: list[int],
         lifecycle_service=None,
     ) -> list[EnforcementStepResult]:
@@ -423,8 +418,11 @@ class EventGroupProcessor(
         the remaining steps still run. The per-step outcomes are returned (and
         surfaced in run stats) instead of vanishing into warning logs.
 
+        Takes no connection on purpose (#607): every step opens its own, and
+        this must only ever be called once the caller's connection has closed.
+        See the call site in process_all_groups.
+
         Args:
-            conn: Database connection
             multi_league_ids: IDs of multi-league groups for cross-group check
             lifecycle_service: Optional lifecycle service for orphan/disabled cleanup
 
@@ -499,10 +497,11 @@ class EventGroupProcessor(
             #    Followed leagues/teams can change while the source group stays enabled;
             #    the stream sync won't remove those streams (they're still in the M3U),
             #    so the channels linger until a full wipe without this (psoi).
-            run_step(
-                "subscription_cleanup",
-                lambda: self._cleanup_unsubscribed_leagues(conn, lifecycle_service),
-            )
+            def subscription_step() -> int:
+                with self._db_factory() as conn:
+                    return self._cleanup_unsubscribed_leagues(conn, lifecycle_service)
+
+            run_step("subscription_cleanup", subscription_step)
 
         return steps
 
@@ -567,6 +566,7 @@ class EventGroupProcessor(
         target_date: date,
         stream_progress_callback: Callable | None = None,
         status_callback: Callable[[str], None] | None = None,
+        run_id: int | None = None,
     ) -> ProcessingResult:
         """Internal processing for a single group.
 
@@ -576,6 +576,7 @@ class EventGroupProcessor(
             target_date: Target date for matching
             stream_progress_callback: Optional callback(current, total, stream_name, matched)
             status_callback: Optional callback(status_message) for phase updates
+            run_id: Parent full_epg run id for match-detail persistence (None = skip)
         """
         result = ProcessingResult(group_id=group.id, group_name=group.name)
 
@@ -594,14 +595,10 @@ class EventGroupProcessor(
             result.completed_at = now_utc()
             return result
 
-        # Create stats run for tracking
-        stats_run = create_run(conn, run_type="event_group", group_id=group.id)
-        # create_run always returns a ProcessingRun with its DB id populated.
-        assert stats_run.id is not None
-
-        # Per-phase wall time for this group, persisted to the run stats so
-        # slow groups can be diagnosed without log archaeology.
-        phases: dict[str, float] = {}
+        # Per-phase wall time for this group, reported on the parent run's
+        # per-group breakdown so slow groups can be diagnosed without log
+        # archaeology.
+        phases = result.phase_timings
         _phase_start = time.time()
 
         def _mark(phase: str) -> None:
@@ -619,14 +616,11 @@ class EventGroupProcessor(
             # Step 1: Fetch M3U streams from Dispatcharr
             streams = self._fetch_streams(group)
             result.streams_fetched = len(streams)
-            stats_run.streams_fetched = len(streams)
             _mark("fetch")
 
             if not streams:
                 result.errors.append("No streams found for group")
                 result.completed_at = now_utc()
-                stats_run.complete(status="completed", error="No streams found")
-                save_run(conn, stats_run)
                 return result
 
             # Step 1.5: Apply stream filtering (include/exclude regex)
@@ -646,8 +640,6 @@ class EventGroupProcessor(
             if not streams:
                 result.errors.append("All streams filtered out by regex patterns")
                 result.completed_at = now_utc()
-                stats_run.complete(status="completed", error="All streams filtered")
-                save_run(conn, stats_run)
                 # Still update stats even if all filtered
                 update_group_stats(
                     conn,
@@ -684,10 +676,7 @@ class EventGroupProcessor(
             result.streams_matched = match_result.matched_stream_count
             result.streams_unmatched = match_result.unmatched_stream_count
             result.match_result_count = match_result.matched_count
-            stats_run.streams_matched = match_result.matched_stream_count
-            stats_run.streams_unmatched = match_result.unmatched_stream_count
-            stats_run.extra_metrics["match_results"] = match_result.matched_count
-            stats_run.streams_cached = match_result.cache_hits
+            result.streams_cached = match_result.cache_hits
 
             # Count matcher-level exclusions (matched but excluded by league/event_final)
             for r in match_result.results:
@@ -698,15 +687,16 @@ class EventGroupProcessor(
                     elif r.exclusion_reason.startswith("league_not_included"):
                         result.excluded_league_not_included += 1
 
-            # Save detailed match results for analysis
-            self._save_match_details(
-                conn=conn,
-                run_id=stats_run.id,
-                group_id=group.id,
-                group_name=group.name,
-                streams=streams,
-                match_result=match_result,
-            )
+            # Save detailed match results for analysis, keyed on the parent run
+            if run_id is not None:
+                self._save_match_details(
+                    conn=conn,
+                    run_id=run_id,
+                    group_id=group.id,
+                    group_name=group.name,
+                    streams=streams,
+                    match_result=match_result,
+                )
 
             # Step 4: Create/update channels
             matched_streams = self._build_matched_stream_list(
@@ -801,11 +791,6 @@ class EventGroupProcessor(
                     elif reason == "league_not_included":
                         result.excluded_league_not_included += 1
 
-                stats_run.channels_created = len(lifecycle_result.created)
-                stats_run.channels_updated = len(lifecycle_result.existing)
-                stats_run.channels_skipped = len(lifecycle_result.skipped)
-                stats_run.channels_deleted = len(lifecycle_result.deleted)
-                stats_run.channels_errors = len(lifecycle_result.errors)
 
                 for error in lifecycle_result.errors:
                     result.errors.append(f"Channel error: {error}")
@@ -834,20 +819,10 @@ class EventGroupProcessor(
                 result.postgame_count = postgame
                 result.xmltv_size = len(xmltv_content.encode("utf-8")) if xmltv_content else 0
 
-                stats_run.programmes_total = programmes_total
-                stats_run.programmes_events = event_programmes
-                stats_run.programmes_pregame = pregame
-                stats_run.programmes_postgame = postgame
-                stats_run.xmltv_size_bytes = result.xmltv_size
-
                 # Step 6: Store XMLTV for this group (in database)
                 # Always store, even if empty - this clears stale XMLTV when no events match
                 self._store_group_xmltv(conn, group.id, xmltv_content or "")
                 _mark("xmltv")
-
-            # Mark run as completed successfully
-            stats_run.extra_metrics["phase_timings"] = phases
-            stats_run.complete(status="completed")
 
             # Update group's processing stats
             update_group_stats(
@@ -873,11 +848,6 @@ class EventGroupProcessor(
         except Exception as e:
             logger.exception(f"Error processing group {group.name}")
             result.errors.append(str(e))
-            stats_run.extra_metrics["phase_timings"] = phases
-            stats_run.complete(status="failed", error=str(e))
-
-        # Save stats run
-        save_run(conn, stats_run)
 
         result.completed_at = now_utc()
         return result
@@ -1019,32 +989,6 @@ class EventGroupProcessor(
 # =============================================================================
 
 
-def process_event_group(
-    db_factory: Any,
-    group_id: int,
-    dispatcharr_client: Any = None,
-    target_date: date | None = None,
-) -> ProcessingResult:
-    """Process a single event group.
-
-    Convenience function that creates a processor and runs it.
-
-    Args:
-        db_factory: Factory function returning database connection
-        group_id: Group ID to process
-        dispatcharr_client: Optional DispatcharrClient
-        target_date: Target date (defaults to today)
-
-    Returns:
-        ProcessingResult
-    """
-    processor = EventGroupProcessor(
-        db_factory=db_factory,
-        dispatcharr_client=dispatcharr_client,
-    )
-    return processor.process_group(group_id, target_date)
-
-
 def process_all_event_groups(
     db_factory: Any,
     dispatcharr_client: Any = None,
@@ -1052,6 +996,8 @@ def process_all_event_groups(
     progress_callback: Callable[[int, int, str], None] | None = None,
     generation: int | None = None,
     service: SportsDataService | None = None,
+    aggregate_xmltv: bool = True,
+    run_id: int | None = None,
 ) -> BatchProcessingResult:
     """Process all active event groups.
 
@@ -1064,6 +1010,9 @@ def process_all_event_groups(
         progress_callback: Optional callback(current, total, group_name)
         generation: Cache generation counter (shared across all groups in run)
         service: Optional SportsDataService (reuse to maintain cache warmth)
+        aggregate_xmltv: Populate result.total_xmltv (see
+            EventGroupProcessor.process_all_groups)
+        run_id: Parent full_epg run id (see EventGroupProcessor.process_all_groups)
 
     Returns:
         BatchProcessingResult
@@ -1074,7 +1023,11 @@ def process_all_event_groups(
         service=service,
     )
     return processor.process_all_groups(
-        target_date, progress_callback=progress_callback, generation=generation
+        target_date,
+        progress_callback=progress_callback,
+        generation=generation,
+        aggregate_xmltv=aggregate_xmltv,
+        run_id=run_id,
     )
 
 

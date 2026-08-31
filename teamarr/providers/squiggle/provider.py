@@ -24,6 +24,7 @@ from teamarr.core import (
     TeamStats,
     Venue,
 )
+from teamarr.providers.base_client import BullpenConfig
 from teamarr.providers.squiggle.client import SquiggleClient
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,9 @@ class SquiggleProvider(SportsProvider):
         self,
         client: SquiggleClient | None = None,
         league_mapping_source: LeagueMappingSource | None = None,
+        bullpen: BullpenConfig | None = None,
     ):
-        self._client = client or SquiggleClient()
+        self._client = client or SquiggleClient(bullpen=bullpen)
         self._league_mapping_source = league_mapping_source
 
     @property
@@ -63,7 +65,7 @@ class SquiggleProvider(SportsProvider):
 
         events: list[Event] = []
         for game in games:
-            if not self._game_on_date(game, target_date):
+            if not self._game_near_date(game, target_date):
                 continue
             event = self._parse_game(game, league, teams_by_id)
             if event:
@@ -187,12 +189,17 @@ class SquiggleProvider(SportsProvider):
         except Exception:
             return None
 
-    def _game_on_date(self, game: dict, target_date: date) -> bool:
-        """Check whether a game falls on target_date (in UTC)."""
+    def _game_near_date(self, game: dict, target_date: date) -> bool:
+        """±1-day superset gate, compared in UTC (#590).
+
+        AFL runs at UTC+8..+11, so a game's UTC date routinely differs from
+        the date the user sees. Exact membership is decided by the user-day
+        window at the service seam; this only bounds how much gets parsed.
+        """
         dt = self._game_date(game)
         if dt is None:
             return False
-        return dt.date() == target_date
+        return abs((dt.date() - target_date).days) <= 1
 
     @staticmethod
     def _parse_status(game: dict) -> EventStatus:

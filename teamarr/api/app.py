@@ -23,11 +23,14 @@ from teamarr.api.routes import (
     health,
     keywords,
     leagues,
+    logs,
+    numbering_exceptions,
     presets,
     settings,
     sort_priorities,
     stats,
     subscription,
+    support,
     teams,
     templates,
     variables,
@@ -218,7 +221,21 @@ def _run_startup_tasks():
             scheduler_settings = get_scheduler_settings(conn)
             epg_settings = get_epg_settings(conn)
 
-        if scheduler_settings.enabled:
+        from teamarr.config.runtime import dry_run, scheduler_enabled
+
+        if dry_run():
+            logger.warning(
+                "[STARTUP] DRY_RUN=true — outbound writes (Dispatcharr channels/streams, "
+                "media-server refreshes) will be logged, not executed"
+            )
+
+        if scheduler_settings.enabled and not scheduler_enabled():
+            logger.warning(
+                "[STARTUP] SCHEDULER=off — background scheduler NOT started; "
+                "timed generation, backups and channel resets are disabled "
+                "(manual generation still works)"
+            )
+        elif scheduler_settings.enabled:
             try:
                 # Get Dispatcharr connection for scheduler (may be None)
                 # Must use get_connection() to get the full DispatcharrConnection
@@ -322,14 +339,19 @@ def create_app() -> FastAPI:
     app.include_router(keywords.router, prefix="/api/v1/keywords", tags=["Exception Keywords"])
     app.include_router(cache.router, prefix="/api/v1", tags=["Cache"])
     app.include_router(leagues.router, prefix="/api/v1", tags=["Custom Leagues"])
+    app.include_router(logs.router, prefix="/api/v1", tags=["Logging"])
     app.include_router(channels.router, prefix="/api/v1/channels", tags=["Channels"])
     app.include_router(settings.router, prefix="/api/v1", tags=["Settings"])
     app.include_router(sort_priorities.router, prefix="/api/v1", tags=["Sort Priorities"])
+    app.include_router(
+        numbering_exceptions.router, prefix="/api/v1", tags=["Numbering Exceptions"]
+    )
     app.include_router(stats.router, prefix="/api/v1/stats", tags=["Stats"])
     app.include_router(variables.router, prefix="/api/v1", tags=["Variables"])
     app.include_router(dispatcharr.router, prefix="/api/v1", tags=["Dispatcharr"])
     app.include_router(backup.router, prefix="/api/v1", tags=["Backup"])
     app.include_router(subscription.router, prefix="/api/v1", tags=["Subscription"])
+    app.include_router(support.router, prefix="/api/v1", tags=["Support"])
     app.include_router(detection_keywords.router, tags=["Detection Keywords"])
 
     # Serve React UI static files

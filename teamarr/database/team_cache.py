@@ -9,6 +9,34 @@ from sqlite3 import Connection
 from teamarr.core.sports import get_sport_display_names_from_db
 
 
+def invalidate_team_identity_caches() -> None:
+    """Drop every in-memory cache derived from ``team_cache``.
+
+    Call this after any write to the table. Two caches read from it and neither
+    re-checks the source per use:
+
+    * The matcher's ``TeamIdentityIndex`` (#609) — process-wide behind a TTL.
+      This one **vetoes**: a stale league membership makes the fixture gate
+      return ``FIXTURE_NOT_IN_LEAGUE``, which is a silently missing match, the
+      failure class epic goax exists to keep at zero. Before the index was
+      shared it was rebuilt per event group, so a refresh was always visible to
+      the very next generation; without this call it would not be for up to the
+      TTL window.
+    * ``_TEAM_IDENTITY_MEMO`` in services/sports_data — short_name/abbreviation
+      backfill for display. Stale values here are cosmetic, but they come from
+      the same rows, so they are dropped together rather than leaving callers to
+      remember which caches are which.
+
+    Imports are function-local: both consumers import from this module, so
+    module-level imports would be circular.
+    """
+    from teamarr.consumers.matching.team_matcher import reset_identity_index_cache
+    from teamarr.services.sports_data import clear_team_identity_memo
+
+    reset_identity_index_cache()
+    clear_team_identity_memo()
+
+
 def get_team_name_by_id(
     conn: Connection,
     provider_team_id: str,
@@ -96,6 +124,29 @@ def get_team_leagues_from_cache(
         (provider, provider_team_id, sport),
     )
     return [row["league"] for row in cursor.fetchall()]
+
+
+def load_team_identities(conn: Connection) -> list[tuple[str, str | None, str | None, str, str]]:
+    """Every cached team as (name, short_name, abbrev, league, sport).
+
+    Feeds the matcher's identity index (epic goax): resolving a stream side to
+    the real teams that bear that name is what lets the matcher ask "do these
+    two actually play each other?" instead of "does this string look close
+    enough?". Deliberately unfiltered — the whole point is to see leagues the
+    user has NOT configured, so an NHL stream can be recognised as NHL by an
+    MLB-scoped source and rejected.
+    """
+    cursor = conn.execute(
+        """
+        SELECT DISTINCT team_name, team_short_name, team_abbrev, league, sport
+        FROM team_cache
+        WHERE team_name IS NOT NULL AND team_name != ''
+        """
+    )
+    return [
+        (r["team_name"], r["team_short_name"], r["team_abbrev"], r["league"], r["sport"])
+        for r in cursor.fetchall()
+    ]
 
 
 def search_teams(

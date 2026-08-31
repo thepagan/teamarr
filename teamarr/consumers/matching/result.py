@@ -87,6 +87,10 @@ class FailedReason(Enum):
     TEAM2_NOT_FOUND = "team2_not_found"  # Second team not found in any league
     BOTH_TEAMS_NOT_FOUND = "both_teams_not_found"  # Neither team found
     NO_COMMON_LEAGUE = "no_common_league"  # Teams exist but in different leagues
+    # Both stream sides resolved to real teams (epic goax), and the league being
+    # matched is not one where those two could meet — an NHL stream offered to an
+    # MLB source. Distinct from NO_EVENT_FOUND: the game exists, just not here.
+    FIXTURE_NOT_IN_LEAGUE = "fixture_not_in_league"
 
     # League detection failures (multi-sport groups)
     NO_LEAGUE_DETECTED = "no_league_detected"  # Teams matched but can't determine league
@@ -94,6 +98,12 @@ class FailedReason(Enum):
 
     # Event lookup failures
     NO_EVENT_FOUND = "no_event_found"  # Teams matched, league detected, no game scheduled
+    # Candidates existed but every one was skipped before scoring — outside the
+    # search window, past the EPG anchor tolerance, or a sport-hint mismatch —
+    # so nothing was ever compared (#662). Distinct from NO_EVENT_FOUND, where
+    # candidates were scored and none cleared the floor; the near-miss detail
+    # used to show 100/100 for an event the loop never looked at.
+    CANDIDATES_GATED = "candidates_gated"
 
     # Event card failures (UFC, boxing)
     NO_EVENT_CARD_MATCH = "no_event_card_match"  # Could not match to event card
@@ -103,6 +113,12 @@ class FailedReason(Enum):
 
     # Tennis match failures (ATP, WTA)
     NO_TENNIS_MATCH = "no_tennis_match"  # Could not match to a tennis match
+    # Both players resolved, but the stream names a different tournament than the
+    # candidate (tennis fixture gate, #283) — veto-only, mirrors FIXTURE_NOT_IN_LEAGUE.
+    TENNIS_TOURNAMENT_MISMATCH = "tennis_tournament_mismatch"
+    # EPG programme is tennis but its fields give no tournament + (player pair or
+    # court) — the matchup cannot be known, so nothing is bound (mf7.9).
+    TENNIS_MATCHUP_UNKNOWN = "tennis_matchup_unknown"
 
     # Date validation failures (stream has date that doesn't match any event)
     DATE_MISMATCH = "date_mismatch"  # Stream date != event date
@@ -429,6 +445,8 @@ FAILED_DISPLAY: dict[FailedReason | None, str] = {
     FailedReason.NO_EVENT_CARD_MATCH: "No matching event card",
     FailedReason.NO_RACING_MATCH: "No matching racing event",
     FailedReason.NO_TENNIS_MATCH: "No matching tennis match",
+    FailedReason.TENNIS_TOURNAMENT_MISMATCH: "Stream names a different tournament",
+    FailedReason.TENNIS_MATCHUP_UNKNOWN: "Tennis matchup not known",
     FailedReason.DATE_MISMATCH: "Stream date doesn't match event",
 }
 

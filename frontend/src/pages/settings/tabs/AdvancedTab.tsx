@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Loader2, LoaderCircle, Database, Server, Trash2 } from "lucide-react"
+import { Loader2, LoaderCircle, Database, ScrollText, Server, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { Select } from "@/components/ui/select"
+import { api } from "@/api/client"
 import { ScheduledChannelResetCard } from "@/components/ScheduledChannelResetCard"
 import {
   useCacheStatus,
@@ -61,51 +63,99 @@ function DatabaseSettingsCard() {
           />
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <Input
-            placeholder="Postgres URL"
-            value={postgresUrl}
-            onChange={(event) => setPostgresUrl(event.target.value)}
-          />
-          <Input
-            placeholder="Database"
-            value={postgresDatabase}
-            onChange={(event) => setPostgresDatabase(event.target.value)}
-          />
-          <Input
-            placeholder="Username"
-            value={postgresUsername}
-            onChange={(event) => setPostgresUsername(event.target.value)}
-          />
-          <Input
-            placeholder="Password"
-            type="password"
-            value={postgresPassword}
-            onChange={(event) => setPostgresPassword(event.target.value)}
-          />
+          <Input placeholder="Postgres URL" value={postgresUrl} onChange={(event) => setPostgresUrl(event.target.value)} />
+          <Input placeholder="Database" value={postgresDatabase} onChange={(event) => setPostgresDatabase(event.target.value)} />
+          <Input placeholder="Username" value={postgresUsername} onChange={(event) => setPostgresUsername(event.target.value)} />
+          <Input placeholder="Password" type="password" value={postgresPassword} onChange={(event) => setPostgresPassword(event.target.value)} />
         </div>
         <div className="flex justify-end">
           <Button
             size="sm"
             disabled={updateMutation.isPending}
-            onClick={() => {
-              updateMutation.mutate(
-                {
-                  backend,
-                  postgres_url: postgresUrl || null,
-                  postgres_database: postgresDatabase || null,
-                  postgres_username: postgresUsername || null,
-                  postgres_password: postgresPassword || null,
-                },
-                {
-                  onSuccess: () => toast.success("Database settings saved"),
-                  onError: () => toast.error("Failed to save database settings"),
-                },
-              )
-            }}
+            onClick={() => updateMutation.mutate(
+              {
+                backend,
+                postgres_url: postgresUrl || null,
+                postgres_database: postgresDatabase || null,
+                postgres_username: postgresUsername || null,
+                postgres_password: postgresPassword || null,
+              },
+              {
+                onSuccess: () => toast.success("Database settings saved"),
+                onError: () => toast.error("Failed to save database settings"),
+              },
+            )}
           >
             {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             Save
           </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+interface LogLevelState {
+  level: string
+  default: string
+  levels: string[]
+}
+
+function LogLevelCard() {
+  const [state, setState] = useState<LogLevelState | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    api
+      .get<LogLevelState>("/logging/level")
+      .then(setState)
+      .catch(() => setState(null))
+  }, [])
+
+  const handleChange = async (level: string) => {
+    setSaving(true)
+    try {
+      const next = await api.put<LogLevelState>("/logging/level", { level })
+      setState(next)
+      toast.success(`Console log level set to ${next.level} (until restart)`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to set log level")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!state) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ScrollText className="h-5 w-5" />
+          Logging
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2">
+          <Label htmlFor="console-log-level">Console log level</Label>
+          <Select
+            id="console-log-level"
+            value={state.level}
+            onChange={(e) => handleChange(e.target.value)}
+            disabled={saving}
+          >
+            {state.levels.map((level) => (
+              <option key={level} value={level}>
+                {level}
+                {level === state.default ? " (default)" : ""}
+              </option>
+            ))}
+          </Select>
+          <p className="text-sm text-muted-foreground">
+            Applies immediately, no restart. Temporary: a restart returns to the{" "}
+            <code>LOG_LEVEL</code> default ({state.default}). The log file always
+            captures DEBUG regardless.
+          </p>
         </div>
       </CardContent>
     </Card>
@@ -310,6 +360,7 @@ export function AdvancedTab() {
       <DatabaseSettingsCard />
       <ScheduledChannelResetCard />
       <GracenoteOverridesCard />
+      <LogLevelCard />
       <DataCachesCard />
     </>
   )

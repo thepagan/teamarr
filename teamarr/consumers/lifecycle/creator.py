@@ -300,6 +300,7 @@ class ChannelCreator(_LifecycleHost):
                         decision = self._timing_manager.should_create_channel(
                             event,
                             stream_exists=True,
+                            segment_start=segment_start,
                         )
 
                         if not decision.should_act:
@@ -338,6 +339,7 @@ class ChannelCreator(_LifecycleHost):
                                 static_group_id=effective_group_id,
                                 event_sport=event_sport,
                                 event_league=event_league,
+                                event=event,
                             )
                         )
 
@@ -790,11 +792,54 @@ class ChannelCreator(_LifecycleHost):
         """
         if profile_ids is None:
             return None
-        return self._dynamic_resolver.resolve_channel_profiles(
+        resolved = self._dynamic_resolver.resolve_channel_profiles(
             profile_ids=profile_ids,
             event_sport=event_sport,
             event_league=event_league,
         )
+        return self._validate_profile_ids(resolved)
+
+    def _validate_profile_ids(self, resolved: list[int]) -> list[int]:
+        """Drop configured profile ids Dispatcharr no longer knows (#565).
+
+        A stale id (profile deleted/recreated in Dispatcharr) makes every
+        create fail with "Channel profiles with IDs [N] not found" — and
+        Dispatcharr partially creates the channel first, so the failure
+        loops into duplicate channels every run. Validation is against the
+        per-run profile catalog; an unavailable catalog passes ids through
+        unverified rather than guessing.
+
+        A non-empty selection whose every id is stale falls back to the
+        [0] all-profiles sentinel: visible-everywhere beats a create loop
+        that fails forever. [] (explicitly NO profiles) is respected as-is.
+        """
+        if not resolved or resolved == [0]:
+            return resolved
+        catalog = self._all_profile_ids()
+        if catalog is None:
+            return resolved
+        valid = [p for p in resolved if p == 0 or p in catalog]
+        stale = [p for p in resolved if p != 0 and p not in catalog]
+        newly_warned = False
+        for pid in stale:
+            if pid not in self._stale_profile_ids_warned:
+                self._stale_profile_ids_warned.add(pid)
+                newly_warned = True
+                logger.warning(
+                    "[LIFECYCLE] Configured channel profile id %d does not exist "
+                    "in Dispatcharr (deleted or recreated?) — ignoring it. "
+                    "Re-select channel profiles in Teamarr settings.",
+                    pid,
+                )
+        if not valid:
+            if newly_warned:
+                logger.warning(
+                    "[LIFECYCLE] No configured channel profile exists in "
+                    "Dispatcharr — falling back to ALL profiles ([0]) so "
+                    "channel creation can proceed."
+                )
+            return [0]
+        return valid
 
     def _create_channel(
         self,
@@ -866,9 +911,14 @@ class ChannelCreator(_LifecycleHost):
             feed_team=feed_team, feed_label_style=feed_label_style,
         )
 
-        # Get channel number using global mode (AUTO/MANUAL)
+        # Get channel number from the event's numbering lane (pinned block or default range)
         event_league = getattr(event, "league", None)
-        channel_number = self._get_next_channel_number(conn, event_league)
+        channel_number = self._get_next_channel_number(
+            conn, event_league,
+            sport=getattr(event, "sport", None),
+            home_team=event.home_team.name if getattr(event, "home_team", None) else None,
+            away_team=event.away_team.name if getattr(event, "away_team", None) else None,
+        )
         if not channel_number:
             return ChannelCreationResult(
                 success=False,
@@ -1076,15 +1126,21 @@ class ChannelCreator(_LifecycleHost):
         self,
         conn: Connection,
         event_league: str | None = None,
+        *,
+        sport: str | None = None,
+        home_team: str | None = None,
+        away_team: str | None = None,
     ) -> int | None:
         """Get next available channel number.
 
-        Uses global channel mode (AUTO/MANUAL) from settings.
+        Resolves the event's numbering lane (a pinned block for its team /
+        league / sport, else the global range — #333).
         Passes external Dispatcharr channel numbers to avoid collisions (#146).
 
         Args:
             conn: Database connection
-            event_league: League code for the event (used in MANUAL mode)
+            event_league: League code for the event
+            sport / home_team / away_team: lane resolution keys
 
         Returns:
             Next available channel number as int, or None if range exhausted
@@ -1094,6 +1150,7 @@ class ChannelCreator(_LifecycleHost):
         next_num = get_next_channel_number(
             conn, league=event_league,
             external_occupied=self._external_occupied,
+            sport=sport, home_team=home_team, away_team=away_team,
         )
         if next_num is None:
             logger.warning(

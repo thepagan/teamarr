@@ -12,7 +12,7 @@ Configuration via environment variables:
 import logging
 import os
 
-from teamarr.providers.base_client import BaseHTTPClient
+from teamarr.providers.base_client import BaseHTTPClient, BullpenConfig, bullpen_rewrite
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +24,35 @@ ESPN_RETRY_COUNT = int(os.environ.get("ESPN_RETRY_COUNT", 3))
 
 ESPN_BASE_URL = "https://site.api.espn.com/apis/site/v2/sports"
 ESPN_CORE_URL = "http://sports.core.api.espn.com/v2/sports"
+ESPN_USER_AGENT = "curl/8.7.1"
 
 # UFC athlete endpoint (for fighter profiles)
 ESPN_UFC_ATHLETE_URL = "https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/athletes"
 
-COLLEGE_SCOREBOARD_GROUPS = {
-    "mens-college-basketball": "50",
-    "womens-college-basketball": "50",
-    # Note: college-football omitted to return both FBS + FCS games
-    # Note: mens-college-hockey does NOT need groups param
+# ESPN's ungrouped NCAA scoreboards can omit entire divisions. Fetch the root
+# groups and merge their slates so a canonical Teamarr league covers all NCAA
+# events ESPN exposes, including cross-division fixtures.
+#
+# Never send `limit` on these requests (#625). Measured 2026-08-28 against the
+# busiest days of the year: with no limit ESPN returns the whole slate (143
+# MBB, 121 WBB, 117 CFB); limit=100 truncates to 100; 200-500 return the whole
+# slate; and any limit ABOVE 500 — 1000 included — makes ESPN silently return
+# exactly 25 events. That single parameter cut Week 1 FBS coverage from 68
+# games to 17. `_SCOREBOARD_CAP_CANARY` warns if that shape ever comes back.
+_SCOREBOARD_CAP_CANARY = 25
+
+COLLEGE_SCOREBOARD_GROUPS: dict[str, tuple[str, ...]] = {
+    "college-football": ("90", "35"),  # Division I; Division II/III
+    "mens-college-basketball": ("50", "51"),  # NCAA D-I; non-NCAA D-I
+    "womens-college-basketball": ("50", "51"),
+    "college-baseball": ("26",),
+    "college-softball": ("31",),
+    "mens-college-volleyball": ("90",),
+    "womens-college-volleyball": ("90", "91", "110"),
+    "mens-college-lacrosse": ("90",),
+    "womens-college-lacrosse": ("90", "108"),
+    # NCAA hockey's ungrouped endpoint already returns its complete slate.
+    # NCAA soccer and women's hockey expose no season groups.
 }
 
 # ESPN team ID corrections for known mismatches between /teams endpoint and scoreboard
@@ -60,6 +80,7 @@ class ESPNClient(BaseHTTPClient):
         timeout: float | None = None,
         retry_count: int | None = None,
         max_connections: int | None = None,
+        bullpen: BullpenConfig | None = None,
     ):
         super().__init__(
             timeout=timeout if timeout is not None else ESPN_TIMEOUT,
@@ -67,7 +88,14 @@ class ESPNClient(BaseHTTPClient):
             max_connections=(
                 max_connections if max_connections is not None else ESPN_MAX_CONNECTIONS
             ),
+            headers={"User-Agent": ESPN_USER_AGENT},
+            bullpen=bullpen,
         )
+        # site.api.espn.com -> bullpen target "espn-site"; sports.core.api.espn.com
+        # (UFC athletes and season-tree endpoints) -> bullpen target "espn-core".
+        self._base_url = bullpen_rewrite(ESPN_BASE_URL, "espn-site", bullpen)
+        self._core_url = bullpen_rewrite(ESPN_CORE_URL, "espn-core", bullpen)
+        self._ufc_athlete_url = bullpen_rewrite(ESPN_UFC_ATHLETE_URL, "espn-core", bullpen)
 
     def _request(self, url: str, params: dict | None = None) -> dict | None:
         label = url.split("/sports/")[-1] if "/sports/" in url else url
@@ -126,13 +154,50 @@ class ESPNClient(BaseHTTPClient):
             Raw ESPN response or None on error
         """
         sport, espn_league = self.get_sport_league(league, sport_league)
-        url = f"{ESPN_BASE_URL}/{sport}/{espn_league}/scoreboard"
+        url = f"{self._base_url}/{sport}/{espn_league}/scoreboard"
         params: dict = {"dates": date_str} if date_str else {}
+        groups = COLLEGE_SCOREBOARD_GROUPS.get(league)
+        if not groups:
+            return self._request(url, params)
 
-        if league in COLLEGE_SCOREBOARD_GROUPS:
-            params["groups"] = COLLEGE_SCOREBOARD_GROUPS[league]
+        responses = []
+        for group in groups:
+            response = self._request(url, {**params, "groups": group})
+            if response is None:
+                logger.warning("[ESPN] Empty scoreboard response for %s group %s", league, group)
+                continue
+            if len(response.get("events", [])) == _SCOREBOARD_CAP_CANARY:
+                # A real slate is never exactly 25; this is the shape ESPN
+                # returns when it decides to cap a request (see the note on
+                # COLLEGE_SCOREBOARD_GROUPS). Surface it rather than silently
+                # matching against a fifth of the schedule.
+                logger.warning(
+                    "[ESPN] %s group %s returned exactly %d events — ESPN may be capping "
+                    "this request; coverage is probably incomplete",
+                    league,
+                    group,
+                    _SCOREBOARD_CAP_CANARY,
+                )
+            responses.append(response)
 
-        return self._request(url, params)
+        if not responses:
+            return None
+        if len(responses) == 1:
+            return responses[0]
+
+        merged = dict(responses[0])
+        seen_event_ids: set[str] = set()
+        events = []
+        for response in responses:
+            for event in response.get("events", []):
+                event_id = event.get("id")
+                if event_id and event_id in seen_event_ids:
+                    continue
+                if event_id:
+                    seen_event_ids.add(event_id)
+                events.append(event)
+        merged["events"] = events
+        return merged
 
     def get_league_info(
         self,
@@ -149,7 +214,7 @@ class ESPNClient(BaseHTTPClient):
             Dict with name, logo_url, abbreviation or None on error
         """
         sport, espn_league = self.get_sport_league(league, sport_league)
-        url = f"{ESPN_BASE_URL}/{sport}/{espn_league}/scoreboard"
+        url = f"{self._base_url}/{sport}/{espn_league}/scoreboard"
 
         data = self._request(url)
         if not data:
@@ -197,7 +262,7 @@ class ESPNClient(BaseHTTPClient):
         """
         team_id = self._correct_team_id(league, team_id)
         sport, espn_league = self.get_sport_league(league, sport_league)
-        url = f"{ESPN_BASE_URL}/{sport}/{espn_league}/teams/{team_id}/schedule"
+        url = f"{self._base_url}/{sport}/{espn_league}/teams/{team_id}/schedule"
         return self._request(url)
 
     def get_team(
@@ -218,7 +283,7 @@ class ESPNClient(BaseHTTPClient):
         """
         team_id = self._correct_team_id(league, team_id)
         sport, espn_league = self.get_sport_league(league, sport_league)
-        url = f"{ESPN_BASE_URL}/{sport}/{espn_league}/teams/{team_id}"
+        url = f"{self._base_url}/{sport}/{espn_league}/teams/{team_id}"
         return self._request(url)
 
     def get_event(
@@ -238,7 +303,7 @@ class ESPNClient(BaseHTTPClient):
             Raw ESPN response or None on error
         """
         sport, espn_league = self.get_sport_league(league, sport_league)
-        url = f"{ESPN_BASE_URL}/{sport}/{espn_league}/summary"
+        url = f"{self._base_url}/{sport}/{espn_league}/summary"
         return self._request(url, {"event": event_id})
 
     def get_teams(self, league: str, sport_league: tuple[str, str] | None = None) -> dict | None:
@@ -252,8 +317,38 @@ class ESPNClient(BaseHTTPClient):
             Raw ESPN response with teams list or None on error
         """
         sport, espn_league = self.get_sport_league(league, sport_league)
-        url = f"{ESPN_BASE_URL}/{sport}/{espn_league}/teams"
+        url = f"{self._base_url}/{sport}/{espn_league}/teams"
         return self._request(url, {"limit": 1000})
+
+    # Core-API season-tree endpoints (#91): conference/division groups. The
+    # site /groups endpoint is deliberately NOT used — it truncates children
+    # at 25 and serves stale membership (verified 2026-07-17, #91 comments).
+
+    def _season_group_url(self, sport: str, espn_league: str, season: int, group_id: str) -> str:
+        return (
+            f"{self._core_url}/{sport}/leagues/{espn_league}"
+            f"/seasons/{season}/types/2/groups/{group_id}"
+        )
+
+    def get_season_group(
+        self, sport: str, espn_league: str, season: int, group_id: str
+    ) -> dict | None:
+        """Fetch one season-tree group (id, name, shortName, isConference)."""
+        return self._request(self._season_group_url(sport, espn_league, season, group_id))
+
+    def get_season_group_children(
+        self, sport: str, espn_league: str, season: int, group_id: str
+    ) -> dict | None:
+        """Fetch a group's children as $ref items (conferences under a division)."""
+        url = self._season_group_url(sport, espn_league, season, group_id) + "/children"
+        return self._request(url, {"limit": 100})
+
+    def get_season_group_teams(
+        self, sport: str, espn_league: str, season: int, group_id: str
+    ) -> dict | None:
+        """Fetch a group's team roster as $ref items (ids parseable from URLs)."""
+        url = self._season_group_url(sport, espn_league, season, group_id) + "/teams"
+        return self._request(url, {"limit": 500})
 
     # UFC-specific endpoints
 
@@ -271,7 +366,7 @@ class ESPNClient(BaseHTTPClient):
         Returns:
             Raw ESPN scoreboard response or None on error
         """
-        url = f"{ESPN_BASE_URL}/mma/ufc/scoreboard"
+        url = f"{self._base_url}/mma/ufc/scoreboard"
         params: dict = {"dates": date_str} if date_str else {}
         return self._request(url, params)
 
@@ -284,7 +379,7 @@ class ESPNClient(BaseHTTPClient):
         Returns:
             Raw ESPN response or None on error
         """
-        url = f"{ESPN_UFC_ATHLETE_URL}/{fighter_id}"
+        url = f"{self._ufc_athlete_url}/{fighter_id}"
         return self._request(url)
 
     def get_fighter_record(self, fighter_id: str) -> dict | None:
@@ -296,5 +391,5 @@ class ESPNClient(BaseHTTPClient):
         Returns:
             Raw ESPN response with record data or None on error
         """
-        url = f"{ESPN_UFC_ATHLETE_URL}/{fighter_id}/records"
+        url = f"{self._ufc_athlete_url}/{fighter_id}/records"
         return self._request(url)

@@ -18,6 +18,7 @@ from teamarr.core import (
     TeamStats,
     Venue,
 )
+from teamarr.providers.base_client import BullpenConfig
 from teamarr.providers.tsdb.client import TSDBClient
 from teamarr.providers.tsdb.racing import parse_racing_events
 
@@ -30,6 +31,30 @@ _VS_SEPARATORS = (" vs. ", " vs ", " v ")
 # Type alias for team name resolver callback
 # Takes (team_id, league) -> team_name or None
 TeamNameResolver = Callable[[str, str], str | None]
+
+
+def _nearby_dates(target_date: date) -> set[date]:
+    """target_date ±1 day — the raw-prefilter superset window (#590)."""
+    return {target_date + timedelta(days=offset) for offset in (-1, 0, 1)}
+
+
+def _nearby_date_strs(target_date: date) -> set[str]:
+    """ISO strings of :func:`_nearby_dates`, for raw-field comparison."""
+    return {d.isoformat() for d in _nearby_dates(target_date)}
+
+
+def _event_near_date(event_data: dict, near_strs: set[str]) -> bool:
+    """Whether a raw TSDB row is plausibly on the target day (#588/#590).
+
+    ``dateEvent`` is the UTC calendar date; ``dateEventLocal``, when present,
+    is the venue-local one — they differ across UTC midnight. This is only a
+    cheap SUPERSET gate (so full-season lists aren't parsed wholesale); exact
+    membership is decided by the user-day window at the service seam.
+    """
+    return (
+        event_data.get("dateEvent") in near_strs
+        or event_data.get("dateEventLocal") in near_strs
+    )
 
 
 class TSDBProvider(SportsProvider):
@@ -70,11 +95,13 @@ class TSDBProvider(SportsProvider):
         client: TSDBClient | None = None,
         api_key: str | None = None,
         team_name_resolver: TeamNameResolver | None = None,
+        bullpen: BullpenConfig | None = None,
     ):
         self._league_mapping_source = league_mapping_source
         self._client = client or TSDBClient(
             league_mapping_source=league_mapping_source,
             api_key=api_key,
+            bullpen=bullpen,
         )
         self._team_name_resolver = team_name_resolver
 
@@ -86,9 +113,10 @@ class TSDBProvider(SportsProvider):
     def is_premium(self) -> bool:
         """Check if TSDB has premium/full API access.
 
-        Premium access has no rate limits on schedule endpoints.
-        Free tier is limited to ~5 events per day via eventsnextleague.
-        Used by ProviderRegistry for fallback resolution.
+        Free tier (measured 2026-08-04) serves only a rolling 1-event
+        next/past window and no league-filtered eventsday — see the
+        TSDBClient docstring. Used by ProviderRegistry for fallback
+        resolution and the cache-prewarm premium gate.
         """
         return self._client.is_premium
 
@@ -110,10 +138,11 @@ class TSDBProvider(SportsProvider):
            SEASON_FALLBACK_LEAGUES (sparse leagues like Unrivaled)
         """
         if self._client.get_sport(league) == "racing":
+            near = _nearby_dates(target_date)
             return [
                 event
                 for event in self._get_racing_events(league)
-                if any(s.start_time.date() == target_date for s in event.sessions)
+                if any(s.start_time.date() in near for s in event.sessions)
             ]
 
         date_str = target_date.strftime("%Y-%m-%d")
@@ -128,14 +157,13 @@ class TSDBProvider(SportsProvider):
                     events.append(event)
             return events
 
-        # Fall back to next league events, filter by date
+        # Fall back to next league events, prefiltered to a ±1-day superset
+        near_strs = _nearby_date_strs(target_date)
         data = self._client.get_league_next_events(league)
         if data and data.get("events"):
             events = []
             for event_data in data["events"]:
-                # Filter to target date
-                event_date = event_data.get("dateEvent")
-                if event_date != date_str:
+                if not _event_near_date(event_data, near_strs):
                     continue
                 event = self._parse_event(event_data, league)
                 if event:
@@ -143,7 +171,7 @@ class TSDBProvider(SportsProvider):
             if events:
                 return events
 
-        # Final fallback: full-season fetch, filtered by date. Gated to sparse
+        # Final fallback: full-season fetch, prefiltered by date. Gated to sparse
         # leagues (Unrivaled) so ordinary leagues with empty dates don't fire a
         # per-date fetch (GH #217).
         if league not in self.SEASON_FALLBACK_LEAGUES:
@@ -152,9 +180,7 @@ class TSDBProvider(SportsProvider):
         if data and data.get("events"):
             events = []
             for event_data in data["events"]:
-                # Filter to target date
-                event_date = event_data.get("dateEvent")
-                if event_date != date_str:
+                if not _event_near_date(event_data, near_strs):
                     continue
                 event = self._parse_event(event_data, league)
                 if event:
@@ -224,7 +250,11 @@ class TSDBProvider(SportsProvider):
         """Get schedule for a team including past and future games.
 
         Uses eventsday.php across multiple days to get both HOME and AWAY
-        games (eventsnext.php only returns HOME on free tier).
+        games. FREE-TIER CAVEAT (measured 2026-08-04): league-filtered
+        eventsday returns nothing without a premium key, so this whole
+        method yields [] keyless — team channels require premium. Event
+        channels survive on free via get_events' eventsnextleague fallback
+        (rolling 1-event window harvested by per-date polling).
 
         Scans:
         - Past DAYS_BACK days for .last variable resolution (cached indefinitely)
@@ -296,10 +326,11 @@ class TSDBProvider(SportsProvider):
             return []
         data = self._client.get_events_by_season(league)
         if data and data.get("events"):
+            near_strs = _nearby_date_strs(target_date)
             team_events = []
             for event_data in data["events"]:
-                # Filter by date and team
-                if event_data.get("dateEvent") != date_str:
+                # ±1-day superset by date, exact by team
+                if not _event_near_date(event_data, near_strs):
                     continue
                 event = self._parse_event(event_data, league)
                 if event and self._team_in_event(team_name, event):

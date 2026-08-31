@@ -21,7 +21,10 @@ Usage:
 """
 
 import logging
+import os
+import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -60,8 +63,41 @@ from teamarr.core import Event
 from teamarr.database.leagues import get_leagues_bulk
 from teamarr.services import SportsDataService
 from teamarr.utilities.event_status import is_event_final
+from teamarr.utilities.fuzzy_match import normalize_text
 
 logger = logging.getLogger(__name__)
+
+# Concurrency for the event prefetch. Shares ESPN_MAX_WORKERS with the team
+# scan and cache refresh so a user throttling DNS (PiHole, AdGuard) turns both
+# down with one knob.
+PREFETCH_MAX_WORKERS = int(os.environ.get("ESPN_MAX_WORKERS", 24))
+
+
+@dataclass
+class _PrefetchSlot:
+    """One (league, date) cell of the prefetch window.
+
+    Planning, fetching and assembly are three separate passes over these, so a
+    slot carries both the decision made about it and the events that answered
+    it. ``reused`` marks a slot already served from ``shared_events`` — it must
+    not be written back, since it came from there.
+
+    ``failed`` marks a slot whose fetch raised. Its empty ``events`` is an
+    absence of knowledge, not an answer, so it must not be written back either:
+    ``shared_events`` treats an empty-but-freshly-fetched entry as authoritative
+    (``shared_events or not was_cache_only or ...``), so publishing one would
+    silently blank that league/date for every later group in the run instead of
+    letting them retry.
+    """
+
+    league: str
+    fetch_date: date
+    shared_key: str
+    cache_only: bool
+    is_tsdb: bool
+    events: list[Event] = field(default_factory=list)
+    reused: bool = False
+    failed: bool = False
 
 
 @dataclass
@@ -355,6 +391,10 @@ class StreamMatcher:
         self._tennis_matcher = TennisMatcher(
             service, self._cache, majors_only=tennis_majors_only
         )
+        # EPG tennis programmes that could not be resolved to a matchup, per
+        # tvg_id (mf7.9) — surfaced on the linear stream's result in
+        # _reconcile_epg when nothing else matched.
+        self._epg_tennis_unknown: dict[str, list[str]] = {}
 
         # League event types + sports cache
         self._league_event_types: dict[str, str] = {}
@@ -509,19 +549,25 @@ class StreamMatcher:
             target_date: Target date for event matching
             status_callback: Optional callback(status_message) for status updates
         """
+        # Rebuilt, never mutated in place. TeamMatcher memoizes its flattened
+        # candidate lists against this dict's *identity* (_prefetched_candidates),
+        # so mutating it after the fact would leave those memos serving stale
+        # candidates for the rest of the batch. Replace the dict; don't edit it.
         self._prefetched_events = {}
         total_events = 0
         shared_hits = 0
-        service_calls = 0
 
         total_leagues = len(self._search_leagues)
-        num_dates = MATCH_WINDOW_DAYS + self._days_ahead + 1
-        total_leagues * num_dates
 
-        for league_idx, league in enumerate(self._search_leagues):
-            league_events: list[Event] = []
+        # Pass 1 (sequential): decide, for every league x date in the window,
+        # whether the answer is already in shared_events or still has to be
+        # fetched. Every shared_key is distinct, so no slot in this plan depends
+        # on another's result — which is what makes pass 2 safe to parallelize.
+        plan: list[list[_PrefetchSlot]] = []
+        for league in self._search_leagues:
             is_tsdb = self._service.get_provider_name(league) == "tsdb"
             is_group_league = league in self._include_leagues
+            slots: list[_PrefetchSlot] = []
 
             # Range: from -MATCH_WINDOW_DAYS to +days_ahead (inclusive)
             for offset in range(-MATCH_WINDOW_DAYS, self._days_ahead + 1):
@@ -548,6 +594,14 @@ class StreamMatcher:
                     # Today: fetch from API for group's leagues, cache for others
                     cache_only = not is_group_league
 
+                slot = _PrefetchSlot(
+                    league=league,
+                    fetch_date=fetch_date,
+                    shared_key=shared_key,
+                    cache_only=cache_only,
+                    is_tsdb=is_tsdb,
+                )
+
                 # Check shared events cache first (from prior groups in same run)
                 if self._shared_events is not None and shared_key in self._shared_events:
                     shared_events, was_cache_only = self._shared_events[shared_key]
@@ -559,20 +613,82 @@ class StreamMatcher:
                     # Don't use if: empty + was_cache_only + we need this league
                     # (empty from cache miss shouldn't block groups that need API data)
                     if shared_events or not was_cache_only or not is_group_league:
-                        league_events.extend(shared_events)
+                        slot.events = shared_events
+                        slot.reused = True
                         shared_hits += 1
-                        continue
-                    # Fall through to fetch fresh if empty cache-only result
-                    # and this group actually needs the league
+                slots.append(slot)
+            plan.append(slots)
 
-                events = self._service.get_events(league, fetch_date, cache_only=cache_only)
-                service_calls += 1
-                league_events.extend(events)
+        # Pass 2: fill the slots that still need a service call. Network-bound
+        # fetches (cache_only=False) go out concurrently — the window is
+        # ~11 dates deep per league, and serializing every one of them was the
+        # single longest stretch of dead wall-clock time in a run. Cache-only
+        # slots stay inline: they never touch the network, so a thread would
+        # only add GIL hand-off to pure deserialization work.
+        #
+        # TSDB is excluded from the pool on purpose. Its client serializes on a
+        # rate limiter that sleeps while holding its lock, so concurrent callers
+        # would queue up inside that sleep rather than overlap — all the cost of
+        # threads, none of the overlap.
+        pending = [s for row in plan for s in row if not s.reused]
+        concurrent_slots = [s for s in pending if not s.cache_only and not s.is_tsdb]
+        inline_slots = [s for s in pending if s.cache_only or s.is_tsdb]
 
-                # Store result in shared cache for subsequent matchers
-                # Include was_cache_only flag so later groups can decide whether to re-fetch
-                if self._shared_events is not None:
-                    self._shared_events[shared_key] = (events, cache_only)
+        service_calls = len(pending)
+
+        def _record(slot: _PrefetchSlot, exc: Exception) -> None:
+            """One slot's failure must neither kill the batch nor be cached."""
+            logger.warning(
+                "[PREFETCH] %s %s failed: %s", slot.league, slot.fetch_date, exc
+            )
+            slot.events = []
+            slot.failed = True
+
+        if concurrent_slots:
+            workers = min(PREFETCH_MAX_WORKERS, len(concurrent_slots))
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="prefetch"
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        self._service.get_events,
+                        slot.league,
+                        slot.fetch_date,
+                        cache_only=slot.cache_only,
+                    ): slot
+                    for slot in concurrent_slots
+                }
+                for future in as_completed(futures):
+                    slot = futures[future]
+                    try:
+                        slot.events = future.result()
+                    except Exception as e:  # noqa: BLE001 - see _record
+                        _record(slot, e)
+
+        # Isolated per slot exactly like the concurrent path above. TSDB runs
+        # here and is the flakiest fetch we make (rate-limited free tier), so
+        # letting it propagate would let one league take down the whole
+        # prefetch for every other league.
+        for slot in inline_slots:
+            try:
+                slot.events = self._service.get_events(
+                    slot.league, slot.fetch_date, cache_only=slot.cache_only
+                )
+            except Exception as e:  # noqa: BLE001 - see _record
+                _record(slot, e)
+
+        # Pass 3 (sequential): assemble in league order and publish to
+        # shared_events, exactly as the serial version did.
+        for league_idx, (league, slots) in enumerate(
+            zip(self._search_leagues, plan, strict=True)
+        ):
+            league_events: list[Event] = []
+            for slot in slots:
+                league_events.extend(slot.events)
+                # Reused slots came FROM shared_events; failed slots know
+                # nothing (see _PrefetchSlot). Neither is ours to publish.
+                if self._shared_events is not None and not slot.reused and not slot.failed:
+                    self._shared_events[slot.shared_key] = (slot.events, slot.cache_only)
 
             if league_events:
                 self._prefetched_events[league] = league_events
@@ -580,16 +696,29 @@ class StreamMatcher:
 
             # Report progress periodically (every 20 leagues or at end)
             if status_callback and (league_idx % 20 == 0 or league_idx == total_leagues - 1):
-                int((league_idx + 1) / total_leagues * 100)
                 status_callback(
                     f"Prefetching events: {league_idx + 1}/{total_leagues} leagues "
                     f"({total_events} events, {shared_hits} reused)"
                 )
 
+        failed_slots = [s for s in pending if s.failed]
+        if failed_slots:
+            # One line to grep for during a dev soak: a burst here (429s from a
+            # provider under the prefetch's concurrency) is the signal to turn
+            # PREFETCH_MAX_WORKERS down.
+            logger.warning(
+                "[PREFETCH] %d/%d fetches failed and were NOT cached; "
+                "affected leagues: %s",
+                len(failed_slots),
+                service_calls,
+                ", ".join(sorted({s.league for s in failed_slots})),
+            )
+
         logger.debug(
             f"Prefetched {total_events} events from {len(self._prefetched_events)} leagues "
             f"(window: -{MATCH_WINDOW_DAYS} to +{self._days_ahead} days, "
-            f"shared_hits={shared_hits}, service_calls={service_calls})"
+            f"shared_hits={shared_hits}, service_calls={service_calls}, "
+            f"concurrent={len(concurrent_slots)}, failed={len(failed_slots)})"
         )
 
     def _match_single(
@@ -826,15 +955,16 @@ class StreamMatcher:
             attempted += 1
 
             epg_input = build_match_input(program)
-            # NOTE: event_league_sport is deliberately NOT passed here. Tennis
-            # EPG matching needs its own design (bead mf7.9): one guide
-            # programme ("Wimbledon, Day 7") covers MANY concurrent matches,
-            # so routing programme titles through the tennis pipeline mass-
-            # matched arbitrary linear channels (2026-07-05: match volume
-            # 166 -> 1,099 on the channel-source group, 252 bindings to one
-            # WTA tournament). Omitting it preserves the pre-tennis EPG
-            # classification exactly; the gate below drops any TENNIS_MATCH
-            # that still arises via the "Tennis" sport-hint trigger.
+            # NOTE: event_league_sport is deliberately NOT passed here. One
+            # guide programme ("Wimbledon, Day 7") covers MANY concurrent
+            # matches, so routing programme titles through the tennis
+            # pipeline mass-matched arbitrary linear channels (2026-07-05:
+            # match volume 166 -> 1,099 on the channel-source group, 252
+            # bindings to one WTA tournament). Tennis programmes are only
+            # those that classify TENNIS_MATCH on their own evidence (atp/wta
+            # league hint or a "Tennis" sport hint) and they take the
+            # dedicated programme path below (mf7.9, #642), which requires a
+            # tournament AND a player pair or court before binding anything.
             classified = classify_stream(
                 epg_input, league_event_type, self._custom_regex,
                 self._feed_home_terms, self._feed_away_terms,
@@ -842,10 +972,21 @@ class StreamMatcher:
             if classified.category == StreamCategory.PLACEHOLDER:
                 continue
             if classified.category == StreamCategory.TENNIS_MATCH:
-                logger.debug(
-                    "[EPG_MATCH] tennis programme skipped pending mf7.9: %s",
-                    epg_input[:60],
-                )
+                for outcome in self._match_tennis_program(
+                    program, classified, epg_input, stream_id, tvg_id
+                ):
+                    outcome.match_method = MatchMethod.EPG
+                    outcome.epg_program_start = program.start_dt
+                    outcome.epg_program_end = program.end_dt
+                    ev_id = outcome.event.id if outcome.event else None
+                    prev = best_by_event.get(ev_id)
+                    skew_s = (
+                        abs((outcome.event.start_time - program.start_dt).total_seconds())
+                        if outcome.event is not None and program.start_dt is not None
+                        else 0.0
+                    )
+                    if prev is None or skew_s < prev[0]:
+                        best_by_event[ev_id] = (skew_s, outcome, classified)
                 continue
 
             # Same text-evidence gate as the racing fallback, applied to the
@@ -867,16 +1008,16 @@ class StreamMatcher:
                 )
                 continue
 
-            # TEAM_ONLY gate: skip team routing when disabled, but allow the
-            # racing fallback to run if racing leagues are present. A race title
-            # like "F1 | Monaco Grand Prix" classifies TEAM_ONLY in a mixed
-            # group — we must not silently drop it here.
+            # TEAM_ONLY gate: skip team routing when disabled, but fall
+            # through with no outcomes so the later fallbacks still get their
+            # chance — racing (self-gated on event-type leagues + series-name
+            # text evidence; "F1 | Monaco Grand Prix" classifies TEAM_ONLY in
+            # a mixed group) and the description fallback (#540; a league-only
+            # programme title like "Scottish Premiership Football" also
+            # classifies TEAM_ONLY, but with the full matchup in the
+            # description it is morally TEAM_VS_TEAM, so the team-streams
+            # toggle must not gate it).
             if classified.category == StreamCategory.TEAM_ONLY and not self._team_streams_enabled:
-                if not any(
-                    self._league_event_types.get(lg) == "event"
-                    for lg in self._include_leagues
-                ):
-                    continue
                 primary_outcomes: list[MatchOutcome] = []
             else:
                 # Anchor matching to the program's own broadcast instant (bead t5e).
@@ -904,6 +1045,18 @@ class StreamMatcher:
                 )
                 if fallback is not None:
                     matched_pairs.append(fallback)
+
+            # Description fallback (#540): Sky-style guides title sports
+            # programmes by competition ("Scottish Premiership Football") and
+            # carry the matchup only in the description ("Celtic v Dundee FC
+            # Following final day triumph..."). When the title yielded a
+            # league hint but no team pair, look for exactly one league event
+            # airing inside the programme window whose BOTH team names appear
+            # in the description.
+            if not matched_pairs:
+                desc_outcome = self._try_description_match(program, classified, stream_id)
+                if desc_outcome is not None:
+                    matched_pairs.append((desc_outcome, classified))
 
             for outcome, eff_classified in matched_pairs:
                 # Tag as EPG and attach the program's broadcast window (183.5).
@@ -959,17 +1112,60 @@ class StreamMatcher:
 
         plan = [(o, c) for _, o, c in best_by_event.values()]
         if programs:
+            tennis_unknown = len(self._epg_tennis_unknown.get(tvg_id, ()))
             logger.info(
                 "[EPG_MATCH] tvg=%s (via stream '%s'): %d program(s), %d attempted, "
-                "%d non-event skipped, %d event(s) matched",
+                "%d non-event skipped, %d event(s) matched%s",
                 tvg_id,
                 stream_name[:32],
                 len(programs),
                 attempted,
                 skipped_non_event,
                 len(plan),
+                f", {tennis_unknown} tennis matchup(s) not known" if tennis_unknown else "",
             )
         return plan
+
+    def _match_tennis_program(
+        self,
+        program,
+        classified: ClassifiedStream,
+        epg_input: str,
+        stream_id: int,
+        tvg_id: str,
+    ) -> list[MatchOutcome]:
+        """Tennis EPG programme → matched outcomes (mf7.9, #642).
+
+        Feeds title + sub_title + description to TennisMatcher.match_program;
+        a TENNIS_MATCHUP_UNKNOWN failure is recorded per tvg_id so the linear
+        stream's result can carry it when nothing else matches.
+        """
+        tennis_leagues = [
+            lg
+            for lg in self._search_leagues
+            if self._league_event_types.get(lg) == "event"
+            and self._league_sports.get(lg) == "tennis"
+        ]
+        if not tennis_leagues or program.start_dt is None or program.end_dt is None:
+            return []
+        description = (program.description or "").strip()
+        program_text = f"{epg_input} | {description}" if description else epg_input
+        outcomes = self._tennis_matcher.match_program(
+            classified=classified,
+            program_text=program_text,
+            leagues=tennis_leagues,
+            program_start=program.start_dt,
+            program_end=program.end_dt,
+            stream_id=stream_id,
+            user_tz=self._user_tz,
+            duration_hours=self._sport_durations.get("tennis", 3.0),
+        )
+        matched = [o for o in outcomes if o.is_matched]
+        if not matched:
+            detail = next((o.detail for o in outcomes if o.detail), "") or "matchup not known"
+            self._epg_tennis_unknown.setdefault(tvg_id, []).append(f"{epg_input[:48]}: {detail}")
+            logger.debug("[EPG_MATCH] tennis matchup not known: %s — %s", epg_input[:60], detail)
+        return matched
 
     def _reconcile_epg(
         self,
@@ -987,12 +1183,150 @@ class StreamMatcher:
           name found nothing (a static-named single-event stream).
         """
         epg_matched = [r for r in epg_results if r.matched]
+        # Tennis programmes that had no resolvable matchup (mf7.9): when the
+        # stream ends up unmatched, say so instead of the generic name-match
+        # failure — the guide DID carry tennis, it just didn't say which match.
+        unknown = self._epg_tennis_unknown.pop(tvg_id, None)
+        if unknown and not epg_matched and not any(r.matched for r in name_results):
+            for r in name_results:
+                r.exclusion_reason = FailedReason.TENNIS_MATCHUP_UNKNOWN.value
         if self._epg_index is not None and self._epg_index.is_linear(tvg_id):
             return epg_matched if epg_matched else name_results
         name_matched = any(r.matched for r in name_results)
         if not name_matched and epg_matched:
             return epg_matched
         return name_results
+
+    def _try_description_match(
+        self,
+        program,
+        classified: ClassifiedStream,
+        stream_id: int,
+    ) -> MatchOutcome | None:
+        """EPG description fallback (#540).
+
+        Sky-style guides title sports programmes by competition ("Scottish
+        Premiership Football") with no sub_title; the matchup lives only in
+        the description prose. Prose can't go through classify_stream (no
+        reliable terminator after "Celtic v Dundee FC Following final day
+        triumph..."), so instead of parsing it we verify against known
+        events: the classification must carry a league hint, and exactly ONE
+        event in the hinted league(s) may both air inside the programme's
+        broadcast window AND have BOTH team names present in the description.
+        Zero or multiple candidates -> no match (conservative by design:
+        never bind on partial or ambiguous evidence).
+        """
+        description = program.description or ""
+        if not description.strip():
+            return None
+        # The title/sub_title path already extracted a team pair — it had
+        # its shot; this fallback is only for league-only programme titles.
+        if classified.team1 and classified.team2:
+            return None
+        hint = classified.league_hint
+        hint_leagues = [hint] if isinstance(hint, str) else list(hint or [])
+        leagues = [
+            lg
+            for lg in hint_leagues
+            if lg in self._include_leagues and self._league_sports.get(lg) != "tennis"
+        ]
+        if not leagues:
+            # No league hint — scope by the title's sport hint instead
+            # ("Scottish Premiership Football" carries a built-in Soccer/
+            # Football hint but the league name is often only a user-defined
+            # keyword). A hint of SOME kind is required: it anchors "this is
+            # a sports programme about this competition" before we go
+            # verifying prose against events.
+            sport_hint = classified.sport_hint
+            if not sport_hint:
+                return None
+            sports = {
+                s.lower()
+                for s in ([sport_hint] if isinstance(sport_hint, str) else sport_hint)
+            }
+            leagues = [
+                lg
+                for lg in self._include_leagues
+                if self._league_sports.get(lg, "").lower() in sports
+                and self._league_sports.get(lg) != "tennis"
+            ]
+        if not leagues:
+            return None
+        start_dt, end_dt = program.start_dt, program.end_dt
+        if start_dt is None or end_dt is None:
+            return None
+
+        desc_norm = normalize_text(description)
+
+        def _in_desc(team) -> bool:
+            for form in (team.name, team.short_name):
+                form_norm = normalize_text(form or "")
+                if len(form_norm) >= 3 and re.search(
+                    rf"\b{re.escape(form_norm)}\b", desc_norm
+                ):
+                    return True
+            return False
+
+        candidates: list[tuple[str, Event]] = []
+        for league in leagues:
+            events = None
+            if self._prefetched_events is not None:
+                events = self._prefetched_events.get(league)
+            if events is None:
+                # Single-league groups skip the prefetch — fetch the
+                # programme-window dates directly (cache-backed).
+                events = []
+                dates = {
+                    start_dt.astimezone(self._user_tz).date(),
+                    end_dt.astimezone(self._user_tz).date(),
+                }
+                for d in dates:
+                    events.extend(self._service.get_events(league, d))
+            for event in events:
+                ev_start = event.start_time
+                if ev_start is None or not (start_dt <= ev_start <= end_dt):
+                    continue
+                if _in_desc(event.home_team) and _in_desc(event.away_team):
+                    candidates.append((league, event))
+
+        if len(candidates) != 1:
+            if len(candidates) > 1:
+                logger.debug(
+                    "[EPG_MATCH] description fallback ambiguous (%d candidates) "
+                    "for prog '%s'",
+                    len(candidates),
+                    (program.title or "")[:48],
+                )
+            return None
+
+        league, event = candidates[0]
+        logger.info(
+            "[EPG_MATCH] description fallback: prog '%s' -> event=%s '%s' (%s)",
+            (program.title or "")[:48],
+            event.id,
+            (event.short_name or event.name or "?")[:40],
+            league,
+        )
+        return MatchOutcome.matched(
+            MatchMethod.EPG,
+            event,
+            detected_league=league,
+            confidence=0.9,
+            stream_name=classified.normalized.original,
+            stream_id=stream_id,
+        )
+
+    def _non_tennis_leagues(self, leagues: list[str]) -> list[str]:
+        """Drop tennis leagues from a generic team-matching candidate pool.
+
+        Tennis events are player-vs-player, so through the TEAM_ONLY /
+        TEAM_VS_TEAM paths arbitrary text sharing a surname can fuzzy-bind to
+        them ("Good Day Chicago" -> "Kayla Day vs Diane Parry", #541) —
+        bypassing both the tennis-EPG skip (mf7.9) and the tennis_majors_only
+        filter, which only the tennis pipeline enforces. Tennis events must
+        stay reachable solely via TENNIS_MATCH -> TennisMatcher.
+        """
+        return [lg for lg in leagues if self._league_sports.get(lg) != "tennis"]
 
     def _match_team_vs_team(
         self,
@@ -1011,9 +1345,18 @@ class StreamMatcher:
             except (KeyError, ValueError):
                 pass  # Keep group setting or None
 
+        search_leagues = self._non_tennis_leagues(self._search_leagues)
+        if not search_leagues:
+            return MatchOutcome.filtered(
+                FilteredReason.LEAGUE_NOT_INCLUDED,
+                stream_name=classified.normalized.original,
+                stream_id=stream_id,
+                detail="No non-tennis leagues configured for team matching",
+            )
+
         # Determine if single-league or multi-league matching
-        if len(self._search_leagues) == 1:
-            league = self._search_leagues[0]
+        if len(search_leagues) == 1:
+            league = search_leagues[0]
             return self._team_matcher.match_single_league(
                 classified=classified,
                 league=league,
@@ -1029,7 +1372,7 @@ class StreamMatcher:
         else:
             return self._team_matcher.match_multi_league(
                 classified=classified,
-                enabled_leagues=self._search_leagues,
+                enabled_leagues=search_leagues,
                 target_date=target_date,
                 group_id=self._group_id,
                 stream_id=stream_id,
@@ -1058,7 +1401,7 @@ class StreamMatcher:
 
         return self._team_matcher.match_team_only(
             classified=classified,
-            enabled_leagues=list(self._include_leagues),
+            enabled_leagues=self._non_tennis_leagues(list(self._include_leagues)),
             target_date=target_date,
             group_id=self._group_id,
             stream_id=stream_id,
@@ -1087,7 +1430,7 @@ class StreamMatcher:
 
         return self._team_matcher.match_all_star(
             classified=classified,
-            enabled_leagues=list(self._include_leagues),
+            enabled_leagues=self._non_tennis_leagues(list(self._include_leagues)),
             target_date=target_date,
             group_id=self._group_id,
             stream_id=stream_id,

@@ -5,13 +5,19 @@ as section comments.
 """
 
 import contextlib
+import logging
 import sqlite3
 import threading
 from datetime import date
 from unittest.mock import MagicMock
 
+import httpx
+
 from teamarr.consumers.cache.refresh import CacheRefresher
+from teamarr.providers.base_client import BullpenConfig
 from teamarr.providers.registry import ProviderConfig, ProviderRegistry
+from teamarr.providers.tsdb import client as tsdb_client
+from teamarr.providers.tsdb.client import TSDBClient
 from teamarr.providers.tsdb.provider import TSDBProvider
 from teamarr.providers.tsdb.racing import parse_racing_events
 from tests.helpers import SCHEMA_PATH
@@ -306,6 +312,24 @@ class TestDisplaySettingsReloadIntegration:
         assert "unmask_or_skip(update.tsdb_api_key) is not None" in source
 
 
+def test_bullpen_settings_reinitialize_all_proxied_providers():
+    import inspect
+
+    from teamarr.api.routes.settings.bullpen import update_bullpen_settings
+
+    source = inspect.getsource(update_bullpen_settings)
+    for provider in (
+        "espn",
+        "bellmedia",
+        "squiggle",
+        "nascar",
+        "mlbstats",
+        "hockeytech",
+        "tsdb",
+    ):
+        assert f'"{provider}"' in source
+
+
 # ===========================================================================
 # Premium-league cache prewarm gating
 # ===========================================================================
@@ -321,7 +345,7 @@ SCHEMA = SCHEMA_PATH
 
 # From schema.sql leagues table (tsdb_tier).
 PREMIUM = ["ipl", "sa20", "uru.2"]
-FREE = ["boxing", "cfl"]
+FREE = ["boxing"]
 
 
 def _db() -> sqlite3.Connection:
@@ -516,3 +540,55 @@ class TestFighterParsing:
         )
         assert home.name == "Zuffa Boxing 9"
         assert away.name == "TBD"
+
+
+def test_http_error_log_excludes_api_key(caplog):
+    client = TSDBClient(api_key="sensitive-key", retry_count=1)
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(500, request=request))
+    )
+
+    with caplog.at_level(logging.WARNING, logger="teamarr.providers.tsdb.client"):
+        assert client._request("lookupleague.php") is None
+
+    assert "sensitive-key" not in caplog.text
+    assert "endpoint lookupleague.php" in caplog.text
+    client.close()
+
+
+def test_transport_error_log_excludes_api_key(caplog):
+    client = TSDBClient(api_key="sensitive-key", retry_count=1)
+
+    def raise_connect_error(request):
+        raise httpx.ConnectError("connection failed", request=request)
+
+    client._client = httpx.Client(transport=httpx.MockTransport(raise_connect_error))
+    with caplog.at_level(logging.WARNING, logger="teamarr.providers.tsdb.client"):
+        assert client._request("lookupleague.php") is None
+
+    assert "sensitive-key" not in caplog.text
+    assert "endpoint lookupleague.php (ConnectError)" in caplog.text
+    client.close()
+
+
+def test_bullpen_401_retries_then_disables(monkeypatch):
+    monkeypatch.setattr(tsdb_client.time, "sleep", lambda s: None)
+    disabled = []
+    bullpen = BullpenConfig(
+        api_key="key",
+        base_url="https://proxy.test",
+        on_unauthorized=lambda: disabled.append(True),
+    )
+    client = TSDBClient(bullpen=bullpen, retry_count=1)
+    calls = []
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: (calls.append(request), httpx.Response(401))[1]
+        )
+    )
+
+    assert client._request("lookupleague.php") is None
+    assert len(calls) == 3
+    assert bullpen.disabled is True
+    assert disabled == [True]
+    client.close()

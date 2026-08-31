@@ -665,6 +665,48 @@ class ChannelsDVRLineupsResponse(BaseModel):
 
 
 # =============================================================================
+# BULLPEN SETTINGS
+# =============================================================================
+
+
+class BullpenSettingsModel(BaseModel):
+    """Bullpen proxy settings (https://bullpen.direct)."""
+
+    enabled: bool = False
+    api_key: str | None = None
+    base_url: str = "https://bullpen.direct"
+    disabled_reason: str | None = None
+    disabled_at: str | None = None
+    espn_enabled: bool = False
+    bellmedia_enabled: bool = False
+    squiggle_enabled: bool = False
+    nascar_enabled: bool = False
+    mlbstats_enabled: bool = False
+    hockeytech_enabled: bool = False
+    tsdb_enabled: bool = False
+
+    @field_serializer("api_key")
+    @classmethod
+    def _mask_api_key(cls, v: str | None) -> str | None:
+        return MASKED_SECRET if v else None
+
+
+class BullpenSettingsUpdate(BaseModel):
+    """Update model for bullpen settings (all fields optional)."""
+
+    enabled: bool | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    espn_enabled: bool | None = None
+    bellmedia_enabled: bool | None = None
+    squiggle_enabled: bool | None = None
+    nascar_enabled: bool | None = None
+    mlbstats_enabled: bool | None = None
+    hockeytech_enabled: bool | None = None
+    tsdb_enabled: bool | None = None
+
+
+# =============================================================================
 # ALL SETTINGS
 # =============================================================================
 
@@ -688,6 +730,7 @@ class AllSettingsModel(BaseModel):
     emby: EmbySettingsModel = EmbySettingsModel()
     jellyfin: JellyfinSettingsModel = JellyfinSettingsModel()
     channelsdvr: ChannelsDVRSettingsModel = ChannelsDVRSettingsModel()
+    bullpen: BullpenSettingsModel = BullpenSettingsModel()
     epg_generation_counter: int = 0
     schema_version: int = 44
 

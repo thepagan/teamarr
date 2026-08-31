@@ -20,6 +20,7 @@ import atexit
 import json
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,6 +42,13 @@ def _normalize_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+# How often the eviction path sweeps for expired entries, as a fraction of
+# max_size. The sweep is the one O(n) step left in _evict_if_needed, so it runs
+# periodically rather than on every insert of a full cache; LRU eviction below
+# is O(1) and keeps the cache inside its bound in between.
+_EXPIRY_SWEEP_INTERVAL_RATIO = 0.05
 
 
 @dataclass
@@ -75,12 +83,17 @@ class TTLCache:
         default_ttl_seconds: int = 3600,
         max_size: int = DEFAULT_MAX_SIZE,
     ):
-        self._cache: dict[str, CacheEntry] = {}
+        # Insertion-ordered so LRU eviction is a popitem() rather than a full
+        # scan for the minimum last_accessed: get()/set() move the touched key
+        # to the end, leaving the least-recently-used entry at the front.
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
         self._default_ttl = timedelta(seconds=default_ttl_seconds)
         self._max_size = max_size
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
+        # Inserts since the last expired-entry sweep (see _evict_if_needed).
+        self._since_expiry_sweep = 0
 
     def get(self, key: str) -> Any | None:
         """Get value if exists and not expired."""
@@ -89,12 +102,14 @@ class TTLCache:
             if entry is None:
                 self._misses += 1
                 return None
-            if _utc_now() > entry.expires_at:
+            now = _utc_now()
+            if now > _normalize_datetime(entry.expires_at):
                 del self._cache[key]
                 self._misses += 1
                 return None
             # Update last accessed time for LRU
-            entry.last_accessed = _utc_now()
+            entry.last_accessed = now
+            self._cache.move_to_end(key)
             self._hits += 1
             return entry.value
 
@@ -114,25 +129,51 @@ class TTLCache:
                 expires_at=expires_at,
                 last_accessed=now,
             )
+            self._cache.move_to_end(key)
 
     def _evict_if_needed(self) -> None:
-        """Evict entries if cache is at max size. Called with lock held."""
+        """Make room for one new key. Called with lock held.
+
+        Cheap when there is room. This runs on every insert of a *new* key, and
+        a warm sports cache holds tens of thousands of entries, so the expiry
+        sweep that used to open this method unconditionally made each insert
+        O(n) — measurably ~1ms per `set` at 45k entries, paid thousands of times
+        per generation run for a cache that was nowhere near full. Nothing needs
+        evicting while the cache is under its limit, so it returns immediately.
+
+        At the limit, expired entries are still preferred over live ones, but
+        finding them is the only O(n) step left, so it runs on an interval
+        instead of per insert. Whatever the sweep leaves behind is trimmed by
+        least-recently-used, which the OrderedDict makes O(1) per victim (it was
+        a full min() scan *per victim* before).
+
+        The trade: because this returns early below capacity, an under-capacity
+        cache holds expired entries rather than reaping them eagerly, so it
+        settles nearer ``max_size`` in memory than it used to. ``get()`` still
+        refuses to serve them, and ``PersistentTTLCache._background_flush``
+        reaps them on its timer — a plain ``TTLCache`` used standalone has no
+        such timer and should call ``cleanup_expired()`` itself if it cares.
+        """
         if self._max_size <= 0:
             return
+        if len(self._cache) < self._max_size:
+            return
 
-        # First, remove expired entries
-        now = _utc_now()
-        expired_keys = [k for k, v in self._cache.items() if now > v.expires_at]
-        for key in expired_keys:
-            del self._cache[key]
+        self._since_expiry_sweep += 1
+        sweep_interval = max(int(self._max_size * _EXPIRY_SWEEP_INTERVAL_RATIO), 1)
+        if self._since_expiry_sweep >= sweep_interval:
+            self._since_expiry_sweep = 0
+            now = _utc_now()
+            for key in [
+                k
+                for k, v in self._cache.items()
+                if now > _normalize_datetime(v.expires_at)
+            ]:
+                del self._cache[key]
 
-        # If still at/over max, evict least recently used
+        # Still full: evict least-recently-used from the front.
         while len(self._cache) >= self._max_size:
-            if not self._cache:
-                break
-            # Find LRU entry
-            lru_key = min(self._cache.keys(), key=lambda k: self._cache[k].last_accessed)
-            del self._cache[lru_key]
+            self._cache.popitem(last=False)
 
     def delete(self, key: str) -> None:
         """Delete a key from cache."""
@@ -151,7 +192,11 @@ class TTLCache:
         now = _utc_now()
         removed = 0
         with self._lock:
-            expired_keys = [k for k, v in self._cache.items() if now > v.expires_at]
+            expired_keys = [
+                k
+                for k, v in self._cache.items()
+                if now > _normalize_datetime(v.expires_at)
+            ]
             for key in expired_keys:
                 del self._cache[key]
                 removed += 1
@@ -172,7 +217,11 @@ class TTLCache:
         now = _utc_now()
         with self._lock:
             total = len(self._cache)
-            expired = sum(1 for v in self._cache.values() if now > v.expires_at)
+            expired = sum(
+                1
+                for v in self._cache.values()
+                if now > _normalize_datetime(v.expires_at)
+            )
             total_requests = self._hits + self._misses
             hit_rate = self._hits / total_requests if total_requests > 0 else 0
             return {
@@ -194,7 +243,9 @@ class TTLCache:
         now = _utc_now()
         with self._lock:
             return {
-                k: (v.value, v.expires_at) for k, v in self._cache.items() if v.expires_at > now
+                k: (v.value, v.expires_at)
+                for k, v in self._cache.items()
+                if _normalize_datetime(v.expires_at) > now
             }
 
     def set_with_expiry(self, key: str, value: Any, expires_at: datetime) -> None:
@@ -216,6 +267,7 @@ class TTLCache:
                 expires_at=expires_at,
                 last_accessed=now,
             )
+            self._cache.move_to_end(key)
 
 
 class PersistentTTLCache:
@@ -322,9 +374,28 @@ class PersistentTTLCache:
         self._flush_timer.start()
 
     def _background_flush(self) -> None:
-        """Background flush handler."""
+        """Background maintenance: reap expired entries, then flush dirty ones.
+
+        The reap rides here because nothing else calls it. ``_evict_if_needed``
+        deliberately does nothing while the cache has room, so without this an
+        under-capacity cache would hold expired entries until it filled up —
+        the old per-insert sweep reaped them incidentally, at the cost of
+        making every insert O(n). One sweep every ``flush_interval`` seconds
+        buys the same reclamation for ~2ms per 50k entries.
+
+        Reaping is isolated from the flush so a failure in one cannot skip the
+        other, and both are isolated from the reschedule so the timer chain
+        survives either.
+        """
         if self._shutdown:
             return
+
+        try:
+            removed = self.cleanup_expired()
+            if removed:
+                logger.debug("[CACHE] Reaped %d expired entries", removed)
+        except Exception as e:
+            logger.error("[CACHE] Background cleanup failed: %s", e)
 
         try:
             self.flush()

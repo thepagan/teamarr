@@ -79,8 +79,54 @@ MOJIBAKE_PATTERNS = [
 ]
 
 
+def try_fix_double_encoded(text: str) -> str:
+    """Attempt to repair double-encoded UTF-8 text via a latin-1/utf-8 round trip.
+
+    Mojibake like "MÃ¼nchen" (for "München") typically happens when UTF-8
+    bytes get mis-decoded as latin-1 somewhere upstream (latin-1 is a
+    lossless 1:1 byte<->codepoint mapping, so no information is lost -- it
+    can be reversed). Reversing it means re-encoding the broken text back to
+    latin-1 bytes, then decoding those bytes as UTF-8.
+
+    This is intentionally conservative and safe to call on arbitrary,
+    possibly-already-correct text: if the round trip raises (the text wasn't
+    actually latin-1-of-utf8, e.g. legitimate "SÃO PAULO FC") or produces a
+    U+FFFD replacement character (a silently swallowed decode error), the
+    original text is returned unchanged rather than mangled. It is also
+    idempotent -- re-running it on already-correct text is a no-op, since
+    re-encoding proper unicode text as latin-1 generally fails or decoding
+    the result as UTF-8 does.
+
+    Args:
+        text: Potentially double-encoded text
+
+    Returns:
+        The repaired text, or the original text unchanged if the round trip
+        wasn't safely reversible.
+    """
+    if not text:
+        return text
+
+    try:
+        candidate = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+    if "�" in candidate:
+        return text
+
+    return candidate
+
+
 def fix_mojibake(text: str) -> str:
-    """Fix common mojibake patterns from double-encoded UTF-8.
+    """Fix mojibake (double-encoded UTF-8) in text.
+
+    Tries the generic, guarded latin-1/utf-8 round trip first
+    (``try_fix_double_encoded``), which covers any double-encoded script
+    (Nordic, Polish, etc.), not just the hard-coded patterns below. Falls
+    back to the hard-coded MOJIBAKE_PATTERNS replacements when the generic
+    round trip doesn't change anything, to preserve any prior behavior it
+    doesn't cover.
 
     Args:
         text: Potentially mojibake'd text
@@ -91,9 +137,10 @@ def fix_mojibake(text: str) -> str:
     if not text:
         return text
 
-    result = text
-    for pattern, replacement in MOJIBAKE_PATTERNS:
-        result = result.replace(pattern, replacement)
+    result = try_fix_double_encoded(text)
+    if result == text:
+        for pattern, replacement in MOJIBAKE_PATTERNS:
+            result = result.replace(pattern, replacement)
 
     if result != text:
         logger.debug("[MOJIBAKE] Fixed: '%s' -> '%s'", text[:40], result[:40])
@@ -104,6 +151,41 @@ def fix_mojibake(text: str) -> str:
 # =============================================================================
 # PROVIDER PREFIX STRIPPING
 # =============================================================================
+
+
+# Video-quality tags (#651). A bracketed tag is quality metadata wherever it
+# sits — "[1080p] NCAAF 16: Robert Morris at Wagner", "... at Wagner 12pm [1080p]",
+# "(4K)" — and a bare resolution token (1080p/1080i/720p/2160p/480p) is never a
+# word in a team name: 0 hits across 8,730 corpus team strings, and the [pi]
+# suffix excludes 49ers, 76ers, U20, Daytona 500. Bare HD/SD/FHD/UHD/4K are
+# only stripped at the ends of a team name (`_clean_team_name`), because "SD"
+# mid-string is not safely quality.
+#
+# Stripped from the WHOLE stream name before prefix handling: a leading tag
+# used to block the league-hint/channel-number prefix strips, so team1 came
+# out as "[1080p] NCAAF 16: Robert Morris"; a trailing one rode into team2 as
+# "Wagner [1080p]", which scores 60 on the nose against "Wagner Seahawks" and,
+# worse, "1080p" is a discriminating residual for the fixture gate — so one
+# tagged source matched 0/30 while its untagged twin matched 21/30.
+QUALITY_TOKEN = r"(?:\d{3,4}[pi]|4k|uhd|fhd|hd|sd)"
+_BRACKETED_QUALITY_RE = re.compile(rf"\s*[\(\[]\s*{QUALITY_TOKEN}\s*[\)\]]", re.IGNORECASE)
+_BARE_RESOLUTION_RE = re.compile(r"\s*\b\d{3,4}[pi]\b", re.IGNORECASE)
+
+
+def strip_quality_tags(text: str) -> str:
+    """Remove bracketed quality tags and bare resolution tokens anywhere (#651)."""
+    if not text:
+        return text
+    stripped = _BRACKETED_QUALITY_RE.sub(" ", text)
+    stripped = _BARE_RESOLUTION_RE.sub(" ", stripped)
+    if stripped == text:
+        return text
+    # A tag that sat in its own pipe segment ("... at Wagner | 1080p") leaves
+    # the separator dangling; drop empty segments so the pipe logic downstream
+    # sees the same shape as the untagged twin.
+    stripped = re.sub(r"\s*\|(?=\s*(?:\||$))", " ", stripped)
+    stripped = re.sub(r"^\s*\|\s*", "", stripped)
+    return " ".join(stripped.split())
 
 
 def strip_provider_prefix(text: str) -> tuple[str, str | None]:
@@ -250,7 +332,9 @@ TIME_PATTERNS = [
 ]
 
 # Standalone TZ pattern (after time has been masked, e.g., "@ ET" at end)
-TZ_STANDALONE_PATTERN = rf"\s*@?\s*({_TZ_ABBREVS})\s*$"
+# \b guards the abbreviation: without it "Gomez", "Budapest" and "Stuttgart"
+# lost their Z/EST/ART tails as a phantom timezone (#283).
+TZ_STANDALONE_PATTERN = rf"\s*@?\s*\b({_TZ_ABBREVS})\s*$"
 
 # Catchup/timeshift metadata some providers append to stream names (#495):
 #   "Dodgers x Yankees start:2026-07-19 17:35:00 stop:2026-07-20 00:48:20"
@@ -629,6 +713,9 @@ def normalize_stream(stream_name: str) -> NormalizedStream:
         if not found_provider and not found_live:
             break
 
+    # Step 2.5: Drop video-quality tags before anything looks at prefixes (#651)
+    text = strip_quality_tags(text)
+
     # Step 3: Apply city translations (includes unidecode)
     text = apply_city_translations(text)
 
@@ -685,6 +772,19 @@ def normalize_for_matching(text: str) -> str:
     # These appear in streams like "MIL Bucks ( ESPN Feed )"
     for network in BROADCAST_NETWORKS:
         text = re.sub(rf"\b{re.escape(network.lower())}\b", " ", text)
+
+    # Remove apostrophes/backticks WITHOUT adding a space, exactly as
+    # normalize_text does (#653). These two normalizers run in sequence —
+    # _match_against_events calls this one, then _score_teams_against_event
+    # calls normalize_text on the result — so a disagreement here is
+    # unrecoverable downstream. Turning the apostrophe into a space split
+    # "Hawai'i" into "hawai i", which shares no token with "hawaii rainbow
+    # warriors": 46.7 against the 100.0 a single normalizer scores, below
+    # BOTH_TEAMS_THRESHOLD, so the whole event was rejected. Same for
+    # "American Int'l" and "G'town Col". unidecode has already run via
+    # apply_city_translations, so a curly ’ is a plain \x27 by now.
+    # Hex escapes avoid source-encoding ambiguity: \x27=apostrophe, \x60=backtick.
+    text = re.sub("[\x27\x60]", "", text)
 
     # Remove punctuation except spaces (hyphens become spaces for matching)
     text = re.sub(r"[^\w\s]", " ", text)

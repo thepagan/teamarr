@@ -137,7 +137,9 @@ export interface TeamFilterSettingsUpdate {
 export type ChannelStabilityMode = "compact" | "gap" | "strict"
 
 export interface ChannelNumberingSettings {
+  /** Always "auto" since v88 — manual mode was replaced by pinned blocks (#333). */
   global_channel_mode: "auto" | "manual"
+  /** Legacy manual-mode starts; migrated to pinned blocks in v88, no longer read. */
   league_channel_starts: Record<string, number>
   global_consolidation_mode: "consolidate" | "separate"
   channel_stability_mode: ChannelStabilityMode
@@ -292,6 +294,23 @@ export interface ChannelsDVRTestResponse {
   error?: string | null
 }
 
+// Bullpen proxy (https://bullpen.direct) - optional caching proxy for provider
+// upstreams. Settings page lives at /bullpen with no nav entry.
+export interface BullpenSettings {
+  enabled: boolean
+  api_key: string | null
+  base_url: string
+  disabled_reason: string | null
+  disabled_at: string | null
+  espn_enabled: boolean
+  bellmedia_enabled: boolean
+  squiggle_enabled: boolean
+  nascar_enabled: boolean
+  mlbstats_enabled: boolean
+  hockeytech_enabled: boolean
+  tsdb_enabled: boolean
+}
+
 export interface ChannelsDVRSourcesResponse {
   success: boolean
   sources: string[]
@@ -326,6 +345,7 @@ export interface AllSettings {
   emby?: EmbySettings
   jellyfin?: JellyfinSettings
   channelsdvr?: ChannelsDVRSettings
+  bullpen?: BullpenSettings
   epg_generation_counter: number
   schema_version: number
   // UI timezone info (read-only, from environment or fallback to epg_timezone)
@@ -375,17 +395,6 @@ export interface EPGSourcesResponse {
 // API Functions
 export async function getSettings(): Promise<AllSettings> {
   return api.get("/settings")
-}
-
-export interface DispatcharrChannelGroup {
-  id: number
-  name: string
-  from_m3u: boolean
-}
-
-/** List Dispatcharr channel groups (for the channel-source picker + sorting rule). */
-export async function getDispatcharrChannelGroups(): Promise<DispatcharrChannelGroup[]> {
-  return api.get("/dispatcharr/channel-groups")
 }
 
 export async function getDispatcharrSettings(): Promise<DispatcharrSettings> {
@@ -663,4 +672,13 @@ export async function getChannelsDVRSources(url?: string): Promise<ChannelsDVRSo
 export async function getChannelsDVRLineups(url?: string): Promise<ChannelsDVRLineupsResponse> {
   const qs = url ? `?url=${encodeURIComponent(url)}` : ""
   return api.get(`/channelsdvr/lineups${qs}`)
+}
+
+// Bullpen Settings API
+export async function getBullpenSettings(): Promise<BullpenSettings> {
+  return api.get("/settings/bullpen")
+}
+
+export async function updateBullpenSettings(data: Partial<BullpenSettings>): Promise<BullpenSettings> {
+  return api.put("/settings/bullpen", data)
 }

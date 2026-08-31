@@ -4,6 +4,10 @@
 
 Sports EPG generator. Uses **bd (beads)** for issue tracking. Start with `bd ready`.
 
+## Support Bundle Contract
+
+When changing support-bundle schemas, archive layout, collection limits, redaction, or signal codes, update the implementation, tests, user documentation, bundled `AGENTS.md`, and this instruction in the same change. Never add a generic database dump or relax exclusions for stream URLs, M3U account names, credentials, or tokens without an explicit security decision.
+
 ## CRITICAL: Database Safety
 
 **NEVER delete `teamarr.db` or `data/teamarr.db`.** The database contains user-configured teams, templates, settings, and history that cannot be recreated. Schema changes use migrations (`INSERT OR REPLACE`, `ALTER TABLE`) - deleting the database is NEVER required and will cause data loss.
@@ -52,9 +56,14 @@ bd close <id>                         # Complete work
 bd doctor                             # Check beads health (sync issues, hooks)
 ```
 
-Beads data syncs automatically: git hooks import/export `.beads/*.jsonl` on
-checkout/merge, and the JSONL rides in normal commits. (`bd sync` no longer
-exists in bd ≥1.1.)
+**Beads sync is Dolt, not JSONL.** The shared source of truth is `refs/dolt/data`
+on origin (set up 2026-08-29). `bd dolt pull` at session start, `bd dolt push` at
+session end — **every machine, every session**, including co-devs. `.beads/*.jsonl`
+is a passive export: never `bd import` it as a sync step, and its presence in a
+PR does not carry beads across machines. A fresh clone gets beads with
+`bd bootstrap`. A machine whose Dolt history has diverged (push says "no common
+ancestor") must `bd export -o mine.jsonl` → `bd bootstrap` → `bd import -i
+mine.jsonl` → `bd dolt push` — never `--force` from a non-maintainer machine.
 
 ## Development Workflow (issue-first — MANDATORY)
 
@@ -94,8 +103,8 @@ exists in bd ≥1.1.)
 
 ### Session rules
 
-- **Start:** `git checkout dev && git pull` · `bd ready` · `gh pr list` (triage anything new).
-- **End:** everything committed AND pushed (work is incomplete until push succeeds — never stop before pushing, never say "ready to push when you are"); report whether dev currently meets a release trigger.
+- **Start:** `git checkout dev && git pull` · `bd dolt pull` · `bd ready` · `gh pr list` (triage anything new).
+- **End:** `bd dolt push` · everything committed AND pushed (work is incomplete until push succeeds — never stop before pushing, never say "ready to push when you are"); report whether dev currently meets a release trigger.
 
 ### Roadmap & Feature Planning
 
@@ -225,7 +234,7 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Version | `pyproject.toml` line 7 |
 | Dependencies | `pyproject.toml` (ranges) + `uv.lock` (pinned, used by the Docker build) — run `uv lock` after any dependency change or `--frozen` builds fail |
 | League configs | `teamarr/database/schema.sql` |
-| Schema version | `teamarr/database/schema.sql` (v84) |
+| Schema version | `teamarr/database/schema.sql` (v90) |
 | Schema reconciliation | `teamarr/database/reconciliation.py` |
 | Provider registration | `teamarr/providers/__init__.py` |
 
@@ -235,11 +244,12 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 API Layer        → teamarr/api/routes/ (18 modules)
 Consumer Layer   → teamarr/consumers/ (key packages: generation, team_epg, event_epg, event_group_processor/, cache/, lifecycle/, matching/, enforcement/, filler/)
 Service Layer    → teamarr/services/sports_data.py
-Provider Layer   → teamarr/providers/ (espn, squiggle, nascar, mlbstats, hockeytech, supabase, tsdb)
+Provider Layer   → teamarr/providers/ (espn, bellmedia, squiggle, nascar, mlbstats, hockeytech, supabase, tsdb)
 ```
 
 **Providers** (lower priority = tried first):
 - ESPN (0) - Primary, most leagues
+- Bell Media (20) - CFL; TSN public sports widget API, no key
 - Squiggle (30) - AFL (Australian Football League); free, no key required
 - NASCAR (35) - NASCAR Cup/O'Reilly (Xfinity)/Trucks; official cf.nascar.com schedule API, full weekend sessions, no key
 - MLB Stats (40) - MiLB (Triple-A through Rookie)
@@ -264,13 +274,26 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 - API routes build responses with `to_model(Model, dataclass)` from `api/routes/settings/models.py`; frontend hooks are factory-generated with scoped cache invalidation (`frontend/src/hooks/useSettings.ts`).
 
 **Dynamic Groups** (`teamarr/consumers/lifecycle/dynamic_resolver.py`):
-- `{sport}` and `{league}` wildcards
+- `{sport}`, `{league}`, and `{conference}` wildcards (`{conference}` = home team's NCAA conference from `provider_group_cache`, #91)
 - Auto-creates in Dispatcharr
 
 **Per-Source Matching Types** (epic `teamarrv2-ahow`):
 - Each source declares which matching pipeline(s) it runs — three independent booleans on `event_epg_groups`: `name_match_enabled` (Stream Name → TEAM_VS_TEAM/EVENT_CARD/RACING categories), `team_streams_enabled` (Team → TEAM_ONLY), `epg_match_enabled` (EPG). Multi-select; ≥1 required (enforced in `api/routes/groups.py::require_matching_type`).
 - Gating is by **category at the matcher router** (`matcher.py::_match_single`, reason `name_match_disabled`) — classification always runs so the types stay independent; never skip `classify_stream`. `name_match_enabled` defaults 1 (DEFAULT-1 column backfills existing sources). The hidden `is_channel_source` group is name-off (EPG/team only).
 - UI: three toggles on add/edit/bulk-add/bulk-edit; color-coded Sources badges (Stream Name=sky, Team=emerald, EPG=violet). The Matched-column coverage % shows only when Stream Name is on (Team/EPG fan one stream → many events).
+
+**Fixture Gate** (epic `teamarrv2-goax`, `teamarr/consumers/matching/identity.py`):
+- Cross-sport false positives came from `token_set_ratio` weighing every token equally, so a shared **city** cleared `BOTH_TEAMS_THRESHOLD` (60) on its own — "Tampa Bay Lightning"/"Tampa Bay Rays" = 78.3. 161 such cross-league pairs exist in the 6 major pro leagues alone; "New York Mets"/"New York Jets" = 92.3.
+- `TeamIdentityIndex` resolves each stream side against the **global** `team_cache` (all leagues, incl. unconfigured ones) and yields the leagues where both sides could actually meet. `_match_against_candidates` skips candidates outside that set → `FailedReason.FIXTURE_NOT_IN_LEAGUE`.
+- **Veto-only, never a selector** — resolution is a strong negative signal and a weak positive one (`D-backs` resolves to "ACL D-backs"; `SF Giants` and `NY Giants` give the same 4-way tie). Ties are kept, not collapsed. Returns `None` (defer) whenever it cannot speak, so an unseeded cache is inert.
+- **Only a full name is an exact identity (#619).** `team_short_name` is the bare city/school for college, MLS, NWSL and most non-US rows ("Milwaukee" = Milwaukee Panthers, "Atlanta" = Atlanta United), and TSDB stores the code as the short name ("SEA" = Seattle Orcas) — every one of those is also a normal broadcast label for the pro team. Short names, the city prefix of a full name ("new york" from "New York Mets"), and every ≥2-token leading run of a full name ("fairmont state" from "Fairmont State Falcons", #650) are *partial* readings: they widen the identity set, never narrow it. Short codes union the abbreviation table with any such row and are never exact; a bare-city `TEAM_ALIASES` key ("atlanta" → "atlanta united") is exact only when the text has no partial reading. The matcher also never vetoes a league the index has no teams for (`knows_league`).
+- **Mascotless leagues must not shadow mascoted ones (#650).** NCAA soccer (`usa.ncaa.w.1`/`usa.ncaa.m.1`, ~490 rows) publishes no mascots, so its full name IS the bare school — an *exact* identity for "Fairmont State". ESPN abbreviates the SCHOOL for college ("Fairmont State Falcons" → "Fairmont St"), never the mascot, so the short-name prefix rule never fires and the football row had no route back from the school-only form. One such side narrowed the fixture to soccer and vetoed `college-football` for **20 of 73** games on the 2026-08-29 slate (512 of 1026 failures in a support bundle). Fixed by registering every ≥2-token prefix of a full name as a partial reading; prefixes stop at two tokens so a bare "north"/"saint" never enters thousands of teams.
+- **One candidate loop (#660).** `_match_against_events` (single-league) and `_match_against_multi_league_events` are thin wrappers over `_match_against_candidates`; they used to be two 89%-identical copies and the #627 league-hint hatch landed in only one of them, which is how #650's single-league NCAAF sources kept vetoing. `TestPathParity` pins both entry points to the same verdict — add gates/fallbacks to the shared body, never to a wrapper.
+- No schedule lookup and no new API calls: the candidate event's own existence IS the schedule evidence.
+- Video-quality tags (`[1080p]`, `720p`, `(4K)`, `FHD`) are stripped from the whole stream name in `normalize_stream` before prefix handling and again at the ends of each team name in `_clean_team_name`; `_discriminating` ignores resolution tokens so a stray one can never veto (#651 — one tagged source matched 0/30, its untagged twin 21/30).
+- `residual_contradicts` is the fallback for unresolvable names — generalizes `_short_name_leg_is_safe` (#569) to the full-name leg, ignoring non-discriminating residuals (club suffixes, ≤2-char noise) so "us seattle sounders a" still reaches the Sounders.
+- Measured in `tests/matching/test_fixture_corpus.py`: **0 false vetoes / 200**, **322/322 crosstalk rejected**. Regenerate the corpus with `tests/matching/corpus/build_corpus.py`.
+- **Tennis gate (#283, `tennis_matcher.py`)** — same veto-only shape, no alias table: a stream that names a pooled tournament (distinctive ESPN name tokens; generic open/cup/masters ignored) vetoes candidates from other tournaments → `FailedReason.TENNIS_TOURNAMENT_MISMATCH`; a stream naming none defers. Keyed on `Event.tournament_id` (season-stable ESPN id, threaded through both caches). Draw shape is validated per side: doubles pairs (`abbreviation` "A/B") match exact-only because `token_set_ratio("sinner", "Sinner/Sonego")` = 100, and a side written as a pair (`/`, `&`) never matches a singles player; `_` defers. Tournament tier selection beyond majors/all and include/exclude lists were deliberately rejected (maintenance).
 
 **EPG Program Matching** (epic `teamarrv2-183`, `teamarr/consumers/matching/epg_*.py`):
 - Matches static-named linear channels (ESPN, FS1) to events via Dispatcharr's program guide (`GET /api/epg/programs/search/`, feature-detected, Dispatcharr 0.24.0+), then time-shares one stream across many event channels (attach/detach window per program).
@@ -279,7 +302,10 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 - `epg_resolver.py` bridges the stream `tvg_id` → program `tvg_id` namespace gap via a cascade: direct tvg_id → curated channel `epg_data_id` → strict name match (does NOT require an EPG-linked channel). `_Teamarr` source excluded.
 - `epg_index.py` fetches by resolved tvg_id, keys by stream tvg_id; `epg_matcher.py` routes program title+sub_title (pipe-joined) through `classify_stream → TeamMatcher`.
 - `MatchMethod.EPG` persisted to `managed_channel_streams.match_method` → drives the `epg_match` stream-ordering rule. EPG-matched groups show an "EPG Matched" badge.
+- Tennis programmes (mf7.9, #642): `TennisMatcher.match_program` — binds only with a tournament clue AND (player pair OR court) from title|sub_title|description; pair → one match, court → that court's matches inside the programme slot; otherwise `FailedReason.TENNIS_MATCHUP_UNKNOWN`, surfaced on the linear stream's result via `_epg_tennis_unknown` in `_reconcile_epg`. Never a tournament-wide fan-out (the 2026-07-05 regression).
 - Docs: `docs/guide/matching/program-matching.md`.
+
+**Failure taxonomy** (`epg_failed_matches.reason`, #661/#662): a real `FailedReason` value, or a prefixed verdict — `filtered:<FilteredReason>` (not_event, league_not_included, regex, stale) and `skipped:<exclusion>` (unclassifiable linear names, name_match_disabled, team_streams_disabled). Bare `"unmatched"` is the unreachable last resort. `candidates_gated` = every candidate was skipped before scoring (search window / EPG anchor / sport hint); `no_event_found` = candidates were scored and none cleared the floor. `detail` carries the near-miss summary over *scored* candidates only; `exclusion_reason` rides alongside. Frontend labels: `RunHistoryTable.tsx::getFailedReasonLabel`.
 
 ## Plans & Roadmap
 
@@ -287,11 +313,13 @@ Feature planning lives in beads: `bd list --label roadmap`
 
 Legacy plans in `plans/` (gitignored) may have additional context.
 
-## Code Health Audit (`teamarrv2-5hq`)
+## Code Health Audit
 
-**Cyclical epic for keeping the codebase clean.** Run with: `audit`
+**On-demand, not scheduled.** Run with: `audit`
 
-When the user says **"audit"**, claim the next open child bead under `teamarrv2-5hq` and run the full audit:
+The cyclical epic (`teamarrv2-5hq`) was **retired 2026-08-23** — the quarterly cadence collapsed after Apr 2026 and its function migrated to continuous `# TODO: PRUNE/REFACTOR` markers during normal work plus on-demand `/code-review` and `/simplify`. Do NOT create recurring audit beads. File findings as their own beads.
+
+When the user says **"audit"**, run the full sweep:
 
 1. **Dead API endpoints** — cross-reference every route in `teamarr/api/routes/` against the ENTIRE `frontend/src/` directory (not just `api/` — the frontend uses both structured api clients AND direct `fetch()` calls in pages/components) and backend callers. Only flag as dead if zero hits across all search patterns.
 2. **Dead frontend code** — find unused exports in `frontend/src/api/`, `frontend/src/hooks/`, `frontend/src/components/`. Check for dynamic imports and lazy loading in `App.tsx` before flagging components as dead.
@@ -319,11 +347,10 @@ When the user says **"audit"**, claim the next open child bead under `teamarrv2-
 **Ongoing responsibilities (during normal development):**
 - When you encounter dead code while working on features/bugs, mark it with `# TODO: PRUNE — <reason>` immediately.
 - When you notice layer violations or code smell, add `# TODO: REFACTOR — <reason>`.
-- These TODO markers get cleaned up during the next audit cycle.
+- These TODO markers are the standing backlog — they get cleaned up at the next `audit` run, whenever the user calls one.
 - After each audit, update these evaluation principles with any new lessons learned.
-- Create the next child bead (e.g., `Code Health Audit — Mar 2026`) when closing the current one.
 
-**Audit epic details:** `bd show teamarrv2-5hq`
+**Prior audit history (14 passes, Feb–Apr 2026):** `bd show teamarrv2-5hq`
 
 ## Sync Status
 
@@ -447,11 +474,12 @@ bd close <id>         # Complete work
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
+4. **PUSH TO REMOTE** - This is MANDATORY (code AND beads):
    ```bash
    git pull --rebase
    git push
    git status  # MUST show "up to date with origin"
+   bd dolt push  # beads live in refs/dolt/data, not in the commits
    ```
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed

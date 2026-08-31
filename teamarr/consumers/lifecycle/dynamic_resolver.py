@@ -32,8 +32,17 @@ class DynamicResolver:
     _groups_by_name: dict[str, int] = field(default_factory=dict)
     _profiles_by_name: dict[str, int] = field(default_factory=dict)
     _sport_display_names: dict[str, str] = field(default_factory=dict)
+    # (provider, league, team_id) -> conference name or None (#91)
+    _conference_by_team: dict = field(default_factory=dict)
     _league_display_names: dict[str, str] = field(default_factory=dict)
     _league_aliases: dict[str, str] = field(default_factory=dict)
+    # Resolutions already announced at INFO. Group resolution is answered from
+    # _groups_by_name, so the same mapping is re-derived once per channel — 722
+    # lines in one observed run, 330 of them character-identical. The DISTINCT
+    # mappings are what a reader needs ("which group did MLB land in?"); the
+    # repeats are noise that costs real signal. First of each is announced,
+    # the rest go to DEBUG.
+    _announced_resolutions: set[tuple] = field(default_factory=set)
     # Valid Dispatcharr channel-group ids seen at init (only trusted when the
     # group fetch succeeded — see _groups_loaded) so a stale/deleted configured
     # group id can be detected before it fails every channel creation.
@@ -166,8 +175,40 @@ class DynamicResolver:
         self._ensure_initialized()
         return self._league_aliases.get(league_code, league_code.upper())
 
+    def get_event_conference(self, event: Any) -> str | None:
+        """Conference name for an event's home team, from provider_group_cache (#91).
+
+        NCAA-only today (the cache holds only leagues with ESPN conference
+        trees). The HOME team's conference buckets the event — deterministic,
+        and correct for conference games; non-conference games land in the
+        host's conference, which is how venues bucket them too.
+        """
+        home_team = getattr(event, "home_team", None)
+        league = getattr(event, "league", None)
+        team_id = getattr(home_team, "id", None)
+        if not league or not team_id:
+            return None
+        provider = getattr(event, "provider", "espn")
+        key = (provider, league, team_id)
+        if key not in self._conference_by_team:
+            name = None
+            if self._db_conn is not None:
+                try:
+                    from teamarr.database.provider_groups import get_team_group
+
+                    group = get_team_group(self._db_conn, provider, league, team_id)
+                    name = group["name"] if group else None
+                except Exception as e:
+                    logger.debug("[RESOLVER] Conference lookup failed for %s: %s", key, e)
+            self._conference_by_team[key] = name
+        return self._conference_by_team[key]
+
     def resolve_pattern(
-        self, pattern: str, event_sport: str | None, event_league: str | None
+        self,
+        pattern: str,
+        event_sport: str | None,
+        event_league: str | None,
+        conference: str | None = None,
     ) -> str:
         """Interpolate pattern with event data.
 
@@ -175,6 +216,7 @@ class DynamicResolver:
             pattern: Pattern string like '{sport}', '{league}', or 'Sports | {sport} | {league}'
             event_sport: Event's sport code (e.g., 'soccer', 'mma')
             event_league: Event's league code (e.g., 'eng.1', 'nfl')
+            conference: Conference name for the {conference} wildcard (#91)
 
         Returns:
             Resolved string with wildcards replaced by display names
@@ -188,6 +230,9 @@ class DynamicResolver:
         if event_league and "{league}" in result:
             alias = self.get_league_alias(event_league)
             result = result.replace("{league}", alias)
+
+        if conference and "{conference}" in result:
+            result = result.replace("{conference}", conference)
 
         return result
 
@@ -214,6 +259,14 @@ class DynamicResolver:
             )
             return None
         return group_id
+
+    def _log_resolution(self, key: tuple, message: str, *args) -> None:
+        """Announce a group resolution once per distinct outcome (see above)."""
+        if key in self._announced_resolutions:
+            logger.debug(message, *args)
+            return
+        self._announced_resolutions.add(key)
+        logger.info(message, *args)
 
     def _get_or_create_group(self, name: str) -> int | None:
         """Get group ID by name, creating if needed.
@@ -295,14 +348,17 @@ class DynamicResolver:
         static_group_id: int | None,
         event_sport: str | None,
         event_league: str | None,
+        event: Any = None,
     ) -> int | None:
         """Resolve channel group ID based on mode.
 
         Args:
-            mode: 'static' or pattern string containing {sport}/{league}
+            mode: 'static' or pattern string containing {sport}/{league}/{conference}
             static_group_id: Group ID to use for 'static' mode
             event_sport: Event's sport code
             event_league: Event's league code
+            event: The event itself — needed only for the {conference}
+                wildcard (#91), which resolves from the home team
 
         Returns:
             Resolved group ID or None
@@ -322,7 +378,8 @@ class DynamicResolver:
         if mode == "sport" and event_sport:
             display_name = self.get_sport_display_name(event_sport)
             group_id = self._get_or_create_group(display_name)
-            logger.info(
+            self._log_resolution(
+                ("sport", event_sport, display_name, group_id),
                 "[RESOLVER] Sport mode: %s -> '%s' -> group_id=%s",
                 event_sport,
                 display_name,
@@ -338,12 +395,20 @@ class DynamicResolver:
             )
             return group_id
 
-        # Pattern mode: resolve {sport} and {league} wildcards
+        # Pattern mode: resolve {sport}/{league}/{conference} wildcards
         if "{" in mode:
-            resolved_name = self.resolve_pattern(mode, event_sport, event_league)
+            conference = (
+                self.get_event_conference(event) if "{conference}" in mode else None
+            )
+            resolved_name = self.resolve_pattern(mode, event_sport, event_league, conference)
 
-            # Check if any wildcards remain unresolved
-            if "{sport}" in resolved_name or "{league}" in resolved_name:
+            # Check if any wildcards remain unresolved (a non-NCAA event under
+            # a {conference} pattern falls back to the static group)
+            if (
+                "{sport}" in resolved_name
+                or "{league}" in resolved_name
+                or "{conference}" in resolved_name
+            ):
                 logger.warning(
                     "[RESOLVER] Pattern has unresolved wildcards: %s -> %s (sport=%s, league=%s)",
                     mode,
@@ -354,8 +419,12 @@ class DynamicResolver:
                 return self._validate_group_id(static_group_id)  # Fallback
 
             group_id = self._get_or_create_group(resolved_name)
-            logger.info(
-                "[RESOLVER] Pattern mode: %s -> '%s' -> group_id=%s", mode, resolved_name, group_id
+            self._log_resolution(
+                ("pattern", mode, resolved_name, group_id),
+                "[RESOLVER] Pattern mode: %s -> '%s' -> group_id=%s",
+                mode,
+                resolved_name,
+                group_id,
             )
             return group_id
 

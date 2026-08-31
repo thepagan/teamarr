@@ -13,6 +13,7 @@ URL patterns (no auth required):
 """
 
 import logging
+import time
 from datetime import UTC, date, datetime
 
 import httpx
@@ -25,6 +26,13 @@ from teamarr.core import (
     SportsProvider,
     Team,
     Venue,
+)
+from teamarr.providers.base_client import (
+    BULLPEN_UNAUTHORIZED_ATTEMPTS,
+    BullpenConfig,
+    bullpen_headers,
+    bullpen_rewrite,
+    is_bullpen_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,9 +103,12 @@ class NASCARProvider(SportsProvider):
         self,
         league_mapping_source: LeagueMappingSource | None = None,
         timeout: float = 10.0,
+        bullpen: BullpenConfig | None = None,
     ):
         self._league_mapping_source = league_mapping_source
         self._timeout = timeout
+        self._bullpen = bullpen
+        self._base_url = bullpen_rewrite(_BASE_URL, "nascar", bullpen)
         self._events_by_league: dict[str, list[Event]] = {}
         self._loaded_at: datetime | None = None
 
@@ -116,9 +127,11 @@ class NASCARProvider(SportsProvider):
         if not self.supports_league(league):
             return []
         self._ensure_loaded()
+        # ±1-day superset by UTC session date; exact membership is decided by
+        # the user-day window at the service seam (#590).
         return [
             e for e in self._events_by_league.get(league, [])
-            if any(s.start_time.date() == target_date for s in e.sessions)
+            if any(abs((s.start_time.date() - target_date).days) <= 1 for s in e.sessions)
         ]
 
     def get_team_schedule(self, team_id: str, league: str, days_ahead: int = 14) -> list[Event]:
@@ -163,7 +176,7 @@ class NASCARProvider(SportsProvider):
         result: dict[str, list[Event]] = {}
 
         for league, (suffix, series_key) in _LEAGUE_CONFIG.items():
-            url = f"{_BASE_URL}/{year}/{suffix}"
+            url = f"{self._base_url}/{year}/{suffix}"
             if url not in fetched:
                 fetched[url] = self._fetch(url)
 
@@ -191,15 +204,32 @@ class NASCARProvider(SportsProvider):
         return result
 
     def _fetch(self, url: str) -> list | dict | None:
-        try:
-            with httpx.Client(timeout=self._timeout) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-                return resp.json()
-        except httpx.HTTPStatusError as e:
-            logger.warning("[NASCAR] HTTP %d fetching %s", e.response.status_code, url)
-        except Exception as e:
-            logger.warning("[NASCAR] Failed to fetch %s: %s", url, e)
+        if self._bullpen and self._bullpen.disabled:
+            return None
+        headers = bullpen_headers(url, self._bullpen)
+        for attempt in range(BULLPEN_UNAUTHORIZED_ATTEMPTS):
+            try:
+                with httpx.Client(timeout=self._timeout, headers=headers) as client:
+                    resp = client.get(url)
+                    if resp.status_code == 401 and is_bullpen_url(url, self._bullpen):
+                        if attempt < BULLPEN_UNAUTHORIZED_ATTEMPTS - 1:
+                            time.sleep(0.5 * (attempt + 1))
+                            continue
+                        logger.error(
+                            "[NASCAR] Bullpen unauthorized after %d attempts; disabling proxy",
+                            BULLPEN_UNAUTHORIZED_ATTEMPTS,
+                        )
+                        if self._bullpen:
+                            self._bullpen.disable()
+                        return None
+                    resp.raise_for_status()
+                    return resp.json()
+            except httpx.HTTPStatusError as e:
+                logger.warning("[NASCAR] HTTP %d fetching %s", e.response.status_code, url)
+                return None
+            except Exception as e:
+                logger.warning("[NASCAR] Failed to fetch %s: %s", url, e)
+                return None
         return None
 
     def _parse_race(self, data: dict, league: str) -> Event | None:

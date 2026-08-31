@@ -6,6 +6,7 @@ Handles M3U account listing, stream discovery, and refresh operations.
 import logging
 import time
 import urllib.parse
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from teamarr.dispatcharr.client import DispatcharrClient
@@ -20,12 +21,21 @@ from teamarr.dispatcharr.types import (
 
 logger = logging.getLogger(__name__)
 
+# Concurrency for paginated stream fetches. Bounded well below the page count on
+# purpose: Dispatcharr is a single Django app, frequently on the same host, so
+# the goal is to remove the serial round-trip cost, not to saturate it.
+_MAX_PAGE_WORKERS = 8
+# ids per ``?ids=`` request — ~8 chars each keeps the URL well under 2 KB.
+_IDS_CHUNK_SIZE = 200
+
 
 def _fix_double_encoded_utf8(text: str) -> str:
     """Fix double-encoded UTF-8 strings.
 
     Some M3U sources have UTF-8 text that was decoded as Latin-1 then re-encoded,
-    resulting in characters like 'Ã±' instead of 'ñ'.
+    resulting in characters like 'Ã±' instead of 'ñ'. Delegates the actual
+    guarded latin-1/utf-8 round trip to
+    ``teamarr.consumers.matching.normalizer.try_fix_double_encoded``.
 
     Args:
         text: Potentially double-encoded string
@@ -40,11 +50,13 @@ def _fix_double_encoded_utf8(text: str) -> str:
     if "Ã" not in text:
         return text
 
-    try:
-        # Try to fix: encode as Latin-1 (to get original bytes), decode as UTF-8
-        return text.encode("latin-1").decode("utf-8")
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        return text
+    # Deferred import: teamarr.consumers.matching.normalizer sits behind an
+    # import chain that eventually reaches back to teamarr.dispatcharr.factory
+    # (which imports this module at load time), so this can't be hoisted to
+    # module scope without creating a circular import.
+    from teamarr.consumers.matching.normalizer import try_fix_double_encoded
+
+    return try_fix_double_encoded(text)
 
 
 class M3UManager:
@@ -246,43 +258,115 @@ class M3UManager:
 
         # Build query params — don't request more per page than the caller wants
         page_size = min(limit, 1000) if limit else 1000
-        params = ["page=1", f"page_size={page_size}"]
+        filters = [f"page_size={page_size}"]
         if group_name:
-            params.append(f"channel_group_name={urllib.parse.quote(group_name)}")
+            filters.append(f"channel_group_name={urllib.parse.quote(group_name)}")
         if account_id is not None:
-            params.append(f"m3u_account={account_id}")
+            filters.append(f"m3u_account={account_id}")
+        query = "&".join(filters)
 
-        # Fetch pages until exhausted or limit reached
-        raw_streams: list[dict] = []
-        url: str | None = f"/api/channels/streams/?{'&'.join(params)}"
+        def page_url(page: int) -> str:
+            return f"/api/channels/streams/?page={page}&{query}"
 
-        while url and (limit is None or len(raw_streams) < limit):
+        def fetch(url: str) -> dict | list | None:
+            """One page. ``None`` means the request failed — never an empty page."""
             response = self._client.get(url)
             if response is None or response.status_code != 200:
                 status = response.status_code if response else "No response"
                 logger.error("[M3U] Failed to list streams: %s", status)
+                return None
+            return response.json()
+
+        def next_path(data: dict) -> str | None:
+            """Path of the next page, if any (Dispatcharr may return a full URL)."""
+            next_url = data.get("next")
+            if not next_url:
+                return None
+            if next_url.startswith("http"):
+                from urllib.parse import urlparse
+
+                parsed = urlparse(next_url)
+                return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+            return next_url
+
+        def follow(url: str | None, raw: list[dict]) -> bool:
+            """Walk `next` links from `url`, appending. False if a page failed."""
+            while url and (limit is None or len(raw) < limit):
+                data = fetch(url)
+                if data is None:
+                    return False
+                if not isinstance(data, dict):
+                    raw.extend(data)  # non-paginated response (legacy?)
+                    return True
+                raw.extend(data.get("results", []))
+                url = next_path(data)
+            return True
+
+        raw_streams: list[dict] = []
+
+        first = fetch(page_url(1))
+        if first is None:
+            return []
+
+        if not isinstance(first, dict):
+            # Non-paginated response (legacy?)
+            raw_streams.extend(first)
+        else:
+            raw_streams.extend(first.get("results", []))
+            total = first.get("count")
+            pages = -(-total // page_size) if isinstance(total, int) and page_size > 0 else None
+
+            if limit is not None or pages is None:
+                # A caller with a limit wants to stop early, and a response with
+                # no usable count cannot be addressed by page number — both walk
+                # `next` one hop at a time.
+                if not follow(next_path(first), raw_streams):
+                    return []
+            elif pages > 1:
+                # Pages 2..N are independently addressable, so fetch them at once
+                # rather than paying a round trip each: 34 pages x 147ms was the
+                # largest single item left in the groups phase (#610). Bounded —
+                # Dispatcharr is one Django app, often on the same host.
+                by_page: dict[int, list[dict]] = {}
+                last = first
+                workers = min(_MAX_PAGE_WORKERS, pages - 1)
+                with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="m3u-page"
+                ) as executor:
+                    futures = {executor.submit(fetch, page_url(n)): n for n in range(2, pages + 1)}
+                    for future in as_completed(futures):
+                        page = futures[future]
+                        try:
+                            data = future.result()
+                        except Exception as e:  # noqa: BLE001 - treated as a failed page
+                            logger.error("[M3U] Page %d failed: %s", page, e)
+                            data = None
+                        if data is None:
+                            # A partial list is worse than none: the caller cannot
+                            # tell it apart from a genuinely smaller group, would
+                            # silently lose matches, and could delete channels for
+                            # the streams that went missing. Callers already handle
+                            # the empty case (see the group processor's guard).
+                            logger.error(
+                                "[M3U] Aborting stream list: page %d of %d failed",
+                                page,
+                                pages,
+                            )
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return []
+                        by_page[page] = data.get("results", []) if isinstance(data, dict) else data
+                        if isinstance(data, dict) and page == pages:
+                            last = data
+
+                for page in range(2, pages + 1):
+                    raw_streams.extend(by_page.get(page, []))
+
+                # The set can grow between page 1 and the last page; whatever
+                # `next` still points at is picked up here.
+                if not follow(next_path(last), raw_streams):
+                    return []
+            elif not follow(next_path(first), raw_streams):
                 return []
-
-            data = response.json()
-            if isinstance(data, dict):
-                raw_streams.extend(data.get("results", []))
-                # Get next page URL (Dispatcharr returns full URL or None)
-                next_url = data.get("next")
-                if next_url:
-                    # Extract path from full URL if needed
-                    if next_url.startswith("http"):
-                        from urllib.parse import urlparse
-
-                        parsed = urlparse(next_url)
-                        url = f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
-                    else:
-                        url = next_url
-                else:
-                    url = None
-            else:
-                # Non-paginated response (legacy?)
-                raw_streams.extend(data)
-                url = None
 
         # Fix double-encoded UTF-8 in stream names
         streams = []
@@ -309,6 +393,44 @@ class M3UManager:
                 len(streams),
             )
 
+        return streams
+
+    def get_streams_by_ids(
+        self,
+        stream_ids: Iterable[int],
+        chunk_size: int = _IDS_CHUNK_SIZE,
+    ) -> list[DispatcharrStream]:
+        """Fetch specific streams by id via ``/api/channels/streams/?ids=``.
+
+        Dispatcharr answers an ``ids`` filter with an unpaginated list, so a
+        few hundred streams cost a handful of requests instead of a walk over
+        the whole catalog (#647: 119 pages / 118k streams on a real install to
+        look up ~500). Ids are sent in chunks to keep URLs short. A failed
+        chunk is logged and skipped — callers treat a missing detail as "use
+        what the channel already tells us", so partial is strictly better
+        than nothing here.
+        """
+        ids = sorted({int(i) for i in stream_ids})
+        if not ids:
+            return []
+        streams: list[DispatcharrStream] = []
+        for start in range(0, len(ids), chunk_size):
+            chunk = ids[start : start + chunk_size]
+            url = "/api/channels/streams/?ids=" + ",".join(map(str, chunk))
+            response = self._client.get(url)
+            if response is None or response.status_code != 200:
+                logger.warning(
+                    "[M3U] Failed to fetch %d stream(s) by id: %s",
+                    len(chunk),
+                    response.status_code if response else "No response",
+                )
+                continue
+            data = response.json()
+            raw_list = data.get("results", []) if isinstance(data, dict) else data
+            for raw in raw_list:
+                if "name" in raw:
+                    raw["name"] = _fix_double_encoded_utf8(raw["name"])
+                streams.append(DispatcharrStream.from_api(raw))
         return streams
 
     def get_group_with_streams(

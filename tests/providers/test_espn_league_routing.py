@@ -11,7 +11,17 @@ Discovered soccer leagues (not in the leagues table) must still resolve via
 that heuristic.
 """
 
+from teamarr.providers.espn.client import ESPN_USER_AGENT, ESPNClient
 from teamarr.providers.espn.provider import ESPNProvider
+
+
+def test_espn_client_uses_curl_user_agent():
+    client = ESPNClient()
+    try:
+        assert ESPN_USER_AGENT == "curl/8.7.1"
+        assert client._get_client().headers["User-Agent"] == ESPN_USER_AGENT
+    finally:
+        client.close()
 
 
 class FakeMappingSource:
@@ -64,6 +74,10 @@ class TestESPNSupportsLeague:
         """The guard also covers non-dotted leagues owned by another provider."""
         espn = _espn({("chl", "hockeytech")})
         assert espn.supports_league("chl") is False
+
+    def test_declines_cfl_assigned_to_bellmedia(self):
+        espn = _espn({("cfl", "bellmedia")})
+        assert espn.supports_league("cfl") is False
 
     def test_no_mapping_source_falls_back_to_dot_heuristic(self):
         """Without a mapping source, only the dotted heuristic applies."""

@@ -18,6 +18,8 @@ Teamarr is configured via environment variables in your `docker-compose.yml` fil
 | `LOG_LEVEL` | `INFO` | Console log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `LOG_FORMAT` | `text` | Log format: `text` or `json` (for log aggregation systems like ELK, Loki, Splunk) |
 | `LOG_DIR` | auto-detected | Override log directory path. See [Log Directory Detection](#log-directory-detection). |
+| `SCHEDULER` | `on` | Set to `off` to start the API and UI **without** the background scheduler: no timed generation, backups, or channel resets. Manual generation from the UI still works. Lets a second (dev) instance run beside production without double-firing. Shown as a banner in the UI. |
+| `DRY_RUN` | `false` | Set to `true` to resolve and **log** every outbound write — Dispatcharr channel/stream/profile changes and Emby / Jellyfin / Channels DVR guide refreshes — without executing it. Reads are unaffected, so a full generation can be exercised against real data. Shown as a banner in the UI. |
 | `SKIP_CACHE_REFRESH` | `false` | Skip team/league cache refresh on startup. Set to `true`, `yes`, or `1`. Useful for faster restarts during development. |
 | `EPG_INDEX_FETCH_WORKERS` | `10` | Parallel workers for fetching Dispatcharr EPG programs during EPG matching. Lower it if your Dispatcharr instance struggles with concurrent requests. |
 | `DATABASE_PATH` | `<project_root>/data/teamarr.db` | Path to the SQLite database (`/app/data/teamarr.db` in Docker). |
@@ -32,7 +34,7 @@ These settings control how Teamarr communicates with ESPN's API. Most users don'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ESPN_MAX_WORKERS` | `100` / `50` | Maximum parallel workers for fetching data. Two defaults: 100 for team/event processing, 50 for cache refresh (which makes more API calls per league). Setting the variable overrides both. |
+| `ESPN_MAX_WORKERS` | `100` / `50` / `24` | Maximum parallel workers for fetching data. Three defaults: 100 for team/event processing, 50 for cache refresh (which makes more API calls per league), 24 for the event-match prefetch. Setting the variable overrides all three. |
 | `ESPN_MAX_CONNECTIONS` | `100` | HTTP connection pool size |
 | `ESPN_TIMEOUT` | `10` | Request timeout in seconds |
 | `ESPN_RETRY_COUNT` | `3` | Number of retry attempts on failure |

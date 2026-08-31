@@ -290,7 +290,8 @@ def update_channel_numbering_settings(
     Returns:
         True if updated (False on validation failure)
     """
-    if global_channel_mode is not None and global_channel_mode not in ("auto", "manual"):
+    # Manual mode retired in v88 (#333) — pinned blocks replace per-league starts.
+    if global_channel_mode is not None and global_channel_mode != "auto":
         logger.warning("[CHANNEL_NUM] Invalid global_channel_mode '%s'", global_channel_mode)
         return False
     if global_consolidation_mode is not None and global_consolidation_mode not in (
@@ -566,6 +567,43 @@ def update_channelsdvr_settings(
     """
     provided = _skip_none(enabled=enabled, servers=servers)
     return _apply(conn, "channelsdvr", provided)
+
+
+def update_bullpen_settings(
+    conn: Connection,
+    enabled: bool | None = None,
+    api_key: str | None | object = _NOT_PROVIDED,
+    base_url: str | None = None,
+    disabled_reason: str | None | object = _NOT_PROVIDED,
+    disabled_at: str | None | object = _NOT_PROVIDED,
+    espn_enabled: bool | None = None,
+    bellmedia_enabled: bool | None = None,
+    squiggle_enabled: bool | None = None,
+    nascar_enabled: bool | None = None,
+    mlbstats_enabled: bool | None = None,
+    hockeytech_enabled: bool | None = None,
+    tsdb_enabled: bool | None = None,
+) -> bool:
+    """Update bullpen proxy settings (only provided fields)."""
+    provided = _skip_none(
+        enabled=enabled,
+        base_url=base_url,
+        espn_enabled=espn_enabled,
+        bellmedia_enabled=bellmedia_enabled,
+        squiggle_enabled=squiggle_enabled,
+        nascar_enabled=nascar_enabled,
+        mlbstats_enabled=mlbstats_enabled,
+        hockeytech_enabled=hockeytech_enabled,
+        tsdb_enabled=tsdb_enabled,
+    )
+    provided.update(
+        _skip_missing(
+            api_key=api_key,
+            disabled_reason=disabled_reason,
+            disabled_at=disabled_at,
+        )
+    )
+    return _apply(conn, "bullpen", provided)
 
 
 def update_backup_settings(

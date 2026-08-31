@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 # TYPES
 # =============================================================================
 
-RunType = Literal["event_group", "team_epg", "batch", "reconciliation", "scheduler", "full_epg"]
+# One generation, one row (#645). Groups no longer get their own sub-run rows;
+# their breakdown lives in the full_epg row's extra_metrics["groups"].
+RunType = Literal["full_epg"]
 RunStatus = Literal["running", "completed", "failed", "partial", "cancelled"]
 
 
@@ -30,7 +32,7 @@ class ProcessingRun:
     """A processing run record."""
 
     id: int | None = None
-    run_type: RunType = "event_group"
+    run_type: RunType = "full_epg"
     run_id: str | None = None
     group_id: int | None = None
     team_id: int | None = None
@@ -283,7 +285,6 @@ def get_recent_runs(
     conn: Connection,
     limit: int = 50,
     run_type: RunType | None = None,
-    group_id: int | None = None,
     status: RunStatus | None = None,
 ) -> list[ProcessingRun]:
     """Get recent processing runs with optional filters.
@@ -321,10 +322,6 @@ def get_recent_runs(
     if run_type:
         query += " AND run_type = ?"
         params.append(run_type)
-
-    if group_id:
-        query += " AND group_id = ?"
-        params.append(group_id)
 
     if status:
         query += " AND status = ?"
@@ -389,6 +386,7 @@ def get_current_stats(conn: Connection) -> dict:
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
             SUM(streams_matched) as total_matched,
             SUM(streams_unmatched) as total_unmatched,
+            SUM(streams_cached) as total_cached,
             SUM(channels_created) as total_channels_created,
             SUM(channels_deleted) as total_channels_deleted,
             SUM(programmes_total) as total_programmes,
@@ -399,23 +397,12 @@ def get_current_stats(conn: Connection) -> dict:
             AVG(duration_ms) as avg_duration,
             MAX(duration_ms) as max_duration
         FROM processing_runs
-        -- Only full EPG generations (the "Generate" runs). Without this the
-        -- averages/totals are dragged down by the many tiny scoped runs
-        -- (single-team/league refreshes, event-group sub-runs) — e.g. an
-        -- 8s avg when real generations take minutes.
+        -- Only full EPG generations (the "Generate" runs) — the filter is
+        -- kept as a guard against any legacy scoped rows (pre-#645
+        -- event_group sub-runs) still in the table.
         WHERE run_type = 'full_epg'
         """
     ).fetchone()
-
-    # Cache hits live ONLY on event_group sub-runs (#312): the matcher's
-    # fingerprint-cache counter is written per group run and never rolled up
-    # to the parent full_epg row, so it must be summed outside the full_epg
-    # filter above (which exists to keep averages honest).
-    cached_row = conn.execute(
-        "SELECT SUM(streams_cached) as total_cached FROM processing_runs "
-        "WHERE run_type = 'event_group'"
-    ).fetchone()
-    total_cached = (cached_row["total_cached"] if cached_row else 0) or 0
 
     # Last 24 hours — created_at is SQLite CURRENT_TIMESTAMP (UTC, space
     # separator), so the cutoff must be in the same format to compare
@@ -481,7 +468,7 @@ def get_current_stats(conn: Connection) -> dict:
             "programmes_generated": (overall["total_programmes"] or 0) + _lt("programmes_total"),
             "streams_matched": (overall["total_matched"] or 0) + _lt("streams_matched"),
             "streams_unmatched": (overall["total_unmatched"] or 0) + _lt("streams_unmatched"),
-            "streams_cached": total_cached + _lt("streams_cached"),
+            "streams_cached": (overall["total_cached"] or 0) + _lt("streams_cached"),
             "channels_created": (overall["total_channels_created"] or 0) + _lt("channels_created"),
             "channels_deleted": (overall["total_channels_deleted"] or 0) + _lt("channels_deleted"),
         },
@@ -489,16 +476,70 @@ def get_current_stats(conn: Connection) -> dict:
         # Average over the retention window only (folded runs keep no durations)
         "avg_duration_ms": int(overall["avg_duration"] or 0),
         "last_run": last_run,
+        "media_server_health": get_media_server_health(conn),
     }
+
+
+# Consecutive failed refreshes before a media server is reported as failing.
+# Hourly runs -> three hours of failures; one transient miss stays quiet.
+MEDIA_SERVER_FAILING_THRESHOLD = 3
+MEDIA_SERVER_HEALTH_LOOKBACK = 10
+
+
+def media_server_health(
+    runs: list[dict], threshold: int = MEDIA_SERVER_FAILING_THRESHOLD
+) -> list[dict]:
+    """Per-server refresh health from run dicts, newest first (#649).
+
+    Each run's ``extra_metrics.media_servers`` holds one outcome per server
+    (see generation._media_server_outcome). A server is ``failing`` once it
+    has failed ``threshold`` consecutive runs counted from the newest run it
+    appears in. Servers absent from the newest run (disabled/removed) are
+    not reported.
+    """
+    latest_seen: dict[tuple[str, str], dict] = {}
+    for run in runs:
+        for o in (run.get("extra_metrics") or {}).get("media_servers") or []:
+            key = (o.get("kind") or "", o.get("server") or "")
+            state = latest_seen.get(key)
+            if state is None:
+                state = latest_seen[key] = {
+                    "kind": key[0],
+                    "server": key[1],
+                    "consecutive_failures": 0,
+                    "last_error": None,
+                    "last_success_at": None,
+                    "_streak_open": True,
+                }
+            if o.get("success"):
+                state["_streak_open"] = False
+                if state["last_success_at"] is None:
+                    state["last_success_at"] = run.get("completed_at") or run.get("started_at")
+            elif state["_streak_open"]:
+                state["consecutive_failures"] += 1
+                if state["last_error"] is None:
+                    state["last_error"] = o.get("error")
+    result = []
+    for state in latest_seen.values():
+        state.pop("_streak_open")
+        state["failing"] = state["consecutive_failures"] >= threshold
+        result.append(state)
+    return result
+
+
+def get_media_server_health(
+    conn: Connection, lookback: int = MEDIA_SERVER_HEALTH_LOOKBACK
+) -> list[dict]:
+    """``media_server_health`` over the latest full_epg runs."""
+    runs = get_recent_runs(conn, limit=lookback, run_type="full_epg")
+    return media_server_health([r.to_dict() for r in runs])
 
 
 def _fold_runs_into_lifetime(conn: Connection, where: str = "", params: tuple = ()) -> None:
     """Accumulate full-EPG run sums into lifetime_stats before rows are deleted.
 
     Only run_type='full_epg' rows are folded, matching the filter
-    get_current_stats uses for its totals — EXCEPT streams_cached, which lives
-    only on event_group sub-runs (#312) and is folded from those separately
-    below so cache-hit history survives retention pruning.
+    get_current_stats uses for its totals.
     """
     condition = f"run_type = 'full_epg' AND ({where})" if where else "run_type = 'full_epg'"
     row = conn.execute(
@@ -509,6 +550,7 @@ def _fold_runs_into_lifetime(conn: Connection, where: str = "", params: tuple = 
             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
             SUM(streams_matched) as matched,
             SUM(streams_unmatched) as unmatched,
+            SUM(streams_cached) as cached,
             SUM(channels_created) as created,
             SUM(channels_deleted) as deleted,
             SUM(programmes_total) as programmes,
@@ -521,18 +563,7 @@ def _fold_runs_into_lifetime(conn: Connection, where: str = "", params: tuple = 
         params,
     ).fetchone()
 
-    # Cache hits are written on event_group sub-runs only — fold them from
-    # those rows (same where-scope) or they vanish with the pruned rows.
-    eg_condition = (
-        f"run_type = 'event_group' AND ({where})" if where else "run_type = 'event_group'"
-    )
-    eg_cached = conn.execute(
-        f"SELECT SUM(streams_cached) as cached FROM processing_runs WHERE {eg_condition}",
-        params,
-    ).fetchone()
-    cached_to_fold = (eg_cached["cached"] if eg_cached else 0) or 0
-
-    if (not row or not row["runs"]) and not cached_to_fold:
+    if not row or not row["runs"]:
         return
 
     conn.execute("INSERT OR IGNORE INTO lifetime_stats (id) VALUES (1)")
@@ -560,7 +591,7 @@ def _fold_runs_into_lifetime(conn: Connection, where: str = "", params: tuple = 
             row["failed"] or 0,
             row["matched"] or 0,
             row["unmatched"] or 0,
-            cached_to_fold,
+            row["cached"] or 0,
             row["created"] or 0,
             row["deleted"] or 0,
             row["programmes"] or 0,
@@ -732,53 +763,19 @@ def get_matched_streams(
 ) -> list[dict]:
     """Get matched streams, optionally filtered by run or group.
 
-    If run_id is None, gets from most recent run.
-    If run_id is a full_epg run, finds all event_group runs within its time window.
+    If run_id is None, gets from the most recent full_epg run.
     """
-    # Get run_id if not specified
+    run_id = run_id if run_id is not None else _latest_run_id(conn)
     if run_id is None:
-        row = conn.execute(
-            "SELECT id FROM processing_runs ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            return []
-        run_id = row["id"]
+        return []
 
-    # Check if this is a full_epg run - if so, find child event_group runs
-    run_info = conn.execute(
-        "SELECT run_type, started_at, completed_at FROM processing_runs WHERE id = ?", (run_id,)
-    ).fetchone()
-
-    if run_info and run_info["run_type"] == "full_epg":
-        # Get all event_group runs that happened during this full_epg run
-        child_runs = conn.execute(
-            """
-            SELECT id FROM processing_runs
-            WHERE run_type = 'event_group'
-              AND started_at >= ?
-              AND started_at <= ?
-            """,
-            (run_info["started_at"], run_info["completed_at"]),
-        ).fetchall()
-        run_ids = [r["id"] for r in child_runs]
-        if not run_ids:
-            return []
-        placeholders = ",".join("?" * len(run_ids))
-        # Alias detected_league as league for frontend compatibility
-        query = f"""SELECT id, run_id, group_id, group_name, stream_id, stream_name,
-                    event_id, event_name, event_date, home_team, away_team,
-                    detected_league AS league, from_cache, excluded, exclusion_reason,
-                    match_method, confidence, origin_match_method, created_at
-                    FROM epg_matched_streams WHERE run_id IN ({placeholders})"""
-        params: list = run_ids
-    else:
-        # Alias detected_league as league for frontend compatibility
-        query = """SELECT id, run_id, group_id, group_name, stream_id, stream_name,
-                   event_id, event_name, event_date, home_team, away_team,
-                   detected_league AS league, from_cache, excluded, exclusion_reason,
-                   match_method, confidence, origin_match_method, created_at
-                   FROM epg_matched_streams WHERE run_id = ?"""
-        params = [run_id]
+    # Alias detected_league as league for frontend compatibility
+    query = """SELECT id, run_id, group_id, group_name, stream_id, stream_name,
+               event_id, event_name, event_date, home_team, away_team,
+               detected_league AS league, from_cache, excluded, exclusion_reason,
+               match_method, confidence, origin_match_method, created_at
+               FROM epg_matched_streams WHERE run_id = ?"""
+    params: list = [run_id]
 
     if group_id is not None:
         query += " AND group_id = ?"
@@ -808,43 +805,14 @@ def get_failed_matches(
 ) -> list[dict]:
     """Get failed matches, optionally filtered by run, group, or reason.
 
-    If run_id is None, gets from most recent run.
-    If run_id is a full_epg run, finds all event_group runs within its time window.
+    If run_id is None, gets from the most recent full_epg run.
     """
-    # Get run_id if not specified
+    run_id = run_id if run_id is not None else _latest_run_id(conn)
     if run_id is None:
-        row = conn.execute(
-            "SELECT id FROM processing_runs ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            return []
-        run_id = row["id"]
+        return []
 
-    # Check if this is a full_epg run - if so, find child event_group runs
-    run_info = conn.execute(
-        "SELECT run_type, started_at, completed_at FROM processing_runs WHERE id = ?", (run_id,)
-    ).fetchone()
-
-    if run_info and run_info["run_type"] == "full_epg":
-        # Get all event_group runs that happened during this full_epg run
-        child_runs = conn.execute(
-            """
-            SELECT id FROM processing_runs
-            WHERE run_type = 'event_group'
-              AND started_at >= ?
-              AND started_at <= ?
-            """,
-            (run_info["started_at"], run_info["completed_at"]),
-        ).fetchall()
-        run_ids = [r["id"] for r in child_runs]
-        if not run_ids:
-            return []
-        placeholders = ",".join("?" * len(run_ids))
-        query = f"SELECT * FROM epg_failed_matches WHERE run_id IN ({placeholders})"
-        params: list = run_ids
-    else:
-        query = "SELECT * FROM epg_failed_matches WHERE run_id = ?"
-        params = [run_id]
+    query = "SELECT * FROM epg_failed_matches WHERE run_id = ?"
+    params: list = [run_id]
 
     if group_id is not None:
         query += " AND group_id = ?"
@@ -866,14 +834,9 @@ def get_match_stats_summary(conn: Connection, run_id: int | None = None) -> dict
 
     Returns breakdown by group and reason.
     """
-    # Get run_id if not specified
+    run_id = run_id if run_id is not None else _latest_run_id(conn)
     if run_id is None:
-        row = conn.execute(
-            "SELECT id FROM processing_runs ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-        if not row:
-            return {"run_id": None, "matched": {}, "failed": {}}
-        run_id = row["id"]
+        return {"run_id": None, "matched": {}, "failed": {}}
 
     # Get run info
     run_row = conn.execute(
@@ -983,14 +946,12 @@ def get_match_stats_summary(conn: Connection, run_id: int | None = None) -> dict
     }
 
 
-def clear_run_details(conn: Connection, run_id: int) -> None:
-    """Clear matched/failed stream details for a run.
-
-    Useful before re-running to avoid duplicates.
-    """
-    conn.execute("DELETE FROM epg_matched_streams WHERE run_id = ?", (run_id,))
-    conn.execute("DELETE FROM epg_failed_matches WHERE run_id = ?", (run_id,))
-    conn.commit()
+def _latest_run_id(conn: Connection) -> int | None:
+    """id of the most recent full_epg run, or None if there has never been one."""
+    row = conn.execute(
+        "SELECT id FROM processing_runs WHERE run_type = 'full_epg' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def get_live_xmltv_content(conn: Connection) -> dict[str, list[str]]:
@@ -1119,3 +1080,70 @@ def cleanup_stuck_runs(conn: Connection) -> int:
     if count > 0:
         logger.info("[STATS] Cleaned up %d stuck processing run(s)", count)
     return count
+
+
+# Minimum post-filter streams before a source's match rate is reported at all
+# (#657). Measured on a 447-source install: 131 sources matched nothing, but
+# 72 of those had fewer than five streams to match — a single unmatched stream
+# is not evidence of anything. At >=10 the list is 41, which is a list a human
+# can actually read.
+MATCHING_MIN_STREAMS = 10
+# Below this share matched, a source that IS matching is worth a second look.
+MATCHING_DEGRADED_RATE = 0.5
+# Longest evidence list. Sources are ranked by stream count, so the cap keeps
+# the biggest offenders and reports the rest as a count.
+MATCHING_EVIDENCE_LIMIT = 10
+
+
+def source_matching_health(
+    runs: list[dict],
+    *,
+    min_streams: int = MATCHING_MIN_STREAMS,
+    degraded_rate: float = MATCHING_DEGRADED_RATE,
+) -> list[dict]:
+    """Per-source match rates from the newest completed run (#657).
+
+    Reads ``extra_metrics.groups``, the per-source breakdown that #645 moved
+    onto the parent ``full_epg`` row when per-group sub-runs were retired. Runs
+    without it (in progress, or written before v90) contribute nothing, so this
+    returns [] rather than guessing from the legacy ``event_group`` rows.
+
+    The denominator is ``matched + unmatched`` — post-filter streams, i.e. the
+    ones matching was actually asked about. ``fetched`` is pre-filter and would
+    make an off-season source look broken: "USA | NFL Teams Backup" fetches 34
+    streams in August and legitimately offers none of them to the matcher.
+    Sources with a zero denominator are therefore absent from the result, not
+    reported at 0%.
+
+    Returned newest-run-only and sorted by stream count descending, so a caller
+    that truncates keeps the sources with the most at stake.
+    """
+    groups: list[dict] = []
+    for run in runs:
+        if run.get("run_type") != "full_epg":
+            continue
+        found = (run.get("extra_metrics") or {}).get("groups")
+        if found:
+            groups = found
+            break
+
+    health = []
+    for group in groups:
+        matched = group.get("matched") or 0
+        streams = matched + (group.get("unmatched") or 0)
+        if streams < min_streams:
+            continue
+        rate = matched / streams
+        health.append(
+            {
+                "id": group.get("id"),
+                "name": group.get("name"),
+                "matched": matched,
+                "streams": streams,
+                "rate": round(rate, 3),
+                "zero": matched == 0,
+                "degraded": 0 < rate < degraded_rate,
+            }
+        )
+    health.sort(key=lambda item: item["streams"], reverse=True)
+    return health

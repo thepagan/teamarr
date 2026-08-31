@@ -34,6 +34,7 @@ Teamarr normally matches a stream to an event by reading the **stream name** —
 
 1. **Read the guide.** For each opted-in source, Teamarr asks Dispatcharr for the EPG **programs** airing on the source's streams (`GET /api/epg/programs/search/`).
 2. **Match program titles, not stream names.** Each program's title + subtitle (`MLB Baseball` + `Cubs at Cardinals`) goes through the *same* team-matching pipeline Teamarr uses for stream names, and is matched to a real event.
+   - **Description fallback:** some guides (Sky-style) title a programme by competition only (`Scottish Premiership Football`) with the matchup buried in the description prose. When the title yields a league or sport hint but no team pair, Teamarr checks whether **exactly one** event in the hinted league(s) both airs inside the programme's broadcast window *and* has **both** team names in the description — and binds only then. Zero or multiple candidates (e.g. a multi-game preview blurb) are skipped, never guessed.
 3. **Time-share the stream.** A linear stream that airs many programs is attached to each matched event's channel only for a window around that **program's** guide slot (program start − *attach before*, program end + *detach after*), then detached when the window ends. Studio shows and replays are skipped.
 
 ### Where the EPG comes from — you don't map it
@@ -75,9 +76,20 @@ When on, Teamarr adds a second, **additive** source that:
 
 It runs **alongside** your per-source M3U matching (not instead of it); matches are consolidated onto the same event channels by event identity. Teamarr's **own generated channels are excluded** — they're output, not input. Channels whose streams belong to an M3U group that is already an EPG-match-enabled source are also skipped, so nothing is processed twice — if a curated channel never appears via this source, check whether its streams' group is already a source with EPG matching on. The source is managed for you as a hidden system group ("Dispatcharr Channels") that appears in stats but not in the Sources list; created channels use your global/per-league channel-group, profile, and template defaults.
 
-**Scope it to specific groups.** When you enable the toggle, a **Dispatcharr groups to include** picker appears. Select the channel groups you actually want matched — Teamarr then scans only those, skipping the matching work for everything else (faster generation). Leave it empty to include all groups. Your selection also becomes a **Dispatcharr Group** option in [stream ordering](../channels/stream-priority), so you can prioritize a group's streams within consolidated channels.
+**Scope it to specific groups.** When you enable the toggle, a **Dispatcharr groups to include** picker appears. It lists the Dispatcharr groups that hold channels, with each group's channel count — provider groups you've never curated channels into aren't offered, and Teamarr's own generated channels don't count toward a group's total. Select the channel groups you actually want matched — Teamarr then scans only those, skipping the matching work for everything else (faster generation). Leave it empty to include all groups. Your selection also becomes a **Dispatcharr Group** option in [stream ordering](../channels/stream-priority), so you can prioritize a group's streams within consolidated channels.
 
 ---
+
+### A real-world pattern: curate channels in Dispatcharr, let Teamarr read their EPG
+
+When several providers give the same linear channel different `tvg-id`s (Xtream sources, HDHomeRun, TVEverywhere, EPlusTV…), matching each provider's EPG separately is slow and patchy. A cleaner setup, contributed by a user in [#598](https://github.com/Pharaoh-Labs/teamarr/issues/598):
+
+1. In Dispatcharr, create a channel profile (e.g. **Regional Networks**) and add one channel per station you care about — regional ABC, NBC, CBS and FOX affiliates around the country.
+2. Link each channel to the correct EPG entry **once**, in Dispatcharr.
+3. Attach the matching streams from every provider to that channel (the `stream-mapparr` plugin does this in bulk). Optional: probe them with a stream checker so Teamarr's stream-stats ordering can rank them by resolution.
+4. In Teamarr, enable **Dispatcharr channels as an EPG source** (above). Each curated channel's own EPG now drives the match, and every game on those affiliates lands on its event channel with all providers' streams attached.
+
+This keeps EPG mapping in one place, avoids loading every provider's guide into Teamarr, and makes generation noticeably faster.
 
 ## Requirements
 
@@ -131,6 +143,15 @@ In **Channels → Stream Priority**, add a **Stream Type** rule and choose **EPG
 > The ordering rule reads a `match_method` tag stored on each attached stream. Streams attached *before* this feature existed carry no tag until they're re-matched on the next generation run, so the rule applies going forward.
 
 ---
+
+## Tennis programmes
+
+Guide entries for tennis are usually tournament-level ("Wimbledon", "WTA 1000 Toronto — Day 3") and one programme covers many concurrent matches, so tennis follows a stricter rule than team sports. A programme binds only when its EPG fields — title, sub-title **or** description, any of them — establish both:
+
+1. a **tournament** that is playing that day, and
+2. either a **player pair** ("Sabalenka vs Osaka", or both surnames of one match anywhere in the description) or a **court** ("Centre Court", "Court 5").
+
+A pair binds that one match. A court binds every match on that court that falls inside the programme's broadcast slot. A programme that gives only the tournament (or only players, with no tournament) binds nothing and the stream shows **"Tennis matchup not known"** in Run History — Teamarr never spreads one programme across a whole tournament.
 
 ## Why some channels show red in Dispatcharr
 

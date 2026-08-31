@@ -8,6 +8,7 @@ from .read import (
     get_all_settings,
     get_backup_settings,
     get_database_settings,
+    get_bullpen_settings,
     get_channel_numbering_settings,
     get_channelsdvr_settings,
     get_dispatcharr_settings,
@@ -28,6 +29,7 @@ from .types import (
     APISettings,
     BackupSettings,
     DatabaseSettings,
+    BullpenSettings,
     ChannelNumberingSettings,
     ChannelsDVRSettings,
     DispatcharrSettings,
@@ -49,6 +51,7 @@ from .types import (
 from .update import (
     update_backup_settings,
     update_database_settings,
+    update_bullpen_settings,
     update_channel_numbering_settings,
     update_channelsdvr_settings,
     update_dispatcharr_settings,
@@ -88,11 +91,13 @@ __all__ = [
     "BackupSettings",
     "DatabaseSettings",
     "FeedSeparationSettings",
+    "BullpenSettings",
     "AllSettings",
     # Read operations
     "get_all_settings",
     "get_dispatcharr_settings",
     "get_channelsdvr_settings",
+    "get_bullpen_settings",
     "get_emby_settings",
     "get_jellyfin_settings",
     "get_scheduler_settings",
@@ -125,4 +130,5 @@ __all__ = [
     "update_backup_settings",
     "update_database_settings",
     "update_feed_separation_settings",
+    "update_bullpen_settings",
 ]

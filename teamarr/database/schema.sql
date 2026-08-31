@@ -286,6 +286,21 @@ CREATE TABLE IF NOT EXISTS settings (
     -- Premium key ($9/mo) gives 100 req/min and higher limits
     tsdb_api_key TEXT,
 
+    -- Bullpen proxy (https://bullpen.direct) - optional caching proxy for provider upstreams
+    -- Master switch + key/base URL, plus per-provider opt-in (all default off)
+    bullpen_enabled BOOLEAN DEFAULT 0,
+    bullpen_api_key TEXT,
+    bullpen_base_url TEXT DEFAULT 'https://bullpen.direct',
+    bullpen_disabled_reason TEXT,
+    bullpen_disabled_at TEXT,
+    bullpen_espn_enabled BOOLEAN DEFAULT 0,
+    bullpen_bellmedia_enabled BOOLEAN DEFAULT 0,
+    bullpen_squiggle_enabled BOOLEAN DEFAULT 0,
+    bullpen_nascar_enabled BOOLEAN DEFAULT 0,
+    bullpen_mlbstats_enabled BOOLEAN DEFAULT 0,
+    bullpen_hockeytech_enabled BOOLEAN DEFAULT 0,
+    bullpen_tsdb_enabled BOOLEAN DEFAULT 0,
+
     -- Channel ID Format
     channel_id_format TEXT DEFAULT '{team_name|pascal}.{league_id}',
 
@@ -468,7 +483,7 @@ CREATE TABLE IF NOT EXISTS settings (
     channelsdvr_servers JSON,
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 84
+    schema_version INTEGER DEFAULT 90
 );
 
 -- Insert default settings
@@ -902,6 +917,35 @@ CREATE TABLE IF NOT EXISTS channel_priority_teams (
 
 
 -- =============================================================================
+-- NUMBERING EXCEPTIONS (pinned blocks, #333)
+-- A scoped pin (team / league / sport) that numbers its channels from `start`.
+-- Every channel resolves to exactly one lane (most specific wins, then
+-- sort_order); unmatched channels use the global channel range. Rows sharing
+-- start + label form a group (e.g. "Big events": World Cup + Olympics at 850).
+-- See docs/reference/architecture/channel-numbering.md.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS numbering_exceptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    scope TEXT NOT NULL CHECK(scope IN ('team', 'league', 'sport')),
+    sport TEXT NOT NULL,                     -- always set; team + league pins are sport-scoped
+    league_code TEXT,                        -- scope='league'
+    team_name TEXT,                          -- scope='team': match key (case-insensitive, either side)
+    provider TEXT,                           -- scope='team': identity from team_cache
+    provider_team_id TEXT,                   -- scope='team'
+
+    start INTEGER NOT NULL,                  -- first channel number of the block
+    "end" INTEGER,                           -- NULL = spill forward; set = overflow to default lane
+    label TEXT,                              -- group label (rows sharing start + label)
+    sort_order INTEGER NOT NULL DEFAULT 0,   -- tie-break within a precedence level (UI drag order)
+    enabled BOOLEAN DEFAULT 1
+);
+
+
+-- =============================================================================
 -- LEAGUES TABLE
 -- Single source of truth for configured leagues
 -- Combines API config + display config in one table
@@ -997,7 +1041,7 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('nfl', 'espn', 'football/nfl', NULL, 'National Football League', 'football', 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png', NULL, 1, 'NFL', 'nfl', 'team_vs_team', 'NFL Football', NULL, NULL, NULL, 1),
     ('college-football', 'espn', 'football/college-football', NULL, 'NCAA Football', 'football', 'https://www.ncaa.com/modules/custom/casablanca_core/img/sportbanners/football.png', NULL, 1, 'NCAAF', 'ncaaf', 'team_vs_team', 'College Football', NULL, NULL, NULL, 1),
     ('ufl', 'espn', 'football/ufl', NULL, 'United Football League', 'football', 'https://a.espncdn.com/i/teamlogos/leagues/500/ufl.png', NULL, 1, 'UFL', 'ufl', 'team_vs_team', 'UFL Football', NULL, NULL, NULL, 1),
-    ('cfl', 'tsdb', '4405', 'CFL', 'Canadian Football League', 'football', 'https://r2.thesportsdb.com/images/media/league/badge/ffypv51488739128.png', NULL, 1, 'CFL', 'cfl', 'team_vs_team', 'CFL Football', NULL, NULL, 'free', 1),  -- TSDB: ESPN stopped CFL coverage in 2022
+    ('cfl', 'bellmedia', 'cfl', NULL, 'Canadian Football League', 'football', 'https://r2.thesportsdb.com/images/media/league/badge/ffypv51488739128.png', NULL, 1, 'CFL', 'cfl', 'team_vs_team', 'CFL Football', NULL, NULL, NULL, 1),
 
     -- Basketball (ESPN)
     ('nba', 'espn', 'basketball/nba', NULL, 'National Basketball Association', 'basketball', 'https://a.espncdn.com/i/teamlogos/leagues/500/nba.png', NULL, 1, 'NBA', 'nba', 'team_vs_team', 'NBA Basketball', NULL, NULL, NULL, 1),
@@ -1044,6 +1088,7 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('ajhl', 'hockeytech', 'ajhl', NULL, 'Alberta Junior Hockey League', 'hockey', 'https://www.ajhl.ca/wp-content/uploads/sites/2/2022/05/cropped-ajhl_512.png', NULL, 1, 'AJHL', 'ajhl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('mjhl', 'hockeytech', 'mjhl', NULL, 'Manitoba Junior Hockey League', 'hockey', 'https://www.mjhlhockey.ca/wp-content/uploads/sites/2/2019/06/cropped-MJHLalternate-web-600x.png', NULL, 1, 'MJHL', 'mjhl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('mhl', 'hockeytech', 'mhl', NULL, 'Maritime Junior Hockey League', 'hockey', 'https://www.themhl.ca/wp-content/uploads/sites/2/2021/10/cropped-mhl_512.png', NULL, 1, 'MHL', 'mhl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('gohl', 'hockeytech', 'gojhl', NULL, 'Greater Ontario Hockey League', 'hockey', 'https://www.gohl.ca/wp-content/uploads/sites/2/2025/09/cropped-GOHLLogoTeamNavBar.png', NULL, 1, 'GOHL', 'gohl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
 
     -- Hockey - European Leagues (TSDB)
     ('norwegian-hockey', 'tsdb', '4926', 'Norwegian Fjordkraft-ligaen', 'Norwegian Fjordkraft-ligaen', 'hockey', 'https://r2.thesportsdb.com/images/media/league/badge/lpfdvc1697194460.png', NULL, 1, NULL, 'norwegian-hockey', 'team_vs_team', NULL, NULL, NULL, 'free', 1),
@@ -1066,6 +1111,12 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     -- ESPN serves no dedicated WBC league logo (only a generic baseball icon), so hardcode the Wikimedia Commons mark.
     ('world-baseball-classic', 'espn', 'baseball/world-baseball-classic', NULL, 'World Baseball Classic', 'baseball', 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/World_Baseball_Classic_logo.svg/500px-World_Baseball_Classic_logo.svg.png', NULL, 1, 'WBC', 'wbc', 'team_vs_team', 'World Baseball Classic', NULL, NULL, NULL, 1),
     ('cbl', 'supabase', 'https://cbl.ca', NULL, 'Canadian Baseball League', 'baseball', 'https://upload.wikimedia.org/wikipedia/en/thumb/1/1e/Canadian_Baseball_League.svg/1280px-Canadian_Baseball_League.svg.png', NULL, 1, 'CBL', 'cbl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    -- WPBL (Women's Pro Baseball League, #284): TSDB-only — ESPN airs games but exposes no API data. 4 teams, ~30-game season.
+    ('wpbl', 'tsdb', '5929', 'WPBL', 'WPBL', 'baseball', 'https://r2.thesportsdb.com/images/media/league/badge/rkx1371785226521.png', NULL, 1, 'WPBL', 'wpbl', 'team_vs_team', NULL, NULL, NULL, 'free', 1),
+    -- LLB (#556): Little League Baseball World Series. As with WBC, ESPN serves only a generic
+    -- baseball icon for this league, so hardcode the Wikimedia mark. Teams are regional all-star
+    -- squads ESPN re-seeds each season, and the calendar is whitelisted to ~3 weeks each August.
+    ('llb', 'espn', 'baseball/llb', NULL, 'Little League Baseball', 'baseball', 'https://upload.wikimedia.org/wikipedia/en/thumb/8/8c/Little_League_logo.svg/500px-Little_League_logo.svg.png', NULL, 1, 'LLB', 'llb', 'team_vs_team', 'Little League Baseball', NULL, NULL, NULL, 1),
 
     -- Soccer (ESPN)
     ('usa.1', 'espn', 'soccer/usa.1', NULL, 'Major League Soccer', 'soccer', 'https://a.espncdn.com/i/leaguelogos/soccer/500/19.png', NULL, 1, 'MLS', 'mls', 'team_vs_team', 'MLS Soccer', NULL, NULL, NULL, 1),
@@ -1210,6 +1261,10 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('om7s',  'espn', 'rugby/282',       NULL, 'Olympic Men''s Rugby Sevens',     'rugby', 'https://upload.wikimedia.org/wikipedia/commons/f/f2/Rugby_sevens_pictogram.svg', NULL, 1, 'OM7S',  'om7s',  'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('ow7s',  'espn', 'rugby/283',       NULL, 'Olympic Women''s Rugby Sevens',   'rugby', 'https://upload.wikimedia.org/wikipedia/commons/f/f2/Rugby_sevens_pictogram.svg', NULL, 1, 'OW7S',  'ow7s',  'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('nrl',   'espn', 'rugby-league/3',  NULL, 'National Rugby League',           'rugby', 'https://upload.wikimedia.org/wikipedia/en/5/50/National_Rugby_League.svg', NULL, 1, 'NRL',   'nrl',   'team_vs_team', NULL, NULL, NULL, NULL, 1),
+
+    -- Rugby League (TSDB) - ESPN's rugby-league tree carries only the NRL, so Super League comes from TSDB.
+    -- Premium tier: free-tier eventsseason caps at 5 events and eventspastleague returns 1, so a keyless fetch is near-empty.
+    ('super-league', 'tsdb', '4415', 'English Rugby League Super League', 'English Rugby League Super League', 'rugby', 'https://r2.thesportsdb.com/images/media/league/badge/gp2sfv1641835011.png', NULL, 1, 'SL', 'super-league', 'team_vs_team', NULL, NULL, NULL, 'premium', 1),
 
     -- Boxing (TSDB) - Combat sport with event cards
     ('boxing', 'tsdb', '4445', 'Boxing', 'Boxing', 'boxing', NULL, NULL, 0, NULL, 'boxing', 'event_card', NULL, NULL, NULL, 'free', 1),
@@ -1426,6 +1481,37 @@ CREATE TABLE IF NOT EXISTS league_cache (
 CREATE INDEX IF NOT EXISTS idx_lc_sport ON league_cache(sport);
 CREATE INDEX IF NOT EXISTS idx_lc_provider ON league_cache(provider);
 
+-- =============================================================================
+-- Provider group cache (#91, epic y5l8): conferences/divisions from the ESPN
+-- core-API season tree. Refreshed alongside team cache. Framed generically as
+-- "provider groups" so pro divisions can ride the same tables later; currently
+-- populated for NCAA football/basketball only (ESPN has no conference data for
+-- other college sports).
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS provider_group_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,               -- 'espn'
+    league TEXT NOT NULL,                 -- league slug: 'college-football', 'mens-college-basketball'
+    group_key TEXT NOT NULL,              -- provider's stable group id (SEC=8, Big Ten=5, ...)
+    group_name TEXT NOT NULL,             -- 'Southeastern Conference'
+    group_abbrev TEXT,                    -- 'SEC' (core tree shortName)
+    season INTEGER,                       -- season year the tree was read from
+    last_refreshed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(provider, league, group_key)
+);
+
+CREATE TABLE IF NOT EXISTS provider_group_members (
+    group_cache_id INTEGER NOT NULL REFERENCES provider_group_cache(id) ON DELETE CASCADE,
+    provider_team_id TEXT NOT NULL,       -- joins team_cache.provider_team_id
+
+    UNIQUE(group_cache_id, provider_team_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pgc_league ON provider_group_cache(provider, league);
+CREATE INDEX IF NOT EXISTS idx_pgm_team ON provider_group_members(provider_team_id);
+
 
 -- =============================================================================
 -- CACHE_META TABLE
@@ -1460,7 +1546,7 @@ INSERT OR IGNORE INTO cache_meta (id) VALUES (1);
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS service_cache (
-    -- Cache key (e.g., "events:nfl:2026-01-06")
+    -- Cache key (e.g., "events_v2:nfl:2026-01-06:America/Detroit")
     cache_key TEXT PRIMARY KEY,
 
     -- Cached data (JSON serialized)
@@ -1765,11 +1851,13 @@ CREATE TABLE IF NOT EXISTS processing_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-    -- Run identification
-    run_type TEXT NOT NULL,  -- 'event_group', 'team_epg', 'batch', 'reconciliation', 'scheduler'
+    -- Run identification. One row per full generation ('full_epg'); per-group
+    -- sub-runs were retired in v90 (#645) — their breakdown lives in
+    -- extra_metrics.groups. group_id/team_id are legacy, always NULL.
+    run_type TEXT NOT NULL,
     run_id TEXT,             -- Optional unique run identifier (UUID)
-    group_id INTEGER,        -- For event_group runs
-    team_id INTEGER,         -- For team_epg runs
+    group_id INTEGER,
+    team_id INTEGER,
 
     -- Timing
     started_at TIMESTAMP NOT NULL,

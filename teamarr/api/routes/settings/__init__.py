@@ -14,6 +14,7 @@ from teamarr.config import get_ui_timezone_str, is_ui_timezone_from_env
 from teamarr.database import get_db
 from teamarr.database.settings import get_all_settings
 
+from .bullpen import router as bullpen_router
 from .channel_numbering import router as channel_numbering_router
 from .channelsdvr import router as channelsdvr_router
 from .database import router as database_router
@@ -26,6 +27,7 @@ from .jellyfin import router as jellyfin_router
 from .lifecycle import router as lifecycle_router
 from .models import (
     AllSettingsModel,
+    BullpenSettingsModel,
     ChannelNumberingSettingsModel,
     ChannelsDVRSettingsModel,
     DatabaseSettingsModel,
@@ -52,6 +54,7 @@ from .update_check import router as update_check_router
 router = APIRouter()
 
 # Include sub-routers
+router.include_router(bullpen_router)
 router.include_router(dispatcharr_router)
 router.include_router(emby_router)
 router.include_router(jellyfin_router)
@@ -93,6 +96,7 @@ def get_settings():
 __all__ = [
     "router",
     "AllSettingsModel",
+    "BullpenSettingsModel",
     "ChannelNumberingSettingsModel",
     "ChannelsDVRSettingsModel",
     "DatabaseSettingsModel",

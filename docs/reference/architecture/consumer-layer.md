@@ -114,6 +114,8 @@ Output includes: extracted team names, detected league/sport hints, card segment
 
 **Caching:** Fingerprint-based cache keyed by `hash(stream_name, group_id, generation)`. The generation counter increments per EPG run to bust stale cache entries.
 
+**Event prefetch:** Before matching a batch, `_prefetch_events` fetches every searched league across the whole match window (`-MATCH_WINDOW_DAYS` to `+days_ahead`) once, instead of per stream. It runs in three passes — plan every (league, date) cell, fill the cells that still need a service call, then assemble in league order. Network-bound fetches go out concurrently (up to `ESPN_MAX_WORKERS`, default 24 here); cache-only cells run inline because they never touch the network, and TSDB stays inline because its rate limiter sleeps under a lock, so concurrent callers would queue inside that sleep rather than overlap. Results land in `shared_events`, so later groups in the same run reuse them.
+
 ### EPG-title matching (`matching/epg_matcher.py`, `matching/epg_index.py`)
 
 For static-named linear channels (ESPN, NBA1) the stream name is unmatchable, but the Dispatcharr EPG guide carries the real matchup. When a group opts in, `StreamMatcher` augments name matching with EPG-title matching:
@@ -191,6 +193,8 @@ For EPG-matched linear streams, membership in a channel is **time-windowed** so 
 - `PersistentTTLCache` — in-memory during generation (fast), background flush to SQLite every 2 minutes
 - Provider selection by priority (ESPN → MLB Stats → HockeyTech → TSDB)
 - TTLs: 30 days for final events, 8h for schedules, 30m for live events, 24h for team info
+- **Date membership is decided at this seam** (#590): a requested date is the *user-local* day, converted once to a UTC window (`utilities/event_dates.py`) and applied to everything providers return. Providers never compare calendars themselves, so provider/UTC/venue date mismatches (UFC cards and race weekends spanning midnight, AFL's UTC+10 schedule, TSDB's UTC event dates) can't drop events. Event caches are keyed per user timezone (`events_v2:<league>:<date>:<tz>`).
+- **The superset the seam filters is built here, not by providers** (#601): server-side day-bucketed APIs (ESPN's scoreboard `?dates=`, MLB Stats) file each event under *their* calendar day and cannot honour a "return ±1 day" contract. `get_events` therefore fetches the provider-day buckets D-1, D, D+1 (`provider_day_buckets`) and unions them before filtering. Without it, a user far from the API's home region loses every evening kickoff at *every* lookahead — the event is filtered out of day D and never fetched under day D+1. Raw buckets get their own timezone-independent cache layer (`events_raw:<provider>:<league>:<date>`), so a contiguous run of N days costs N+2 provider calls rather than 3N.
 
 | Method | TTL | Description |
 |--------|-----|-------------|

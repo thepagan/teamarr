@@ -6,7 +6,7 @@ nav_order: 1
 
 # Supported Sports & Leagues
 
-Teamarr supports **170 pre-configured leagues** across 15 sports, plus **~228 dynamically discovered soccer leagues** from ESPN. Most pre-configured leagues have full support (team import + event matching) — see the Support Levels table below for the event-only exceptions. Discovered leagues support event matching only.
+Teamarr supports **174 pre-configured leagues** across 15 sports, plus **~228 dynamically discovered soccer leagues** from ESPN. Most pre-configured leagues have full support (team import + event matching) — see the Support Levels table below for the event-only exceptions. Discovered leagues support event matching only.
 
 ## Support Levels
 
@@ -26,12 +26,13 @@ Leagues have different levels of support:
 | Provider | Description |
 |----------|-------------|
 | **ESPN** | Primary provider for most US leagues and international soccer. Discovers ~228 soccer leagues dynamically. |
+| **Bell Media** | Canadian Football League via TSN's public sports widget API. |
 | **NASCAR** | NASCAR Cup, O'Reilly (Xfinity), and Truck series via the official cf.nascar.com schedule API. Full race-weekend sessions, no API key required. See [provider docs](providers/nascar). |
 | **MLB Stats API** | Minor League Baseball (MiLB) — Triple-A, Double-A, High-A, Single-A, Rookie |
 | **Squiggle** | AFL (Australian Football League). Free, no API key required. See [provider docs](providers/squiggle). |
 | **HockeyTech** | Canadian and US junior/minor hockey leagues (CHL, AHL, ECHL, PWHL, USHL, Junior A) |
 | **Supabase** | Supabase-backed leagues such as the Canadian Baseball League (CBL). No API key required. See [provider docs](providers/supabase). |
-| **TheSportsDB** | Rugby, cricket, boxing, CFL, Scandinavian leagues, and more. Free and [premium tiers](providers/tsdb.md). |
+| **TheSportsDB** | Rugby, cricket, boxing, Scandinavian leagues, and more. Free and [premium tiers](providers/tsdb.md). |
 
 ### TSDB Tier Legend
 
@@ -46,10 +47,12 @@ TSDB leagues are classified by tier. Most work on the free tier. Leagues marked 
 
 ## Football
 
+NCAA Football aggregates ESPN's FBS, FCS, lower-division, and cross-division fixtures.
+
 | League | ID | Provider |
 |--------|-----|----------|
 | National Football League | `nfl` | ESPN |
-| Canadian Football League | `cfl` | TSDB |
+| Canadian Football League | `cfl` | Bell Media |
 | NCAA Football | `ncaaf` | ESPN |
 | United Football League | `ufl` | ESPN |
 
@@ -116,6 +119,7 @@ TSDB leagues are classified by tier. Most work on the free tier. Leagues marked 
 | Alberta Junior Hockey League | `ajhl` | HockeyTech |
 | Manitoba Junior Hockey League | `mjhl` | HockeyTech |
 | Maritime Junior Hockey League | `mhl` | HockeyTech |
+| Greater Ontario Hockey League | `gohl` | HockeyTech |
 
 ### European
 
@@ -137,7 +141,9 @@ TSDB leagues are classified by tier. Most work on the free tier. Leagues marked 
 | Single-A (MiLB) | `milb-a` | MLB Stats |
 | Rookie (MiLB) | `rookie` | MLB Stats |
 | Canadian Baseball League | `cbl` | Supabase |
+| WPBL (Women's Pro Baseball) | `wpbl` | TSDB |
 | World Baseball Classic | `wbc` | ESPN |
+| Little League Baseball | `llb` | ESPN |
 | NCAA Baseball | `ncaabb` | ESPN |
 | NCAA Softball | `ncaasbw` | ESPN |
 
@@ -379,6 +385,7 @@ IPL, BBL, and SA20 are TSDB premium tier — a [premium API key](providers/tsdb.
 | Olympic Men's Rugby Sevens | `om7s` | ESPN |
 | Olympic Women's Rugby Sevens | `ow7s` | ESPN |
 | National Rugby League (Australia) | `nrl` | ESPN |
+| English Rugby League Super League | `super-league` | TSDB **P** |
 
 ---
 

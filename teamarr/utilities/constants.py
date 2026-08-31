@@ -182,6 +182,9 @@ TEAM_ALIASES: dict[str, str] = {
     "tamu cc": "texas a m corpus christi",
     "texas a&m-cc": "texas a m corpus christi",
     "texas a&m-corpus christi": "texas a m corpus christi",
+    # NCAA Football - provider abbreviations for lower-division teams
+    "northwestern college": "northwestern ia",
+    "south dakota school of mines": "south dakota mines",
 }
 
 
@@ -391,10 +394,19 @@ LEAGUE_HINT_PATTERNS: list[tuple[str, str | list[str]]] = [
     # ==========================================================================
     # Major US/Canadian Pro Leagues
     # ==========================================================================
+    (r"\batp[:\s-]", "atp"),
+    (r"\bwta[:\s-]", "wta"),
     (r"\bnfl[:\s-]", "nfl"),
     (r"\bnba[:\s-]", "nba"),
     (r"\bnhl[:\s-]", "nhl"),
     (r"\bmlb[:\s-]", "mlb"),
+    # LLB after MLB (#560): "MLB: Little League Classic" is an MLB game —
+    # the earlier MLB pattern must win. Bare "Little League" / LLWS streams
+    # would otherwise parse team abbreviations (MIL vs. LAD) straight into
+    # MLB matchups.
+    (r"\blittle league\b", "llb"),
+    (r"\bllws\b", "llb"),
+    (r"\bllb[:\s-]", "llb"),
     (r"\bmls[:\s-]", "usa.1"),
     (r"\bwnba[:\s-]", "wnba"),
     (r"\bnwsl[:\s-]", "usa.nwsl"),

@@ -218,7 +218,7 @@ class TestV73DeletesDuplicateLeagues:
         _run_migrations(conn)
 
         row = conn.execute("SELECT schema_version FROM settings WHERE id = 1").fetchone()
-        assert row["schema_version"] == 84
+        assert row["schema_version"] == 90
 
 
 class TestV73CleansTeamCache:
@@ -412,7 +412,7 @@ class TestV73MissingTablesGraceful:
         _run_migrations(conn)
 
         row = conn.execute("SELECT schema_version FROM settings WHERE id = 1").fetchone()
-        assert row["schema_version"] == 84
+        assert row["schema_version"] == 90
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +443,7 @@ class TestFreshInstall:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT schema_version FROM settings WHERE id = 1").fetchone()
-        assert row["schema_version"] == 84
+        assert row["schema_version"] == 90
 
 
 # ===========================================================================
@@ -717,14 +717,14 @@ def test_resolve_art_applies_base_uniformly(monkeypatch):
 
     r = TemplateResolver("http://host:4999")
     # relative -> base prefixed
-    monkeypatch.setattr(r, "resolve", lambda t, c: "/nba/cover.png")
+    monkeypatch.setattr(r, "resolve", lambda t, c, variables=None: "/nba/cover.png")
     assert r.resolve_art("x", None) == "http://host:4999/nba/cover.png"
     # absolute -> passthrough (idempotent; another sink can't double-apply)
-    monkeypatch.setattr(r, "resolve", lambda t, c: "http://other:9196/c.png")
+    monkeypatch.setattr(r, "resolve", lambda t, c, variables=None: "http://other:9196/c.png")
     assert r.resolve_art("x", None) == "http://other:9196/c.png"
     # no base -> unchanged
     r2 = TemplateResolver("")
-    monkeypatch.setattr(r2, "resolve", lambda t, c: "/nba/cover.png")
+    monkeypatch.setattr(r2, "resolve", lambda t, c, variables=None: "/nba/cover.png")
     assert r2.resolve_art("x", None) == "/nba/cover.png"
 
 
@@ -1269,7 +1269,7 @@ class TestV82ChannelsDVRServersList:
         row = conn.execute(
             "SELECT schema_version, channelsdvr_servers FROM settings WHERE id = 1"
         ).fetchone()
-        assert row["schema_version"] == 84
+        assert row["schema_version"] == 90
         servers = json.loads(row["channelsdvr_servers"])
         assert servers == [
             {
@@ -1288,7 +1288,7 @@ class TestV82ChannelsDVRServersList:
         row = conn.execute(
             "SELECT schema_version, channelsdvr_servers FROM settings WHERE id = 1"
         ).fetchone()
-        assert row["schema_version"] == 84
+        assert row["schema_version"] == 90
         assert row["channelsdvr_servers"] is None
 
     def test_settings_roundtrip_servers_list(self, db_conn):

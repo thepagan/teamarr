@@ -74,6 +74,9 @@ class GenerationResult:
     jellyfin_refresh: dict = field(default_factory=dict)
     channelsdvr_refresh: dict = field(default_factory=dict)
     channelsdvr_epg_refresh: dict = field(default_factory=dict)
+    # One entry per media server refreshed this run (#649): persisted on the
+    # run row so a server that fails every run is visible after the fact.
+    media_server_outcomes: list[dict] = field(default_factory=list)
 
     # For stats run tracking
     run_id: int | None = None
@@ -360,6 +363,11 @@ def run_full_generation(
             progress_callback=group_progress,
             generation=current_generation,  # Share generation across all groups
             service=shared_service,  # Reuse service to maintain warm cache
+            # Step 4 below re-reads team AND group XMLTV and merges the lot;
+            # aggregating the group half here would parse and serialize the
+            # whole guide a second time for a value nothing reads.
+            aggregate_xmltv=False,
+            run_id=stats_run.id,  # Details + per-group breakdown key on this run (#645)
         )
         result.groups_processed = group_result.groups_processed
         result.groups_programmes = group_result.total_programmes
@@ -474,6 +482,8 @@ def run_full_generation(
             if channelsdvr_settings.enabled:
                 jobs += [("channelsdvr", s) for s in channelsdvr_settings.servers if s.url]
 
+            if jobs and _dry_run_media_refresh(result, jobs):
+                jobs = []
             if jobs:
                 update_progress(
                     "media_servers", 97,
@@ -482,6 +492,9 @@ def run_full_generation(
                 outcomes = _run_media_server_refreshes(
                     jobs, update_progress, is_cancellation_requested
                 )
+                result.media_server_outcomes = [
+                    _media_server_outcome(kind, label, o) for kind, label, o in outcomes
+                ]
 
                 emby_results = [
                     {"server": label, **o["guide"]}
@@ -649,6 +662,36 @@ def run_full_generation(
     return result
 
 
+def _dry_run_media_refresh(result: Any, jobs: list[tuple[str, Any]]) -> bool:
+    """DRY_RUN (#554): record what would have been refreshed, run nothing.
+
+    Returns True when dry-run is active (caller skips the refresh jobs).
+    """
+    from teamarr.config.runtime import dry_run
+
+    if not dry_run():
+        return False
+    by_kind: dict[str, list[str]] = {}
+    for kind, server in jobs:
+        by_kind.setdefault(kind, []).append(getattr(server, "url", None) or str(server))
+    for kind, urls in by_kind.items():
+        logger.info("[DRY_RUN] Suppressed %s guide refresh for %s", kind, ", ".join(urls))
+        payload = {"success": True, "dry_run": True, "servers": urls}
+        result.media_server_outcomes += [
+            {"kind": kind, "server": u, "success": True, "duration": 0.0, "error": None,
+             "dry_run": True}
+            for u in urls
+        ]
+        if kind == "emby":
+            result.emby_refresh = payload
+        elif kind == "jellyfin":
+            result.jellyfin_refresh = payload
+        elif kind == "channelsdvr":
+            result.channelsdvr_refresh = payload
+            result.channelsdvr_epg_refresh = dict(payload)
+    return True
+
+
 def _run_media_server_refreshes(
     jobs: list[tuple[str, Any]],
     update_progress: Callable[..., None],
@@ -692,6 +735,23 @@ def _run_media_server_refreshes(
                     (kind, label, {"guide": {"success": False, "error": str(e)}})
                 )
     return results
+
+
+def _media_server_outcome(kind: str, label: str, outcome: dict) -> dict:
+    """Flatten one server's refresh result for the run row (#649).
+
+    Channels DVR has two steps (m3u + epg); it counts as a success only when
+    both did, and reports the first error.
+    """
+    parts = [v for v in (outcome.get("guide"), outcome.get("m3u"), outcome.get("epg")) if v]
+    errors = [p.get("error") or p.get("message") for p in parts if not p.get("success")]
+    return {
+        "kind": kind,
+        "server": label,
+        "success": bool(parts) and all(p.get("success") for p in parts),
+        "duration": round(sum(float(p.get("duration") or 0) for p in parts), 2),
+        "error": errors[0] if errors else None,
+    }
 
 
 def _refresh_one_media_server(
@@ -1328,13 +1388,19 @@ def _finalize_stats_run(
     stats_run.programmes_postgame = team_result.total_postgame + group_result.total_postgame
     stats_run.programmes_idle = team_result.total_idle
     stats_run.channels_created = group_result.total_channels_created
+    stats_run.channels_updated = group_result.total_channels_updated
+    stats_run.channels_skipped = group_result.total_channels_skipped
+    stats_run.channels_errors = group_result.total_channel_errors
     stats_run.channels_deleted = channels_deleted_count + group_result.total_channels_deleted
     stats_run.xmltv_size_bytes = result.file_size
     stats_run.streams_fetched = group_result.total_streams_fetched
     stats_run.streams_matched = group_result.total_streams_matched
     stats_run.streams_unmatched = group_result.total_streams_unmatched
+    stats_run.streams_cached = group_result.total_streams_cached
     stats_run.extra_metrics["teams_processed"] = result.teams_processed
     stats_run.extra_metrics["groups_processed"] = result.groups_processed
+    # Per-group breakdown (#645): replaces the old one-row-per-group sub-runs.
+    stats_run.extra_metrics["groups"] = group_result.group_summaries()
     stats_run.extra_metrics["file_written"] = result.file_written
 
     # Post-processing enforcement outcomes (iua3.7): one record per step with
@@ -1352,6 +1418,11 @@ def _finalize_stats_run(
 
     stats_run.extra_metrics["provider_calls"] = call_metrics.snapshot()
     stats_run.extra_metrics["provider_calls_total"] = call_metrics.total()
+
+    # Media-server refresh outcomes (#649): non-blocking failures otherwise
+    # leave no trace beyond a phase timing collapsing to ~0.
+    if result.media_server_outcomes:
+        stats_run.extra_metrics["media_servers"] = list(result.media_server_outcomes)
 
     # Per-phase wall time so run-to-run comparisons (and perf regressions)
     # are visible in the run summary instead of requiring log archaeology.

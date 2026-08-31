@@ -43,11 +43,11 @@ Schema changes use the [checkpoint + incremental migration](migrations) system. 
 | `stream_match_cache` | Fingerprint cache for stream matching |
 | `processing_runs` | EPG generation run statistics (28 columns) |
 
-The schema contains **34 tables** in total; the table above shows the core subset. Other notable tables: `managed_channel_streams` (time-windowed stream membership), `epg_matched_streams`, `epg_failed_matches`, `match_corrections`, `subscription_league_config`, `channel_sort_priorities`, `lifetime_stats`, `stats_snapshots`, `league_overrides`, `team_epg_xmltv`, `event_epg_xmltv`.
+The schema contains **35 tables** in total; the table above shows the core subset. Other notable tables: `managed_channel_streams` (time-windowed stream membership), `epg_matched_streams`, `epg_failed_matches`, `match_corrections`, `subscription_league_config`, `channel_sort_priorities`, `numbering_exceptions` (pinned blocks, #333), `lifetime_stats`, `stats_snapshots`, `league_overrides`, `team_epg_xmltv`, `event_epg_xmltv`.
 
 ## Settings Table
 
-The settings table is a single row with 123 columns, organized into these groups (a sample of columns per group is shown):
+The settings table is a single row with 133 columns, organized into these groups (a sample of columns per group is shown):
 
 ### Lookahead Windows
 
@@ -72,11 +72,12 @@ The settings table is a single row with 123 columns, organized into these groups
 
 | Column | Default | Description |
 |--------|---------|-------------|
-| `global_channel_mode` | `auto` | `auto` or `manual` |
-| `channel_range_start` | 101 | First channel number |
+| `channel_range_start` | 101 | First channel number of the default lane (everything not pinned) |
 | `channel_range_end` | null | Last number (null = no limit) |
-| `channel_numbering_mode` | `strict_block` | `strict_block`, `rational_block`, or `strict_compact` |
-| `league_channel_starts` | JSON | Per-league starting numbers (manual mode) |
+| `channel_stability_mode` | `compact` | `compact`, `gap`, or `strict` — applied inside every lane |
+| `channel_gap_size` | 3 | Spacing between events in `gap` mode |
+| `global_channel_mode` | `auto` | Always `auto` since v88 (manual mode retired, #333); kept one release for rollback |
+| `league_channel_starts` | JSON | Legacy manual-mode starts, migrated to `numbering_exceptions` in v88; no longer read |
 
 ### Sport Durations (hours)
 
@@ -105,6 +106,21 @@ The settings table is a single row with 123 columns, organized into these groups
 | `default_channel_profile_ids` | JSON | Default channel profiles |
 | `default_stream_profile_id` | null | Default stream profile |
 
+### Bullpen Proxy
+
+| Column | Default | Description |
+|--------|---------|-------------|
+| `bullpen_enabled` | 0 | Master switch for the [bullpen](../providers/bullpen) proxy |
+| `bullpen_api_key` | null | Sent as `X-Bullpen-Key` on proxied requests |
+| `bullpen_base_url` | `https://bullpen.direct` | Proxy base URL |
+| `bullpen_espn_enabled` | 0 | Route ESPN requests through bullpen |
+| `bullpen_bellmedia_enabled` | 0 | Route Bell Media CFL requests through bullpen |
+| `bullpen_squiggle_enabled` | 0 | Route Squiggle requests through bullpen |
+| `bullpen_nascar_enabled` | 0 | Route NASCAR requests through bullpen |
+| `bullpen_mlbstats_enabled` | 0 | Route MLB Stats requests through bullpen |
+| `bullpen_hockeytech_enabled` | 0 | Route HockeyTech requests through bullpen |
+| `bullpen_tsdb_enabled` | 0 | Route TheSportsDB requests through bullpen; also makes `is_premium` report `True` |
+
 ## Database Modules
 
 22 top-level Python modules plus 3 subpackages (`channels/`, `migrations/`, `settings/`) in `teamarr/database/`:
@@ -119,7 +135,7 @@ The settings table is a single row with 123 columns, organized into these groups
 | `templates.py` | Template CRUD |
 | `default_templates.py` | Default template seeding |
 | `leagues.py` | League queries, sport lookup, league ID resolution |
-| `settings/` | Settings package (`AllSettings` dataclass with 18 sub-groups; `types.py`, `registry.py`, `read.py`, `update.py`) |
+| `settings/` | Settings package (`AllSettings` dataclass with 19 sub-groups; `types.py`, `registry.py`, `read.py`, `update.py`) |
 | `channels/` | Managed channel package: channel CRUD, history, stream membership (`streams.py`) |
 | `channel_numbers.py` | Channel allocation algorithm |
 | `stats.py` | Processing run tracking (`processing_runs`, 28 columns) |
@@ -139,19 +155,15 @@ The settings table is a single row with 123 columns, organized into these groups
 
 ## Channel Numbering Algorithm
 
-`channel_numbers.py` provides three numbering modes:
+`channel_numbers.py` numbers channels inside **lanes**: one per pinned block
+(`numbering_exceptions` — a team, league, or sport pin, most specific wins) plus
+the default lane (the global range). The stability mode (`compact` / `gap` /
+`strict`, with sticky locks and the daily re-layout) is applied inside each lane
+over a shared set of used numbers, so blocks spill forward rather than collide.
+External Dispatcharr channel numbers are always skipped.
 
-| Mode | Behavior |
-|------|----------|
-| `strict_block` | Fixed blocks per league with gaps between. Predictable but wastes numbers. |
-| `rational_block` | Like strict_block but tightens gaps. More efficient. |
-| `strict_compact` | No gaps, sequential assignment. Most efficient but numbers shift when channels change. |
-
-The allocator respects:
-- Global range (`channel_range_start` to `channel_range_end`)
-- Per-league starting numbers (manual mode)
-- External occupied numbers (non-Teamarr channels in Dispatcharr)
-- Sort scope (`per_group` or `global`)
+See [Channel Numbering](channel-numbering) for the model, precedence rules, and
+the v88 migration from manual mode.
 
 ## File Locations
 
