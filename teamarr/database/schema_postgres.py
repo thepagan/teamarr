@@ -272,8 +272,25 @@ def _rewrite_top_level_value_tuples(
 ) -> str:
     output: list[str] = []
     i = 0
+    in_line_comment = False
 
     while i < len(values_sql):
+        char = values_sql[i]
+        next_char = values_sql[i + 1] if i + 1 < len(values_sql) else ""
+
+        if in_line_comment:
+            output.append(char)
+            if char == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if char == "-" and next_char == "-":
+            output.extend((char, next_char))
+            in_line_comment = True
+            i += 2
+            continue
+
         if values_sql[i] != "(":
             output.append(values_sql[i])
             i += 1
@@ -283,10 +300,22 @@ def _rewrite_top_level_value_tuples(
         depth = 0
         in_single = False
         in_double = False
+        in_line_comment = False
 
         while i < len(values_sql):
             char = values_sql[i]
             next_char = values_sql[i + 1] if i + 1 < len(values_sql) else ""
+
+            if in_line_comment:
+                if char == "\n":
+                    in_line_comment = False
+                i += 1
+                continue
+
+            if not in_single and not in_double and char == "-" and next_char == "-":
+                in_line_comment = True
+                i += 2
+                continue
 
             if char == "'" and not in_double:
                 if in_single and next_char == "'":
