@@ -6,7 +6,7 @@ Sports EPG generator. Uses **bd (beads)** for issue tracking. Start with `bd rea
 
 ## Support Bundle Contract
 
-When changing support-bundle schemas, archive layout, collection limits, redaction, or signal codes, update the implementation, tests, user documentation, bundled `AGENTS.md`, and this instruction in the same change. Never add a generic database dump or relax exclusions for stream URLs, M3U account names, credentials, or tokens without an explicit security decision.
+When changing support-bundle schemas, archive layout, collection limits, redaction, or signal codes, update the implementation, tests, user documentation, bundled `AGENTS.md`, and this instruction in the same change. Never add a generic database dump or relax exclusions for stream URLs, M3U account names, credentials, or tokens without an explicit security decision. Redaction is key-name based and recurses into JSON-typed columns (`emby_servers`, `jellyfin_servers`, …) — a new column that stores nested credentials as text is covered only because `_sanitize` parses JSON strings (#686); never bypass that path.
 
 ## CRITICAL: Database Safety
 
@@ -234,7 +234,7 @@ Documentation epic: `bd list --parent teamarrv2-nv4`
 | Version | `pyproject.toml` line 7 |
 | Dependencies | `pyproject.toml` (ranges) + `uv.lock` (pinned, used by the Docker build) — run `uv lock` after any dependency change or `--frozen` builds fail |
 | League configs | `teamarr/database/schema.sql` |
-| Schema version | `teamarr/database/schema.sql` (v90) |
+| Schema version | `teamarr/database/schema.sql` (v92) |
 | Schema reconciliation | `teamarr/database/reconciliation.py` |
 | Provider registration | `teamarr/providers/__init__.py` |
 
@@ -255,7 +255,7 @@ Provider Layer   → teamarr/providers/ (espn, bellmedia, squiggle, nascar, mlbs
 - MLB Stats (40) - MiLB (Triple-A through Rookie)
 - HockeyTech (50) - CHL, AHL, PWHL, USHL
 - Supabase (55) - Supabase-backed leagues (CBL, etc.)
-- TSDB (100) - Cricket, rugby, boxing, Scandinavian leagues, uru.2
+- TSDB (100) - Cricket, rugby, boxing, Scandinavian leagues, uru.2 — premium key required (#676); keyless = provider not registered
 
 **Dispatcharr Sync Reliability** (`lifecycle/service.py`):
 All `update_channel` calls go through `_safe_update_channel`, which checks `OperationResult.success` before persisting to local DB. On API failure, the DB stays unchanged so drift is re-detected on the next generation run. Profile sync also compares against Dispatcharr's actual state (`current_channel.channel_profile_ids`) for self-healing. Reconciliation (`reconciliation.py`) detects stream and profile drift as additional drift fields.
@@ -263,7 +263,7 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 ## Key Subsystems
 
 **Template Engine** (`teamarr/templates/`):
-- 252 variables in `variables/` (20 categories); chainable `|filter` transforms in `filters.py` (lower/upper/title/pascal/slug/urlencode) with permanent legacy aliases for 10 retired transform variables
+- 258 variables in `variables/` (20 categories); chainable `|filter` transforms in `filters.py` (lower/upper/title/pascal/slug/urlencode) with permanent legacy aliases for 10 retired transform variables
 - 33 condition evaluators in `conditions.py`
 - Suffix rules: `.next`, `.last` for multi-game scenarios
 - Template scope: each variable is tagged `TemplateScope.ALL` / `TEAM_ONLY` / `EVENT_ONLY` — gates variable picker by template type via `GET /variables?template_type=…`
@@ -294,6 +294,7 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 - `residual_contradicts` is the fallback for unresolvable names — generalizes `_short_name_leg_is_safe` (#569) to the full-name leg, ignoring non-discriminating residuals (club suffixes, ≤2-char noise) so "us seattle sounders a" still reaches the Sounders.
 - Measured in `tests/matching/test_fixture_corpus.py`: **0 false vetoes / 200**, **322/322 crosstalk rejected**. Regenerate the corpus with `tests/matching/corpus/build_corpus.py`.
 - **Tennis gate (#283, `tennis_matcher.py`)** — same veto-only shape, no alias table: a stream that names a pooled tournament (distinctive ESPN name tokens; generic open/cup/masters ignored) vetoes candidates from other tournaments → `FailedReason.TENNIS_TOURNAMENT_MISMATCH`; a stream naming none defers. Keyed on `Event.tournament_id` (season-stable ESPN id, threaded through both caches). Draw shape is validated per side: doubles pairs (`abbreviation` "A/B") match exact-only because `token_set_ratio("sinner", "Sinner/Sonego")` = 100, and a side written as a pair (`/`, `&`) never matches a singles player; `_` defers. Tournament tier selection beyond majors/all and include/exclude lists were deliberately rejected (maintenance).
+- **Per-court feeds (#689, US Open 2026 live data).** ESPN+ carries a slam as one stream per court with nothing else in the name (`ESPN+ 17: Arthur Ashe Stadium @ Sep 01 11:30AM ET`); TSN+ as `US Open: Day #1 - Court 7 (ft. …)` (and `Louis Armstong Stadium`, sic). Three stacked causes, all fixed: (1) `_COURT_PATTERNS` knew only Wimbledon shapes — named show courts (`ashe`/`armstrong`/`grandstand`) and `Stadium N` → `N` added, keys shared with ESPN's `venue.court`; (2) mixed groups never reached the tennis path — `_try_mixed_group_fallbacks` (racing, then tennis) runs after a failed primary route when the group has a tennis league and the text names a **court** (never a round: "final" is everywhere), then `match_feed` still has to join that court on the day's slate; the EPG path gates on `names_tournament` and `match_program` still demands pair-or-court; (3) the normalizer's reversed `DD @ Mon` pattern ate `Court 12 @ Sep 01` as Sep 12 — it now yields when the month is followed by its own day number. Also fixed: `_named_tournaments` reduced "US Open" to the lone token `us`, so every `US:`-prefixed stream vetoed all other tournaments — distinctive tokens are ≥3 chars, or the full name as a phrase.
 
 **EPG Program Matching** (epic `teamarrv2-183`, `teamarr/consumers/matching/epg_*.py`):
 - Matches static-named linear channels (ESPN, FS1) to events via Dispatcharr's program guide (`GET /api/epg/programs/search/`, feature-detected, Dispatcharr 0.24.0+), then time-shares one stream across many event channels (attach/detach window per program).
@@ -305,7 +306,7 @@ All `update_channel` calls go through `_safe_update_channel`, which checks `Oper
 - Tennis programmes (mf7.9, #642): `TennisMatcher.match_program` — binds only with a tournament clue AND (player pair OR court) from title|sub_title|description; pair → one match, court → that court's matches inside the programme slot; otherwise `FailedReason.TENNIS_MATCHUP_UNKNOWN`, surfaced on the linear stream's result via `_epg_tennis_unknown` in `_reconcile_epg`. Never a tournament-wide fan-out (the 2026-07-05 regression).
 - Docs: `docs/guide/matching/program-matching.md`.
 
-**Failure taxonomy** (`epg_failed_matches.reason`, #661/#662): a real `FailedReason` value, or a prefixed verdict — `filtered:<FilteredReason>` (not_event, league_not_included, regex, stale) and `skipped:<exclusion>` (unclassifiable linear names, name_match_disabled, team_streams_disabled). Bare `"unmatched"` is the unreachable last resort. `candidates_gated` = every candidate was skipped before scoring (search window / EPG anchor / sport hint); `no_event_found` = candidates were scored and none cleared the floor. `detail` carries the near-miss summary over *scored* candidates only; `exclusion_reason` rides alongside. Frontend labels: `RunHistoryTable.tsx::getFailedReasonLabel`.
+**Failure taxonomy** (`epg_failed_matches.reason`, #661/#662/#683): a real `FailedReason` value, or a prefixed verdict — `filtered:<FilteredReason>` (not_event, league_not_included, regex, stale) and `skipped:<exclusion>` (unclassifiable linear names, name_match_disabled, team_streams_disabled). Bare `"unmatched"` is the unreachable last resort. EPG-path misses (#683): a linear stream whose guide programmes were attempted but bound nothing gets `no_epg_program_match` with a programme summary in `detail` (counts + sample titles, recorded per tvg_id in `_compute_epg_plan`, applied in `_reconcile_epg`); tennis-unknown sets `tennis_matchup_unknown` as a real reason now (the old exclusion_reason overwrite persisted as bare unmatched). A specific name-path verdict is never overridden. `candidates_gated` = every candidate was skipped before scoring (search window / EPG anchor / sport hint); `no_event_found` = candidates were scored and none cleared the floor. `detail` carries the near-miss summary over *scored* candidates only; `exclusion_reason` rides alongside. Frontend labels: `RunHistoryTable.tsx::getFailedReasonLabel`.
 
 ## Plans & Roadmap
 

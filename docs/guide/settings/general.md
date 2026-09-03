@@ -11,7 +11,7 @@ System-level configuration: time, scheduled generation, the TheSportsDB API key,
 
 ![Settings → General — timezones, formatting, and the generation schedule](../../assets/images/settings-general.png)
 
-## Time / Localization
+## Localization
 
 Teamarr uses two timezones — they can differ on purpose (browse in your local time while your media server expects EPG in its own timezone):
 
@@ -30,6 +30,33 @@ environment:
 
 - **Time format** — 12-hour (`3:45 PM`) or 24-hour (`15:45`). Applies to both the UI and EPG output.
 - **Show timezone abbreviation** — toggle whether abbreviations (EST, PST, …) appear alongside times.
+
+### Sport Naming
+
+Choose the vocabulary Teamarr uses for the two sports whose names differ by region:
+
+| Setting | Association football | Gridiron |
+|---------|----------------------|----------|
+| **US** (default) | Soccer | Football |
+| **International** | Football | American Football |
+
+The choice applies everywhere a sport is named from data: the `{sport}` template variable, the `{sport}` wildcard in Dispatcharr channel-group and profile patterns, and sport labels throughout this interface. It does not change stream matching (stream names are matched on both words already), the **soccer mode** subscription setting, or the names of the starter templates.
+
+Switching the setting renames any Dispatcharr channel group built from `{sport}` on the next generation: with **International**, NFL channels move to a new "American Football" group and the existing "Football" group becomes association football.
+
+### Matchup Order
+
+Which team is named first in a matchup:
+
+| Setting | Behaviour |
+|---------|-----------|
+| **Auto** (default) | The sport's convention: visitor first for football, basketball, baseball and hockey (`Bears @ Lions`); home first for soccer, rugby, cricket and Australian football (`Ipswich Town v Liverpool`). Neutral-site games read `v`. |
+| **Away first** | Always visitor first |
+| **Home first** | Always home first |
+
+The setting governs the order-aware variables only: `{matchup}`, `{matchup_short}`, `{matchup_abbrev}`, and `{team1}`/`{team2}` with their `_short` and `_abbrev` forms. The starter templates use these, so switching the setting changes their subtitles and channel names on the next generation. Text you have typed yourself as `{away_team} vs {home_team}` keeps that order; use `{team1} {at_vs} {team2}` instead if you want it to follow the setting.
+
+Override the order for one league on the [per-league table](../channels/output.md#per-league-overrides) under Channels → Dispatcharr Output.
 
 ## Schedule
 
@@ -56,16 +83,9 @@ Manually trigger a full generation run without waiting for the schedule.
 
 ## TheSportsDB API Key
 
-Optional premium API key for TheSportsDB — used for TSDB league coverage, adding [Custom Leagues](../subscriptions#custom-leagues) (a premium key is the gate for that whole feature), and higher rate limits.
+**Required for every TheSportsDB-sourced league.** TheSportsDB's free tier was deprecated in v2.15 — without a key, TSDB leagues produce no events and no team channels, the league picker crowns them, and a startup log lists any subscribed ones. The same key gates [Custom Leagues](../subscriptions#custom-leagues). A premium key is ~$9/month (100 req/min, full event coverage + team schedules) — get one at [thesportsdb.com/pricing](https://www.thesportsdb.com/pricing).
 
-| Tier | Rate Limit | Coverage |
-|------|------------|----------|
-| **Free** | 30 req/min | Rolling single next/last game per league; no team schedules |
-| **Premium** | 100 req/min | Full event coverage + team schedules |
-
-A handful of TSDB leagues (CFL, Unrivaled, boxing, Norwegian Fjordkraft-ligaen, WPBL) are classified free-tier: without a key their games still appear via event-source channels, but only as each becomes the league's next game (short lead time), and **team channels stay empty without a premium key**. Most TSDB-sourced leagues are premium-tier — the crown icon in the league picker is the authoritative marker, and [Supported Leagues](../../reference/supported-leagues) lists tiers per league. See [TSDB free-tier details](../../reference/providers/tsdb#how-the-free-tier-actually-behaves-in-teamarr). Get a key at [thesportsdb.com/pricing](https://www.thesportsdb.com/pricing).
-
-A saved key displays masked (`********`); type over it to replace it. The **Premium** badge in the card header only means a key is stored — it isn't a validated tier. To actually verify a key, **retype it and click Validate**, which tests it against TSDB live and reports the real tier (clicking Validate on the masked placeholder will report invalid).
+A saved key displays masked (`********`); type over it to replace it. The **Configured** badge in the card header only means a key is stored — it isn't validated. To actually verify a key, **retype it and click Validate**, which tests it against TSDB live (clicking Validate on the masked placeholder will report invalid).
 
 See [TSDB Provider](../../reference/providers/tsdb) for technical details.
 

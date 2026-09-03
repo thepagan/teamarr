@@ -267,6 +267,8 @@ class DisplaySettingsModel(BaseModel):
 
     time_format: str = "12h"
     show_timezone: bool = True
+    sport_naming: str = "us"  # 'us' | 'international' (#691)
+    matchup_order: str = "auto"  # 'auto' | 'away_first' | 'home_first' (#692)
     channel_id_format: str = "{team_name|pascal}.{league_id}"
     xmltv_generator_name: str = "Teamarr"
     xmltv_generator_url: str = "https://github.com/Pharaoh-Labs/teamarr"
@@ -285,10 +287,13 @@ class TSDBKeyValidationRequest(BaseModel):
 
 
 class TSDBKeyValidationResponse(BaseModel):
-    """Response from TSDB API key validation."""
+    """Response from TSDB API key validation.
+
+    TSDB is premium-key only (#676): validity is the only signal, the old
+    is_premium flag is gone.
+    """
 
     valid: bool
-    is_premium: bool = False
     message: str
 
 # =============================================================================
@@ -665,45 +670,31 @@ class ChannelsDVRLineupsResponse(BaseModel):
 
 
 # =============================================================================
-# BULLPEN SETTINGS
+# PROVIDER PROXY SETTINGS
 # =============================================================================
 
 
-class BullpenSettingsModel(BaseModel):
-    """Bullpen proxy settings (https://bullpen.direct)."""
+class ProxySettingsModel(BaseModel):
+    """SOCKS5 policy for provider upstream requests."""
 
     enabled: bool = False
-    api_key: str | None = None
-    base_url: str = "https://bullpen.direct"
-    disabled_reason: str | None = None
-    disabled_at: str | None = None
-    espn_enabled: bool = False
-    bellmedia_enabled: bool = False
-    squiggle_enabled: bool = False
-    nascar_enabled: bool = False
-    mlbstats_enabled: bool = False
-    hockeytech_enabled: bool = False
-    tsdb_enabled: bool = False
+    url: str | None = None
+    user_agent: str | None = None
+    excluded_providers: list[str] = []
 
-    @field_serializer("api_key")
+    @field_serializer("url")
     @classmethod
-    def _mask_api_key(cls, v: str | None) -> str | None:
+    def _mask_url(cls, v: str | None) -> str | None:
         return MASKED_SECRET if v else None
 
 
-class BullpenSettingsUpdate(BaseModel):
-    """Update model for bullpen settings (all fields optional)."""
+class ProxySettingsUpdate(BaseModel):
+    """Update model for provider SOCKS5 settings (all fields optional)."""
 
     enabled: bool | None = None
-    api_key: str | None = None
-    base_url: str | None = None
-    espn_enabled: bool | None = None
-    bellmedia_enabled: bool | None = None
-    squiggle_enabled: bool | None = None
-    nascar_enabled: bool | None = None
-    mlbstats_enabled: bool | None = None
-    hockeytech_enabled: bool | None = None
-    tsdb_enabled: bool | None = None
+    url: str | None = None
+    user_agent: str | None = None
+    excluded_providers: list[str] | None = None
 
 
 # =============================================================================
@@ -730,7 +721,7 @@ class AllSettingsModel(BaseModel):
     emby: EmbySettingsModel = EmbySettingsModel()
     jellyfin: JellyfinSettingsModel = JellyfinSettingsModel()
     channelsdvr: ChannelsDVRSettingsModel = ChannelsDVRSettingsModel()
-    bullpen: BullpenSettingsModel = BullpenSettingsModel()
+    proxy: ProxySettingsModel = ProxySettingsModel()
     epg_generation_counter: int = 0
     schema_version: int = 44
 

@@ -14,9 +14,7 @@ from unittest.mock import MagicMock
 import httpx
 
 from teamarr.consumers.cache.refresh import CacheRefresher
-from teamarr.providers.base_client import BullpenConfig
 from teamarr.providers.registry import ProviderConfig, ProviderRegistry
-from teamarr.providers.tsdb import client as tsdb_client
 from teamarr.providers.tsdb.client import TSDBClient
 from teamarr.providers.tsdb.provider import TSDBProvider
 from teamarr.providers.tsdb.racing import parse_racing_events
@@ -312,40 +310,27 @@ class TestDisplaySettingsReloadIntegration:
         assert "unmask_or_skip(update.tsdb_api_key) is not None" in source
 
 
-def test_bullpen_settings_reinitialize_all_proxied_providers():
+def test_proxy_settings_reinitialize_registered_providers():
     import inspect
 
-    from teamarr.api.routes.settings.bullpen import update_bullpen_settings
+    from teamarr.api.routes.settings.proxy import update_proxy_settings
 
-    source = inspect.getsource(update_bullpen_settings)
-    for provider in (
-        "espn",
-        "bellmedia",
-        "squiggle",
-        "nascar",
-        "mlbstats",
-        "hockeytech",
-        "tsdb",
-    ):
-        assert f'"{provider}"' in source
+    source = inspect.getsource(update_proxy_settings)
+    assert "ProviderRegistry.provider_names()" in source
 
 
 # ===========================================================================
-# Premium-league cache prewarm gating
+# Premium-only provider gating (#676)
 # ===========================================================================
-# TSDB premium-league gating in the startup cache prewarm (epic 46y3).
-#
-# Without a TSDB premium key, the cache build must NOT roll premium-only TSDB
-# leagues into the team/league directory — otherwise it wastes free-tier calls on
-# data it can't fully fetch. Once a premium key is configured the provider reports
-# is_premium and every league is fetched again.
+# TSDB requires a premium key. Keyless, the provider reports
+# is_configured=False and ProviderRegistry skips it entirely — no requests,
+# no per-league tier gate (the free tier and tsdb_tier are gone). With a
+# key, every TSDB league is fetched.
 
 
 SCHEMA = SCHEMA_PATH
 
-# From schema.sql leagues table (tsdb_tier).
-PREMIUM = ["ipl", "sa20", "uru.2"]
-FREE = ["boxing"]
+TSDB_LEAGUES = ["ipl", "sa20", "uru.2", "boxing"]
 
 
 def _db() -> sqlite3.Connection:
@@ -368,8 +353,8 @@ class _FakeTSDB:
 
     name = "tsdb"
 
-    def __init__(self, *, is_premium: bool, leagues: list[str]):
-        self.is_premium = is_premium
+    def __init__(self, *, is_configured: bool, leagues: list[str]):
+        self.is_configured = is_configured
         self._leagues = leagues
         self.fetched: set[str] = set()
         self._lock = threading.Lock()
@@ -386,36 +371,50 @@ class _FakeTSDB:
         return []
 
 
-def test_premium_tsdb_leagues_skipped_without_key():
-    conn = _db()  # schema default: no premium key
+def test_unconfigured_provider_skipped_by_registry():
+    """Keyless TSDB is invisible to consumers: get()/get_all() skip it."""
+    prov = _FakeTSDB(is_configured=False, leagues=TSDB_LEAGUES)
+    config = ProviderConfig(
+        name="tsdb_test", provider_class=MagicMock, factory=lambda: prov, priority=100
+    )
+    ProviderRegistry._providers["tsdb_test"] = config
+    try:
+        assert ProviderRegistry.get("tsdb_test") is None
+        assert prov not in ProviderRegistry.get_all()
+        assert ProviderRegistry.is_provider_premium("tsdb_test") is False
+    finally:
+        ProviderRegistry._providers.pop("tsdb_test", None)
+
+
+def test_configured_provider_visible_and_premium():
+    prov = _FakeTSDB(is_configured=True, leagues=TSDB_LEAGUES)
+    config = ProviderConfig(
+        name="tsdb_test", provider_class=MagicMock, factory=lambda: prov, priority=100
+    )
+    ProviderRegistry._providers["tsdb_test"] = config
+    try:
+        assert ProviderRegistry.get("tsdb_test") is prov
+        assert prov in ProviderRegistry.get_all()
+        assert ProviderRegistry.is_provider_premium("tsdb_test") is True
+    finally:
+        ProviderRegistry._providers.pop("tsdb_test", None)
+
+
+def test_all_tsdb_leagues_fetched_when_configured():
+    """No per-league tier gate remains: every TSDB league is discovered."""
+    conn = _db()
     refresher = CacheRefresher(db_factory=_shared_factory(conn))
-    prov = _FakeTSDB(is_premium=False, leagues=PREMIUM + FREE)
+    prov = _FakeTSDB(is_configured=True, leagues=TSDB_LEAGUES)
 
     refresher._discover_from_provider(prov)
 
-    for code in PREMIUM:
-        assert code not in prov.fetched, f"premium league {code} should be skipped"
-    for code in FREE:
-        assert code in prov.fetched, f"free league {code} should be fetched"
+    assert prov.fetched == set(TSDB_LEAGUES)
 
 
-def test_premium_tsdb_leagues_included_with_key():
-    conn = _db()
-    refresher = CacheRefresher(db_factory=_shared_factory(conn))
-    prov = _FakeTSDB(is_premium=True, leagues=PREMIUM + FREE)
-
-    refresher._discover_from_provider(prov)
-
-    assert prov.fetched == set(PREMIUM + FREE)
-
-
-def test_premium_tsdb_leagues_query():
-    conn = _db()
-    refresher = CacheRefresher(db_factory=_shared_factory(conn))
-    premium = refresher._premium_tsdb_leagues()
-    # The known premium-tier codes are present; free-tier ones are not.
-    assert set(PREMIUM).issubset(premium)
-    assert premium.isdisjoint(FREE)
+def test_keyless_client_is_unconfigured():
+    client = TSDBClient()
+    assert client.is_configured is False
+    assert TSDBClient(api_key="realpremiumkey").is_configured is True
 
 
 # ---------------------------------------------------------------------------
@@ -569,26 +568,21 @@ def test_transport_error_log_excludes_api_key(caplog):
     assert "sensitive-key" not in caplog.text
     assert "endpoint lookupleague.php (ConnectError)" in caplog.text
     client.close()
+def test_fresh_schema_seeds_no_tsdb_tier():
+    """#676: schema.sql seeds NULL for the retired tsdb_tier column."""
+    conn = _db()
+    n = conn.execute("SELECT COUNT(*) FROM leagues WHERE tsdb_tier IS NOT NULL").fetchone()[0]
+    assert n == 0
 
 
-def test_bullpen_401_retries_then_disables(monkeypatch):
-    monkeypatch.setattr(tsdb_client.time, "sleep", lambda s: None)
-    disabled = []
-    bullpen = BullpenConfig(
-        api_key="key",
-        base_url="https://proxy.test",
-        on_unauthorized=lambda: disabled.append(True),
-    )
-    client = TSDBClient(bullpen=bullpen, retry_count=1)
-    calls = []
-    client._client = httpx.Client(
-        transport=httpx.MockTransport(
-            lambda request: (calls.append(request), httpx.Response(401))[1]
-        )
-    )
+def test_v92_clears_existing_tiers():
+    """#676: the v92 migration wipes leftover tier values on upgraded DBs."""
+    from teamarr.database.migrations import _migrate_v92_retire_tsdb_tier
 
-    assert client._request("lookupleague.php") is None
-    assert len(calls) == 3
-    assert bullpen.disabled is True
-    assert disabled == [True]
-    client.close()
+    conn = _db()
+    conn.execute("UPDATE leagues SET tsdb_tier = 'premium' WHERE league_code = 'ipl'")
+    _migrate_v92_retire_tsdb_tier(conn)
+    row = conn.execute(
+        "SELECT tsdb_tier FROM leagues WHERE league_code = 'ipl'"
+    ).fetchone()
+    assert row[0] is None

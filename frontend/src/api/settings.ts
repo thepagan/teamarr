@@ -84,6 +84,8 @@ export interface ReconciliationSettings {
 
 export interface DisplaySettings {
   time_format: string
+  sport_naming: "us" | "international"
+  matchup_order: "auto" | "away_first" | "home_first"
   show_timezone: boolean
   channel_id_format: string
   xmltv_generator_name: string
@@ -101,7 +103,6 @@ export interface DatabaseSettings {
 
 export interface TSDBKeyValidationResult {
   valid: boolean
-  is_premium: boolean
   message: string
 }
 
@@ -294,21 +295,11 @@ export interface ChannelsDVRTestResponse {
   error?: string | null
 }
 
-// Bullpen proxy (https://bullpen.direct) - optional caching proxy for provider
-// upstreams. Settings page lives at /bullpen with no nav entry.
-export interface BullpenSettings {
+export interface ProxySettings {
   enabled: boolean
-  api_key: string | null
-  base_url: string
-  disabled_reason: string | null
-  disabled_at: string | null
-  espn_enabled: boolean
-  bellmedia_enabled: boolean
-  squiggle_enabled: boolean
-  nascar_enabled: boolean
-  mlbstats_enabled: boolean
-  hockeytech_enabled: boolean
-  tsdb_enabled: boolean
+  url: string | null
+  user_agent: string | null
+  excluded_providers: string[]
 }
 
 export interface ChannelsDVRSourcesResponse {
@@ -345,7 +336,7 @@ export interface AllSettings {
   emby?: EmbySettings
   jellyfin?: JellyfinSettings
   channelsdvr?: ChannelsDVRSettings
-  bullpen?: BullpenSettings
+  proxy?: ProxySettings
   epg_generation_counter: number
   schema_version: number
   // UI timezone info (read-only, from environment or fallback to epg_timezone)
@@ -598,6 +589,7 @@ export interface SubscriptionLeagueConfig {
   channel_profile_ids: (number | string)[] | null
   channel_group_id: number | null
   channel_group_mode: string | null
+  matchup_order: string | null // "auto" | "away_first" | "home_first"; null = global setting
 }
 
 export interface LeagueConfigListResponse {
@@ -616,6 +608,7 @@ export async function upsertLeagueConfig(
     channel_profile_ids?: (number | string)[] | null
     channel_group_id?: number | null
     channel_group_mode?: string | null
+    matchup_order?: string | null
   }
 ): Promise<SubscriptionLeagueConfig> {
   return api.put(`/league-configs/${encodeURIComponent(leagueCode)}`, data)
@@ -674,11 +667,15 @@ export async function getChannelsDVRLineups(url?: string): Promise<ChannelsDVRLi
   return api.get(`/channelsdvr/lineups${qs}`)
 }
 
-// Bullpen Settings API
-export async function getBullpenSettings(): Promise<BullpenSettings> {
-  return api.get("/settings/bullpen")
+// Provider Proxy Settings API
+export async function getProxySettings(): Promise<ProxySettings> {
+  return api.get("/settings/proxy")
 }
 
-export async function updateBullpenSettings(data: Partial<BullpenSettings>): Promise<BullpenSettings> {
-  return api.put("/settings/bullpen", data)
+export async function updateProxySettings(data: Partial<ProxySettings>): Promise<ProxySettings> {
+  return api.put("/settings/proxy", data)
+}
+
+export async function getProxyProviders(): Promise<string[]> {
+  return api.get("/settings/proxy/providers")
 }

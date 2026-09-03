@@ -217,10 +217,10 @@ export function GeneralTab({ settings }: { settings: AllSettings }) {
         <h2 className="text-lg font-semibold">General Settings</h2>
       </div>
 
-      {/* Tile 1: Time/Localization Settings */}
+      {/* Tile 1: Localization */}
       <Card>
         <CardHeader>
-          <CardTitle>Time/Localization Settings</CardTitle>
+          <CardTitle>Localization</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Explainer: the two timezones */}
@@ -304,6 +304,62 @@ export function GeneralTab({ settings }: { settings: AllSettings }) {
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* Subsection: Sport naming (#691) */}
+          <div className="space-y-2">
+            <Label className="text-sm font-semibold">Sport Naming</Label>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant={(display?.sport_naming ?? "us") === "us" ? "default" : "outline"}
+                size="sm"
+                onClick={() => display && setDisplay({ ...display, sport_naming: "us" })}
+              >
+                US
+              </Button>
+              <Button
+                type="button"
+                variant={display?.sport_naming === "international" ? "default" : "outline"}
+                size="sm"
+                onClick={() => display && setDisplay({ ...display, sport_naming: "international" })}
+              >
+                International
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              US: Football, Soccer · International: American Football, Football. Applies to
+              {" "}{"{sport}"} in templates and channel groups, and to labels in this interface.
+              Channel groups built from {"{sport}"} are renamed on the next generation.
+            </p>
+          </div>
+
+          {/* Subsection: Matchup order (#692) */}
+          <div className="space-y-2">
+            <Label className="text-sm font-semibold">Matchup Order</Label>
+            <div className="flex gap-2">
+              {([
+                ["auto", "Auto"],
+                ["away_first", "Away first"],
+                ["home_first", "Home first"],
+              ] as const).map(([value, label]) => (
+                <Button
+                  key={value}
+                  type="button"
+                  variant={(display?.matchup_order ?? "auto") === value ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => display && setDisplay({ ...display, matchup_order: value })}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Auto follows each sport's convention: visitor first for football, basketball,
+              baseball and hockey ("Bears @ Lions"); home first for soccer, rugby and cricket
+              ("Ipswich Town v Liverpool"). Applies to {"{matchup}"} and {"{team1}"}/{"{team2}"}
+              in templates. Override per league under Channels → Dispatcharr Output.
+            </p>
           </div>
 
           <SaveButton
@@ -392,12 +448,12 @@ export function GeneralTab({ settings }: { settings: AllSettings }) {
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle>TheSportsDB API Key</CardTitle>
-            <Badge variant={display?.tsdb_api_key && display.tsdb_api_key.length > 3 ? "default" : "secondary"} className="text-xs">
-              {display?.tsdb_api_key && display.tsdb_api_key.length > 3 ? "Premium" : "Free Tier"}
+            <Badge variant={display?.tsdb_api_key && display.tsdb_api_key.length > 3 ? "default" : "destructive"} className="text-xs">
+              {display?.tsdb_api_key && display.tsdb_api_key.length > 3 ? "Configured" : "No Key"}
             </Badge>
           </div>
           <CardDescription>
-            Optional premium key for TSDB league coverage, adding custom leagues, and higher rate limits — get one at{" "}
+            Required for all TheSportsDB leagues (and custom leagues) — without a key they produce no events. Get one at{" "}
             <a href="https://www.thesportsdb.com/pricing" target="_blank" rel="noopener noreferrer" className="underline">thesportsdb.com/pricing</a>
           </CardDescription>
         </CardHeader>
@@ -415,7 +471,7 @@ export function GeneralTab({ settings }: { settings: AllSettings }) {
                   }
                   setTsdbValidation(null)
                 }}
-                placeholder="Leave blank to use free tier"
+                placeholder="Required for TheSportsDB leagues"
                 className="flex-1"
               />
               <Button
@@ -430,7 +486,7 @@ export function GeneralTab({ settings }: { settings: AllSettings }) {
                     const result = await validateTSDBKey(display.tsdb_api_key)
                     setTsdbValidation(result)
                   } catch {
-                    setTsdbValidation({ valid: false, is_premium: false, message: "Connection error" })
+                    setTsdbValidation({ valid: false, message: "Connection error" })
                   } finally {
                     setTsdbValidating(false)
                   }
@@ -440,7 +496,7 @@ export function GeneralTab({ settings }: { settings: AllSettings }) {
               </Button>
             </div>
             {tsdbValidation && (
-              <p className={`text-xs ${tsdbValidation.valid ? (tsdbValidation.is_premium ? "text-green-500" : "text-yellow-500") : "text-red-500"}`}>
+              <p className={`text-xs ${tsdbValidation.valid ? "text-green-500" : "text-red-500"}`}>
                 {tsdbValidation.message}
               </p>
             )}

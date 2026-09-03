@@ -45,8 +45,9 @@ import {
   testChannelsDVRConnection,
   getChannelsDVRSources,
   getChannelsDVRLineups,
-  getBullpenSettings,
-  updateBullpenSettings,
+  getProxyProviders,
+  getProxySettings,
+  updateProxySettings,
 } from "@/api/settings"
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,7 @@ export const useUpdateDurationSettings = settingsMutationHook(updateDurationSett
 export const useDisplaySettings = settingsQueryHook("display", getDisplaySettings)
 export const useUpdateDisplaySettings = settingsMutationHook(updateDisplaySettings, [
   ["settings", "display"],
+  ["sports"], // sport naming (#691) changes every sport label
 ])
 
 export const useDatabaseSettings = settingsQueryHook("database", getDatabaseSettings)
@@ -182,10 +184,11 @@ export const useUpdateChannelsDVRSettings = settingsMutationHook(updateChannelsD
   ["channelsdvr", "lineups"],
 ])
 
-export const useBullpenSettings = settingsQueryHook("bullpen", getBullpenSettings)
-export const useUpdateBullpenSettings = settingsMutationHook(updateBullpenSettings, [
-  ["settings", "bullpen"],
+export const useProxySettings = settingsQueryHook("proxy", getProxySettings)
+export const useUpdateProxySettings = settingsMutationHook(updateProxySettings, [
+  ["settings", "proxy"],
 ])
+export const useProxyProviders = settingsQueryHook("proxy-providers", getProxyProviders)
 
 // ---------------------------------------------------------------------------
 // Connection tests (no cache interaction)

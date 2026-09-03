@@ -1095,12 +1095,17 @@ def _apply_stream_ordering(
         get_ordered_stream_ids,
         update_stream_priority,
     )
+    from teamarr.database.channels.streams import (
+        get_active_dispatcharr_stream_ids,
+        refresh_stream_stats_bulk,
+    )
     from teamarr.database.settings import get_stream_ordering_settings
 
     reorder_result: dict = {
         "channels_reordered": 0,
         "streams_reordered": 0,
         "windows_synced": 0,
+        "stats_refreshed": 0,
     }
     try:
         with db_factory() as conn:
@@ -1136,6 +1141,28 @@ def _apply_stream_ordering(
             all_channels = get_all_managed_channels(conn, include_deleted=False)
             total_channels = len(all_channels)
 
+            # stats_metric rules score against the cached stream_stats column,
+            # and until now that column was only ever refreshed by the streams
+            # page — one endpoint, driven by a human opening a channel (#576,
+            # #616). Every scheduled run therefore ordered on whatever numbers
+            # happened to be cached, which on a real install means months old or
+            # absent entirely. Pull them once, in bulk, before any priority is
+            # computed.
+            #
+            # Skipped outright when no rule reads stats: the fetch buys nothing
+            # for a ruleset built from m3u/group/regex, and most are.
+            if ordering_service and any(
+                rule.type == "stats_metric" for rule in ordering_settings.rules
+            ):
+                stat_stream_ids = get_active_dispatcharr_stream_ids(conn)
+                refreshed = refresh_stream_stats_bulk(conn, stat_stream_ids)
+                reorder_result["stats_refreshed"] = refreshed
+                logger.info(
+                    "[ORDERING] Refreshed stats for %d/%d stream(s) before scoring",
+                    refreshed,
+                    len(stat_stream_ids),
+                )
+
             for idx, channel in enumerate(all_channels):
                 streams = get_channel_streams(conn, channel.id)
                 if not streams:
@@ -1150,6 +1177,32 @@ def _apply_stream_ordering(
                 ):
                     pre_order = get_ordered_stream_ids(conn, channel.id)
                     pinned_top = pre_order[0] if pre_order else None
+                    # The pin's premise is that slot 1 is what somebody is
+                    # watching. A probe saying the stream is dead or a black
+                    # screen contradicts that premise, and the pin has to yield
+                    # to it (#670): an in-flight session has already failed over
+                    # to slot 2, while every new tune-in pays the failover
+                    # again. Holding it would also silently undo the demotion a
+                    # stats_metric rule just made — the priority lands in the DB
+                    # and never reaches Dispatcharr — for the whole live window.
+                    #
+                    # Only a measurement lifts the pin. No stats, absent keys
+                    # and unreadable stats all leave it in place, because those
+                    # say nothing about the stream and holding when nothing is
+                    # known is exactly what the pin is for.
+                    if pinned_top is not None:
+                        top = next(
+                            (s for s in streams if s.dispatcharr_stream_id == pinned_top), None
+                        )
+                        if top is not None and top.measured_dead_or_blank:
+                            logger.info(
+                                "[STREAM_AUDIT] pin: ch='%s' (d_id=%s) live event — "
+                                "released stream %d from #1, measured dead/blank (#670)",
+                                channel.channel_name,
+                                channel.dispatcharr_channel_id,
+                                pinned_top,
+                            )
+                            pinned_top = None
 
                 reordered_count = 0
                 if ordering_service:

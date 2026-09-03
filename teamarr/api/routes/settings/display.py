@@ -5,6 +5,9 @@ from dataclasses import asdict
 from fastapi import APIRouter, HTTPException, status
 
 from teamarr.config import set_display_settings as set_config_display
+from teamarr.config import set_global_matchup_order
+from teamarr.core.naming import MATCHUP_ORDER_MODES
+from teamarr.core.sports import SPORT_NAMING_MODES
 from teamarr.database import get_db
 from teamarr.database.settings import (
     get_all_settings,
@@ -14,6 +17,7 @@ from teamarr.database.settings import (
     update_duration_settings as db_update,
 )
 from teamarr.providers.registry import ProviderRegistry
+from teamarr.services.league_mappings import get_league_mapping_service
 
 from .models import (
     DisplaySettingsModel,
@@ -129,12 +133,25 @@ def update_display_settings_endpoint(update: DisplaySettingsModel):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid time_format. Valid: {valid_time_formats}",
         )
+    if update.sport_naming not in SPORT_NAMING_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid sport_naming. Valid: {sorted(SPORT_NAMING_MODES)}",
+        )
+    if update.matchup_order not in MATCHUP_ORDER_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid matchup_order. Valid: {sorted(MATCHUP_ORDER_MODES)}",
+        )
 
     with get_db() as conn:
+        previous_naming = get_all_settings(conn).display.sport_naming
         update_display_settings(
             conn,
             time_format=update.time_format,
             show_timezone=update.show_timezone,
+            sport_naming=update.sport_naming,
+            matchup_order=update.matchup_order,
             channel_id_format=update.channel_id_format,
             xmltv_generator_name=update.xmltv_generator_name,
             xmltv_generator_url=update.xmltv_generator_url,
@@ -150,10 +167,17 @@ def update_display_settings_endpoint(update: DisplaySettingsModel):
         xmltv_generator_url=update.xmltv_generator_url,
     )
 
+    # Matchup order is read at render time from the config cache (#692).
+    set_global_matchup_order(update.matchup_order)
+
+    # Sport naming feeds the league-mapping service's cached display names
+    # ({sport} template variable); reload so the next render uses them (#691).
+    if update.sport_naming != previous_naming:
+        get_league_mapping_service().reload()
+
     # Reinitialize TSDB provider so it picks up the new API key
     # without requiring a restart. The factory re-reads the key from DB.
     if unmask_or_skip(update.tsdb_api_key) is not None:
-
         ProviderRegistry.reinitialize_provider("tsdb")
 
     with get_db() as conn:
@@ -166,26 +190,30 @@ def update_display_settings_endpoint(update: DisplaySettingsModel):
 # TSDB API KEY VALIDATION
 # =============================================================================
 
-TSDB_FREE_KEY = "123"
-
 
 @router.post("/settings/tsdb/validate-key", response_model=TSDBKeyValidationResponse)
 def validate_tsdb_key(request: TSDBKeyValidationRequest):
-    """Validate a TSDB API key before saving.
+    """Validate a TSDB premium API key before saving.
 
     Tests the key against a lightweight TSDB endpoint (lookupleague.php).
-    Premium keys have >3 digits; free key is "123".
+    TheSportsDB is premium-key only (#676): a key is required for every
+    TSDB league, and the old free test key "123" is rejected outright.
     """
     import httpx
 
     key = request.api_key.strip()
     if not key:
         return TSDBKeyValidationResponse(
-            valid=False, is_premium=False, message="API key cannot be empty"
+            valid=False,
+            message="API key is required — TheSportsDB leagues need a premium key",
         )
 
-    # Premium keys are >3 digits; "123" is the free tier key
-    is_premium = key != TSDB_FREE_KEY and len(key) > 3
+    # The free test key (and anything that short) is no longer supported.
+    if len(key) <= 3:
+        return TSDBKeyValidationResponse(
+            valid=False,
+            message=("The TheSportsDB free tier is no longer supported — enter a premium API key"),
+        )
 
     # Test the key against a lightweight endpoint
     url = f"https://www.thesportsdb.com/api/v1/json/{key}/lookupleague.php?id=4328"
@@ -194,14 +222,11 @@ def validate_tsdb_key(request: TSDBKeyValidationRequest):
             resp = client.get(url)
 
         if resp.status_code == 404:
-            return TSDBKeyValidationResponse(
-                valid=False, is_premium=False, message="Invalid API key"
-            )
+            return TSDBKeyValidationResponse(valid=False, message="Invalid API key")
 
         if resp.status_code != 200:
             return TSDBKeyValidationResponse(
                 valid=False,
-                is_premium=False,
                 message=f"TSDB returned status {resp.status_code}",
             )
 
@@ -209,23 +234,14 @@ def validate_tsdb_key(request: TSDBKeyValidationRequest):
         data = resp.json()
         if not data.get("leagues"):
             return TSDBKeyValidationResponse(
-                valid=False, is_premium=False, message="Key accepted but returned no data"
+                valid=False, message="Key accepted but returned no data"
             )
 
-        if is_premium:
-            message = "Valid premium key — full event coverage, 100 req/min"
-        else:
-            message = "Valid free key — 5 events/day per league, 30 req/min"
-
         return TSDBKeyValidationResponse(
-            valid=True, is_premium=is_premium, message=message
+            valid=True, message="Valid premium key — full event coverage, 100 req/min"
         )
 
     except httpx.TimeoutException:
-        return TSDBKeyValidationResponse(
-            valid=False, is_premium=False, message="Connection to TSDB timed out"
-        )
+        return TSDBKeyValidationResponse(valid=False, message="Connection to TSDB timed out")
     except Exception as e:
-        return TSDBKeyValidationResponse(
-            valid=False, is_premium=False, message=f"Connection error: {e}"
-        )
+        return TSDBKeyValidationResponse(valid=False, message=f"Connection error: {e}")

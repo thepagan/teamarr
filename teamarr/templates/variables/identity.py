@@ -4,7 +4,14 @@ These variables identify teams and the competition context.
 Most are BASE_ONLY since they don't change between games.
 """
 
-from teamarr.core.naming import ranked_with_article, team_with_article
+from teamarr.config import get_matchup_order
+from teamarr.core.naming import (
+    format_matchup,
+    matchup_home_first,
+    ranked_with_article,
+    team_with_article,
+)
+from teamarr.core.types import Team
 from teamarr.services.league_mappings import get_league_mapping_service
 from teamarr.templates.context import GameContext, TemplateContext
 from teamarr.templates.variables.registry import (
@@ -94,43 +101,134 @@ def extract_opponent_short(ctx: TemplateContext, game_ctx: GameContext | None) -
     return opponent.short_name if opponent else ""
 
 
+def _matchup(game_ctx: GameContext | None, field: str, upper: bool = False) -> str:
+    """Matchup from one Team field in the effective order (#692)."""
+    if not game_ctx or not game_ctx.event:
+        return ""
+    event = game_ctx.event
+    away = getattr(event.away_team, field) or ""
+    home = getattr(event.home_team, field) or ""
+    if upper:
+        away, home = away.upper(), home.upper()
+    return format_matchup(
+        away, home, event.sport, event.neutral_site, get_matchup_order(event.league)
+    )
+
+
+def _ordered_teams(game_ctx: GameContext | None) -> tuple[Team, Team] | None:
+    """(team1, team2) in the effective matchup order: the sport's convention,
+    or the user's global/per-league matchup_order setting (#692 phase 2)."""
+    if not game_ctx or not game_ctx.event:
+        return None
+    event = game_ctx.event
+    home_first = matchup_home_first(event.sport, get_matchup_order(event.league))
+    return (event.home_team, event.away_team) if home_first else (event.away_team, event.home_team)
+
+
+def _ordered_field(
+    game_ctx: GameContext | None, index: int, field: str, upper: bool = False
+) -> str:
+    teams = _ordered_teams(game_ctx)
+    if not teams:
+        return ""
+    value = getattr(teams[index], field) or ""
+    return value.upper() if upper else value
+
+
+@register_variable(
+    name="team1",
+    category=Category.IDENTITY,
+    suffix_rules=SuffixRules.ALL,
+    description="First team in the matchup order — the visitor for US team sports, "
+    "the home side for soccer/rugby/cricket, or whatever the Matchup Order "
+    "setting (global or per-league) says (e.g., 'Chicago Bears')",
+)
+def extract_team1(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    return _ordered_field(game_ctx, 0, "name")
+
+
+@register_variable(
+    name="team2",
+    category=Category.IDENTITY,
+    suffix_rules=SuffixRules.ALL,
+    description="Second team in the matchup order (e.g., 'Detroit Lions')",
+)
+def extract_team2(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    return _ordered_field(game_ctx, 1, "name")
+
+
+@register_variable(
+    name="team1_short",
+    category=Category.IDENTITY,
+    suffix_rules=SuffixRules.ALL,
+    description="First team's short name in the matchup order (e.g., 'Bears')",
+)
+def extract_team1_short(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    return _ordered_field(game_ctx, 0, "short_name")
+
+
+@register_variable(
+    name="team2_short",
+    category=Category.IDENTITY,
+    suffix_rules=SuffixRules.ALL,
+    description="Second team's short name in the matchup order (e.g., 'Lions')",
+)
+def extract_team2_short(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    return _ordered_field(game_ctx, 1, "short_name")
+
+
+@register_variable(
+    name="team1_abbrev",
+    category=Category.IDENTITY,
+    suffix_rules=SuffixRules.ALL,
+    description="First team's abbreviation uppercase in the matchup order (e.g., 'CHI')",
+)
+def extract_team1_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    return _ordered_field(game_ctx, 0, "abbreviation", upper=True)
+
+
+@register_variable(
+    name="team2_abbrev",
+    category=Category.IDENTITY,
+    suffix_rules=SuffixRules.ALL,
+    description="Second team's abbreviation uppercase in the matchup order (e.g., 'DET')",
+)
+def extract_team2_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
+    return _ordered_field(game_ctx, 1, "abbreviation", upper=True)
+
+
 @register_variable(
     name="matchup",
     category=Category.IDENTITY,
     suffix_rules=SuffixRules.ALL,
-    description="Full matchup string (e.g., 'Tampa Bay @ Detroit')",
+    description="Full matchup in the sport's convention: 'Tampa Bay @ Detroit' "
+    "for US team sports (visitor first), 'Ipswich Town v Liverpool' for "
+    "soccer/rugby/cricket (home first); neutral-site games read 'v'",
 )
 def extract_matchup(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
-    if not game_ctx or not game_ctx.event:
-        return ""
-    event = game_ctx.event
-    return f"{event.away_team.name} @ {event.home_team.name}"
+    return _matchup(game_ctx, "name")
 
 
 @register_variable(
     name="matchup_abbrev",
     category=Category.IDENTITY,
     suffix_rules=SuffixRules.ALL,
-    description="Abbreviated matchup uppercase (e.g., 'TB @ DET')",
+    description="Abbreviated matchup uppercase in the sport's convention "
+    "(e.g., 'TB @ DET', 'IPS v LIV')",
 )
 def extract_matchup_abbrev(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
-    if not game_ctx or not game_ctx.event:
-        return ""
-    event = game_ctx.event
-    return f"{event.away_team.abbreviation.upper()} @ {event.home_team.abbreviation.upper()}"
+    return _matchup(game_ctx, "abbreviation", upper=True)
 
 
 @register_variable(
     name="matchup_short",
     category=Category.IDENTITY,
     suffix_rules=SuffixRules.ALL,
-    description="Short name matchup (e.g., 'Buccaneers @ Lions')",
+    description="Short-name matchup in the sport's convention "
+    "(e.g., 'Buccaneers @ Lions', 'Ipswich v Liverpool')",
 )
 def extract_matchup_short(ctx: TemplateContext, game_ctx: GameContext | None) -> str:
-    if not game_ctx or not game_ctx.event:
-        return ""
-    event = game_ctx.event
-    return f"{event.away_team.short_name} @ {event.home_team.short_name}"
+    return _matchup(game_ctx, "short_name")
 
 
 @register_variable(
