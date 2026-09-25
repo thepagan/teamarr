@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Art fields whose RELATIVE values are normalized to a leading slash (epic z02s),
 # so the game-thumbs base URL convention is consistent across create/edit.
-_ART_FIELDS = ("program_art_url", "event_channel_logo_url")
+_ART_FIELDS = ("program_art_url", "event_channel_logo_url", "team_channel_logo_url")
 _ART_JSON_FIELDS = ("pregame_fallback", "postgame_fallback", "idle_content")
 _ABSOLUTE_URL = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
@@ -148,7 +148,9 @@ class Template:
 
     # Event template specific
     event_channel_name: str | None = None
+    team_channel_name: str | None = None
     event_channel_logo_url: str | None = None
+    team_channel_logo_url: str | None = None
 
     # Timestamps
     created_at: datetime | None = None
@@ -252,7 +254,9 @@ def _row_to_template(row: Row) -> Template:
         idle_conditional_rows=_parse_json(row["idle_conditional_rows"], []),
         conditional_descriptions=_parse_json(row["conditional_descriptions"], []),
         event_channel_name=row["event_channel_name"],
+        team_channel_name=row["team_channel_name"],
         event_channel_logo_url=row["event_channel_logo_url"],
+        team_channel_logo_url=row["team_channel_logo_url"],
         created_at=_parse_ts(row["created_at"]),
         updated_at=_parse_ts(row["updated_at"]),
     )
@@ -633,17 +637,17 @@ def template_to_filler_config(template: Template) -> FillerConfig:
         template.idle_conditional
     )
 
-    # Idle offseason
-    # Schema uses per-field enabled flags (title_enabled, subtitle_enabled, description_enabled)
-    # Use description_enabled as master toggle (like V1's idle_offseason_enabled)
+    # Idle no-schedule overrides use independent field toggles. A provider can
+    # temporarily have no schedule, which needs the same rendering as offseason.
     idle_off = template.idle_offseason or {}
     idle_offseason = OffseasonFillerTemplate(
-        enabled=idle_off.get("description_enabled", False),
+        title_enabled=idle_off.get("title_enabled", False),
         title=idle_off.get("title") if idle_off.get("title_enabled") else None,
+        subtitle_enabled=idle_off.get("subtitle_enabled", False),
         subtitle=idle_off.get("subtitle") if idle_off.get("subtitle_enabled") else None,
-        description=idle_off.get("description"),
+        description_enabled=idle_off.get("description_enabled", False),
+        description=idle_off.get("description") if idle_off.get("description_enabled") else None,
     )
-
     # Filler categories are independent from event categories (#199).
     filler_categories = template.xmltv_filler_categories or []
 
@@ -683,6 +687,8 @@ def template_to_programme_config(template: Template) -> TemplateConfig:
         description_format=template.description_template or "",
         subtitle_format=template.subtitle_template or "",
         program_art_url=template.program_art_url,
+        team_channel_name=template.team_channel_name,
+        team_channel_logo_url=template.team_channel_logo_url,
         conditional_descriptions=template.conditional_descriptions or [],
         # V1 Parity: Duration override support
         game_duration_mode=template.game_duration_mode or "sport",

@@ -106,7 +106,12 @@ class XmltvRenderer:
         filler_cache: dict[int, EventFillerConfig | None] = {}  # {template_id: filler_config}
 
         # Load exception keywords for stream annotation (used by EPG generator)
-        from teamarr.database.channels import check_exception_keyword, get_exception_keywords
+        from teamarr.database.channels import (
+            check_exception_keyword,
+            event_identity_text,
+            get_exception_keywords,
+            get_keywords_for_league,
+        )
 
         exception_keywords = get_exception_keywords(conn)
 
@@ -189,8 +194,17 @@ class XmltvRenderer:
 
             # Annotate match with exception keyword for EPG channel name parity
             stream_name = match.get("stream", {}).get("name", "")
-            if stream_name and exception_keywords:
-                keyword_label, _ = check_exception_keyword(stream_name, exception_keywords)
+            if stream_name:
+                event = match.get("event")
+                keywords = get_keywords_for_league(
+                    conn, getattr(event, "league", None), exception_keywords
+                )
+                keyword_label, _ = check_exception_keyword(
+                    stream_name,
+                    keywords,
+                    event_identity_text(event),
+                    match.get("epg_program_title"),
+                )
                 if keyword_label:
                     match["_exception_keyword"] = keyword_label
 

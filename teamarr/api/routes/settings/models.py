@@ -95,6 +95,7 @@ class DispatcharrSettingsModel(BaseModel):
     @classmethod
     def _mask_password(cls, v: str | None) -> str | None:
         return MASKED_SECRET if v else None
+
     epg_id: int | None = None
     # None = all profiles, [] = no profiles, [1,2,...] = specific profiles
     # Supports int IDs and string wildcards like "{sport}", "{league}"
@@ -105,10 +106,15 @@ class DispatcharrSettingsModel(BaseModel):
     default_channel_group_id: int | None = None
     # Channel group mode: 'static', 'sport', 'league', or custom pattern
     default_channel_group_mode: str | None = None
+    # Dedicated output defaults for managed Team EPG channels.
+    managed_team_channel_profile_ids: list[str | int] | None = None
+    managed_team_channel_group_id: int | None = None
     # Clean up ALL unused logos in Dispatcharr after generation
     cleanup_unused_logos: bool = False
 
-    @field_validator("default_channel_profile_ids", mode="before")
+    @field_validator(
+        "default_channel_profile_ids", "managed_team_channel_profile_ids", mode="before"
+    )
     @classmethod
     def validate_profile_ids(cls, v: Any) -> list[str | int] | None:
         return _validate_profile_ids(v)
@@ -126,9 +132,13 @@ class DispatcharrSettingsUpdate(BaseModel):
     default_stream_profile_id: int | None = None
     default_channel_group_id: int | None = None
     default_channel_group_mode: str | None = None
+    managed_team_channel_profile_ids: list[str | int] | None = None
+    managed_team_channel_group_id: int | None = None
     cleanup_unused_logos: bool | None = None
 
-    @field_validator("default_channel_profile_ids", mode="before")
+    @field_validator(
+        "default_channel_profile_ids", "managed_team_channel_profile_ids", mode="before"
+    )
     @classmethod
     def validate_profile_ids(cls, v: Any) -> list[str | int] | None:
         return _validate_profile_ids(v)
@@ -242,6 +252,7 @@ class EPGSettingsModel(BaseModel):
     epg_xtream_cache_hours: int = 24
     epg_channel_source_enabled: bool = False
     epg_channel_source_groups: list[int] = []
+    stream_profile_overrides: list[dict[str, int | str]] = []
     epg_stream_pre_buffer_minutes: int = 60
     epg_stream_post_buffer_minutes: int = 60
     tennis_majors_only: bool = False
@@ -368,6 +379,27 @@ class ChannelNumberingSettingsUpdate(BaseModel):
 
 
 # =============================================================================
+# MANAGED TEAM CHANNEL SETTINGS
+# =============================================================================
+
+
+class ManagedTeamChannelSettingsModel(BaseModel):
+    """Dedicated numbering settings for persistent Team EPG channels."""
+
+    range_start: int = 9000
+    range_end: int | None = None
+    priority_ids: list[int] = []
+
+
+class ManagedTeamChannelSettingsUpdate(BaseModel):
+    """Partial update model for managed Team EPG channel settings."""
+
+    range_start: int | None = None
+    range_end: int | None = None
+    priority_ids: list[int] | None = None
+
+
+# =============================================================================
 # STREAM ORDERING SETTINGS
 # =============================================================================
 
@@ -408,6 +440,29 @@ class StreamOrderingSettingsUpdate(BaseModel):
     rules: list[StreamOrderingRuleModel] = Field(
         ..., description="Complete list of rules (replaces existing)"
     )
+
+
+class StreamOrderingScopeModel(BaseModel):
+    """A scoped stream-ordering ruleset, independently persisted from global rules."""
+
+    id: int
+    name: str = Field(..., min_length=1)
+    sports: list[str] = Field(default_factory=list)
+    leagues: list[str] = Field(default_factory=list)
+    rules: list[StreamOrderingRuleModel] = Field(default_factory=list)
+    use_global_scoring: bool = True
+    use_global_priority: bool = True
+
+
+class StreamOrderingScopeUpdate(BaseModel):
+    """Create or fully replace a scoped stream-ordering ruleset."""
+
+    name: str = Field(..., min_length=1)
+    sports: list[str] = Field(default_factory=list)
+    leagues: list[str] = Field(default_factory=list)
+    rules: list[StreamOrderingRuleModel] = Field(default_factory=list)
+    use_global_scoring: bool = True
+    use_global_priority: bool = True
 
 
 # =============================================================================
@@ -462,6 +517,7 @@ class FeedSeparationSettingsModel(BaseModel):
     """Feed separation settings for HOME/AWAY stream detection."""
 
     enabled: bool = False  # Master toggle
+    sports: list[str] = []  # Sport codes to split; [] = all sports (#732)
     home_terms: list[str] = ["HOME"]  # Terms that indicate home feed
     away_terms: list[str] = ["AWAY"]  # Terms that indicate away feed
     detect_team_names: bool = True  # Also detect team names as feed indicators
@@ -472,6 +528,7 @@ class FeedSeparationSettingsUpdate(BaseModel):
     """Update model for feed separation settings (all fields optional)."""
 
     enabled: bool | None = None
+    sports: list[str] | None = None
     home_terms: list[str] | None = None
     away_terms: list[str] | None = None
     detect_team_names: bool | None = None
@@ -539,9 +596,7 @@ class EmbySettingsUpdate(BaseModel):
 class EmbyConnectionTestRequest(BaseModel):
     """Request to test Emby connection."""
 
-    url: str | None = Field(
-        None, description="Override URL (uses saved if not provided)"
-    )
+    url: str | None = Field(None, description="Override URL (uses saved if not provided)")
     username: str | None = Field(None, description="Override username")
     password: str | None = Field(None, description="Override password")
     api_key: str | None = Field(None, description="Override API key")
@@ -580,9 +635,7 @@ class JellyfinSettingsUpdate(BaseModel):
 class JellyfinConnectionTestRequest(BaseModel):
     """Request to test Jellyfin connection."""
 
-    url: str | None = Field(
-        None, description="Override URL (uses saved if not provided)"
-    )
+    url: str | None = Field(None, description="Override URL (uses saved if not provided)")
     username: str | None = Field(None, description="Override username")
     password: str | None = Field(None, description="Override password")
     api_key: str | None = Field(None, description="Override API key")
@@ -631,9 +684,7 @@ class ChannelsDVRSettingsUpdate(BaseModel):
 class ChannelsDVRConnectionTestRequest(BaseModel):
     """Request to test Channels DVR connection."""
 
-    url: str | None = Field(
-        None, description="Override URL (uses saved if not provided)"
-    )
+    url: str | None = Field(None, description="Override URL (uses saved if not provided)")
     source_name: str | None = Field(None, description="Override source name")
 
 

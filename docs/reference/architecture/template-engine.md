@@ -7,13 +7,13 @@ nav_order: 6
 
 # Template Engine
 
-The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 258 variables across 20 categories (plus chainable `|filter` value transforms), 33 condition evaluators, suffix rules for multi-game context, and template-type scoping for the variable picker.
+The template engine resolves `{variable}` placeholders in EPG titles, descriptions, and filler content. It supports 266 variables across 20 categories (plus chainable `|filter` value transforms), 33 condition evaluators, suffix rules for multi-game context, and template-type scoping for the variable picker.
 
 ## Architecture
 
 ```
 TemplateResolver
-  ├── VariableRegistry (258 variables, 20 categories)
+  ├── VariableRegistry (266 variables, 20 categories)
   ├── ConditionEvaluator (33 evaluators)
   └── ContextBuilder (Event + Team → TemplateContext)
 ```
@@ -129,6 +129,7 @@ Any variable can be piped through chainable value transforms: `{home_team|pascal
 | `is_not_final` | Reference game exists and is not final | No |
 | `has_recap` | Provider postgame recap headline available | No |
 | `has_preview` | Provider pregame preview blurb available | No |
+| `has_generated_preview` | Optional generated pregame description available | No |
 | `has_structured_preview` | Structured preview data (recent form) available | No |
 | `is_neutral_site` | Game at a neutral site (bowls, tournaments) | No |
 | `has_event_note` | Provider marquee/playoff note available | No |
@@ -233,7 +234,7 @@ optimistic layer while the debounced server render is in flight.
 | `templates/conditions.py` | 33 condition evaluators |
 | `templates/context.py` | Context dataclasses (Odds, GameContext, TemplateContext) |
 | `templates/context_builder.py` | Build TemplateContext from Event + Team |
-| `templates/variables/` | 20 category modules with 258 variable definitions |
+| `templates/variables/` | 20 category modules with 266 variable definitions |
 | `templates/variables/registry.py` | VariableRegistry singleton |
 | `templates/filters.py` | Chainable filter transforms (legacy aliases live in `resolver.py`) |
 | `templates/validation.py` | Template validation |

@@ -15,6 +15,30 @@ This is distinct from [channel ordering](numbering#channel-ordering), which cont
 
 With no rules configured, streams simply keep the order they were added in — generation performs no reordering.
 
+## Scoped rulesets
+
+The **Global** tab is the default for every channel. Add scoped tabs to use a
+different policy for selected sports, leagues, or both. Teamarr selects one tab
+for each channel, in this order:
+
+1. A tab that includes the channel's league.
+2. A tab that includes the channel's sport.
+3. Global.
+
+A sport or league can be assigned to only one scoped tab, so this selection is
+always unambiguous. A tab that includes several sports or leagues can therefore
+serve a shared policy, while a league tab can override a broader sport tab.
+
+Scoped tabs inherit both sections from Global initially. **Inherit Global** beside
+the **Scoring** and **Priority** headings controls each section independently.
+When enabled, Global rules are read-only but scope-specific rules can still be
+added alongside them; later Global changes continue to apply. The Priority
+setting includes the **Everything Else** baseline. Turn off inheritance to use
+only the local section, or use that section's **Clone from Global** button to
+replace its local rules with an editable snapshot of the current Global rules.
+A scoped tab can,
+for example, keep Global Priority bands while using sport-specific scoring.
+
 ## Two ways to rank: Scoring and Priority
 
 Every rule belongs to one of two classes, added with the separate **Add scoring rule** and **Add priority rule** buttons. Both use the same [rule types](#rule-types) — the difference is *how* a match affects ordering.
@@ -78,7 +102,13 @@ Both **Stream Type** (team streams) and **Specific Team's Feed** rules let you p
 
 ### How team-feed detection works
 
-The **Specific Team's Feed** rule first checks the **resolved feed team** stored during matching — the [Feed Separation](consolidation#feed-separation) engine's verdict from broadcast-market listings, team-branded names (`Brewers.TV`), and tvg-id/tvg-name. Identification always runs, whether or not the Feed Separation toggle is on (the toggle only controls channel splitting), and team streams (`MLB | Milwaukee Brewers`) carry their matched team the same way. When no team was resolved, it falls back to scanning the stream name for your selected teams plus a feed indicator — a matchup (`vs`, `at`, `@`), a side (`home`/`away`), a camera label, or a `(Team feed)` marker. Generic streams with neither are left for other rules.
+The **Specific Team's Feed** rule first checks the **resolved feed team** stored during matching — the [Feed Separation](consolidation#feed-separation) engine's verdict from broadcast-market listings, team-branded names (`Brewers.TV`), and tvg-id/tvg-name. Identification always runs, whether or not the Feed Separation toggle is on and whatever its [sport scope](consolidation#scoping-it-to-certain-sports) is (both control only channel splitting), and team streams (`MLB | Milwaukee Brewers`) carry their matched team the same way. When no team was resolved, it falls back to scanning the stream name for your selected teams plus a feed indicator — a matchup (`vs`, `at`, `@`), a side (`home`/`away`), a camera label, or a `(Team feed)` marker. Generic streams with neither are left for other rules.
+
+## Teamarr keeps Dispatcharr's order in step
+
+Every generation run compares the order Dispatcharr is actually holding for each channel against the order your rules call for, and re-pushes whenever the two differ — not only when a rule changed something. So an order that drifted for any reason (a push Dispatcharr rejected, a hand edit in Dispatcharr, a channel repaired by reconciliation) is corrected on the next run instead of sticking.
+
+Channels already in the right order aren't touched, and a live event's pinned #1 stream is left alone (see below).
 
 ## Live events keep their #1 stream
 
@@ -86,7 +116,11 @@ While an event is airing, scheduled generation runs won't displace the channel's
 
 The pin holds because the top slot is presumed to be what somebody is watching. When a probe contradicts that — the cached [Stream Stats](#rule-types) say the stream is **dead or a black screen** — the pin releases and normal rule ordering takes the top slot, because a stream that isn't there is not one anybody is watching. Only an actual measurement lifts it: a stream with no stats, or stats that say nothing about liveness, stays pinned, since not knowing a stream is dead is not the same as knowing it is.
 
-A **manually triggered** generation run bypasses this pin entirely — that's your escape hatch if the pinned stream is the wrong one for any other reason: fix your rules (or remove the bad stream) and hit Generate.
+A **manually triggered** generation run bypasses this pin entirely — that's your escape hatch if the pinned stream is the wrong one for any other reason: fix your rules (or remove the bad stream) and hit Generate, or press **Order streams now** on this page.
+
+## Order streams now
+
+The **Order streams now** button at the bottom of the rules page re-sorts every managed channel by the saved rules without running a generation: it pulls fresh Stream Stats from Dispatcharr, re-applies the rules, and pushes only the channels whose order changed. Nothing else runs — no matching, no EPG rebuild, no media-server refresh — so it finishes in seconds. Like a manual generation it bypasses the live-event #1 pin, and it is unavailable while you have unsaved rule edits or a generation is in progress.
 
 ## Why is a stream ordered this way?
 

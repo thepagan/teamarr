@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-
 _TRIGGER_RE = re.compile(
     r"""
     CREATE\s+TRIGGER\s+IF\s+NOT\s+EXISTS\s+
@@ -35,9 +34,23 @@ def build_postgres_schema(sqlite_schema_sql: str) -> str:
         schema_sql,
         flags=re.IGNORECASE,
     )
-    schema_sql = re.sub(r"\bBOOLEAN\s+DEFAULT\s+1\b", "BOOLEAN DEFAULT TRUE", schema_sql)
-    schema_sql = re.sub(r"\bBOOLEAN\s+DEFAULT\s+0\b", "BOOLEAN DEFAULT FALSE", schema_sql)
-    schema_sql = re.sub(r"\benabled\s+INTEGER\s+DEFAULT\s+1\b", "enabled BOOLEAN DEFAULT TRUE", schema_sql)
+    # PostgreSQL does not accept integer defaults for boolean columns. Keep
+    # intervening constraints such as NOT NULL when converting SQLite's 0/1
+    # convention (managed_channel_enabled introduced this shape in v2.18).
+    schema_sql = re.sub(
+        r"\bBOOLEAN(?P<constraints>(?:\s+(?:NOT\s+NULL|NULL|UNIQUE))*)\s+DEFAULT\s+(?P<value>[01])\b",
+        lambda match: (
+            f"BOOLEAN{match.group('constraints')} DEFAULT "
+            f"{'TRUE' if match.group('value') == '1' else 'FALSE'}"
+        ),
+        schema_sql,
+        flags=re.IGNORECASE,
+    )
+    schema_sql = re.sub(
+        r"\benabled\s+INTEGER\s+DEFAULT\s+1\b",
+        "enabled BOOLEAN DEFAULT TRUE",
+        schema_sql,
+    )
     schema_sql = re.sub(
         r"\bimport_enabled\s+INTEGER\s+DEFAULT\s+0\b",
         "import_enabled BOOLEAN DEFAULT FALSE",

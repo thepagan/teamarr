@@ -4,9 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "teamarr"
-version = "2.15.0"
+version = "2.18.0"
 description = "Provider-agnostic sports data layer for EPG generation"
 readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "httpx[socks]>=0.27.0",

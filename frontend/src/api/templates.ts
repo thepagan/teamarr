@@ -23,7 +23,7 @@ export interface ConditionalSettings {
   description_not_final: string | null
 }
 
-// Idle offseason settings (no game in 30-day lookahead)
+// Idle-state override settings. Each field can be independently enabled.
 // Each field can be independently enabled
 export interface IdleOffseasonSettings {
   title_enabled: boolean
@@ -115,7 +115,9 @@ export interface Template {
 
   // Event template specific
   event_channel_name: string | null
+  team_channel_name: string | null
   event_channel_logo_url: string | null
+  team_channel_logo_url: string | null
 
   // Usage counts (from list endpoint)
   team_count?: number
@@ -172,7 +174,9 @@ export interface TemplateCreate {
 
   // Event template specific
   event_channel_name?: string | null
+  team_channel_name?: string | null
   event_channel_logo_url?: string | null
+  team_channel_logo_url?: string | null
 }
 
 export type TemplateUpdate = Partial<TemplateCreate>

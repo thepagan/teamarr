@@ -20,22 +20,11 @@ HockeyTech serves Canadian and US junior/minor hockey leagues via an undocumente
 
 ## Supported Leagues
 
-### CHL & Member Leagues
-
-| League | Client Code | Client Key |
-|--------|-------------|------------|
-| Canadian Hockey League | `chl` | `f1aa699db3d81487` |
-| Ontario Hockey League | `ohl` | `f1aa699db3d81487` |
-| Western Hockey League | `whl` | `f1aa699db3d81487` |
-| Quebec Major Junior Hockey League | `lhjmq` | `f1aa699db3d81487` |
-
 ### Professional
 
 | League | Client Code | Client Key |
 |--------|-------------|------------|
-| American Hockey League | `ahl` | `50c2cd9b5e18e390` |
 | East Coast Hockey League | `echl` | `2c2b89ea7345cae8` |
-| Professional Women's Hockey League | `pwhl` | `446521baf8c38984` |
 
 ### US Junior
 
@@ -70,7 +59,7 @@ feed=modulekit&key={client_key}&view={view}&client_code={league_code}&fmt=json&l
 | `teamsbyseason` | Teams in league |
 | `seasons` | Season metadata (playoff flag, season names, dates) |
 
-The `provider_league_id` in `schema.sql` is the `client_code` value (e.g., `ohl`, `ahl`, `lhjmq` for QMJHL).
+The `provider_league_id` in `schema.sql` is the `client_code` value (e.g., `echl`, `gojhl`).
 
 ## Cache TTLs
 
@@ -89,9 +78,8 @@ The `provider_league_id` in `schema.sql` is the `client_code` value (e.g., `ohl`
 
 - **Full schedule caching**: `get_team_schedule()` fetches the entire season once, then filters locally
 - **Lookback**: Scans 7 days back to resolve `.last` template variables
-- **QMJHL client code**: Uses `lhjmq` (French: Ligue de hockey junior majeur du Québec)
 - **Thread-safe**: Connection pooling with configurable limits
-- **Season type via seasons view**: HockeyTech's `schedule` feed leaves `game_type` empty for every game, but each game has a `season_id`. The separate `seasons` view is joined in to map `season_id` → canonical season_type: `playoff == "1"` → `postseason`; `season_name` containing `preseason` / `pre-season` / `exhibition` → `preseason`; anything else → `regular`. Showcase/All-Star seasons (e.g. "AHL 2026 All-Star Challenge", "OHL Top Prospects") fall into `regular` since they have no playoff flag and no preseason keyword.
+- **Season type via seasons view**: HockeyTech's `schedule` feed leaves `game_type` empty for every game, but each game has a `season_id`. The separate `seasons` view is joined in to map `season_id` → canonical season_type: `playoff == "1"` → `postseason`; `season_name` containing `preseason` / `pre-season` / `exhibition` → `preseason`; anything else → `regular`.
 
 ## File Locations
 

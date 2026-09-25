@@ -34,11 +34,11 @@ Request for league data
 | Provider | Priority | Leagues | Auth | Rate Limit |
 |----------|----------|---------|------|------------|
 | [ESPN](espn) | 0 | 98 | None (public API) | Generous (DNS is usually the bottleneck) |
-| [Bell Media](bellmedia) | 20 | 1 (CFL) | None (public widget API) | None observed, cached |
+| [Bell Media](bellmedia) | 20 | 7 (CFL, CHL, OHL, WHL, QMJHL, AHL, PWHL) | None (public widget API) | None observed, cached |
 | [Squiggle](squiggle) | 30 | 1 (AFL) | None (free) | No hard limit — cache required |
 | [NASCAR](nascar) | 35 | 3 | None (public API) | None observed — season schedule cached 6h |
 | [MLB Stats](mlbstats) | 40 | 5 | None (public API) | None observed |
-| [HockeyTech](hockeytech) | 50 | 15 | Public client keys | None observed |
+| [HockeyTech](hockeytech) | 50 | 9 | Public client keys | None observed |
 | [Supabase](supabase) | 55 | 1 (CBL) | None (credentials auto-extracted, cached 7 days) | None observed |
 | [TSDB](tsdb) | 100 | 48 | API key in URL path | 30/min free, 100/min premium |
 
@@ -69,11 +69,11 @@ Each league in `schema.sql` maps to a provider via the `provider` and `provider_
 | Provider | Format | Example |
 |----------|--------|---------|
 | ESPN | `sport/league` | `football/nfl`, `soccer/eng.1` |
-| Bell Media | league slug | `cfl` |
+| Bell Media | league slug | `cfl`, `lhjmq` (QMJHL) |
 | Squiggle | `league_code` | `afl` |
 | NASCAR | series number | `1` (Cup), `2` (ORAP), `3` (Trucks) |
 | MLB Stats | `sport_id` | `11` (Triple-A) |
-| HockeyTech | `client_code` | `ohl`, `ahl` |
+| HockeyTech | `client_code` | `echl`, `gojhl` |
 | Supabase | league website URL | `https://cbl.ca` (credentials are scraped from the site) |
 | TSDB | `league_id` | `4460` (IPL) |
 

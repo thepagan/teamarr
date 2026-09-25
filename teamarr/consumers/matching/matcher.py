@@ -27,6 +27,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 from teamarr.config import get_user_timezone
@@ -55,6 +56,7 @@ from teamarr.consumers.matching.team_matcher import TeamMatcher
 from teamarr.consumers.matching.tennis_matcher import TennisMatcher, has_court_evidence
 from teamarr.consumers.racing_segments import nearest_session
 from teamarr.consumers.stream_match_cache import (
+    FAILED_MATCH_EVENT_ID,
     StreamMatchCache,
     get_generation_counter,
     increment_generation_counter,
@@ -100,6 +102,44 @@ class _PrefetchSlot:
     failed: bool = False
 
 
+class _ExtractionFields(TypedDict):
+    """The fields _extraction_fields fills. A TypedDict, not a plain dict, so
+    pyright still checks the ** spread at each MatchedStreamResult call site."""
+
+    parsed_team1: str | None
+    parsed_team2: str | None
+    detected_league: str | None
+    extracted_date: str | None
+    extracted_time: str | None
+    extracted_tz: str | None
+
+
+def _extraction_fields(classified: ClassifiedStream) -> _ExtractionFields:
+    """Classification metadata carried on every result for the preview modal.
+
+    Built once here rather than at each construction site: the matcher has four
+    of them (three early-return gates plus _outcome_to_result), and #660 is the
+    standing lesson that near-identical copies in this file drift apart.
+    """
+    league_hint = classified.league_hint
+    normalized = classified.normalized
+    return {
+        "parsed_team1": classified.team1,
+        "parsed_team2": classified.team2,
+        # Multi-league hints are stored comma-separated.
+        "detected_league": (
+            ", ".join(league_hint) if isinstance(league_hint, list) else league_hint
+        ),
+        "extracted_date": (
+            normalized.extracted_date.isoformat() if normalized.extracted_date else None
+        ),
+        "extracted_time": (
+            normalized.extracted_time.strftime("%H:%M:%S") if normalized.extracted_time else None
+        ),
+        "extracted_tz": normalized.extracted_tz,
+    }
+
+
 @dataclass
 class MatchedStreamResult:
     """Result of matching a single stream.
@@ -132,6 +172,8 @@ class MatchedStreamResult:
     # (183.5) as the attach/detach window for time-shared linear streams.
     epg_program_start: datetime | None = None
     epg_program_end: datetime | None = None
+    # EPG matches: the programme's title|sub_title, for exception keywords (#829).
+    epg_program_title: str | None = None
 
     # Classification info
     category: StreamCategory | None = None
@@ -139,6 +181,9 @@ class MatchedStreamResult:
     parsed_team2: str | None = None
     detected_league: str | None = None
     card_segment: str | None = None  # For UFC: "early_prelims", "prelims", "main_card"
+    extracted_date: str | None = None
+    extracted_time: str | None = None
+    extracted_tz: str | None = None
 
     # Exception handling
     exception_keyword: str | None = None
@@ -227,6 +272,67 @@ class BatchMatchResult:
     def cache_hit_rate(self) -> float:
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / total if total > 0 else 0.0
+
+
+# --- Negative match caching (#754) -----------------------------------------
+#
+# 49% of match time goes to streams that never match, and a failing stream
+# costs about what a matching one does (1.19ms vs 1.33ms). The same streams
+# fail identically every run, so the verdict is worth remembering.
+#
+# ALLOWLIST, NEVER A DENYLIST. A FailedReason absent from this set is not
+# cached, so adding a reason can never silently start suppressing matches —
+# the failure mode here is invisible (a match that simply stops appearing),
+# which is exactly the kind that must not be opt-out.
+#
+# Membership was measured, not guessed: for every stream that failed in run N,
+# how often did it match in run N+1? Replayed over 24 consecutive production
+# run pairs (~123,000 observations):
+#
+#   team1/team2_not_found      0 of   7,746   0.000%
+#   no_tennis_match            0 of   5,436   0.000%
+#   tennis_matchup_unknown     0 of     864   0.000%
+#   fixture_not_in_league      3 of  14,973   0.020%
+#   no_event_found            16 of  39,933   0.040%
+#   ---- excluded below this line ----
+#   no_epg_program_match      47 of  14,042   0.335%
+#   no_event_card_match        8 of   1,579   0.507%
+#   date_mismatch              6 of     543   1.105%
+#
+# The excluded three are an order of magnitude churnier: they depend on the
+# event set moving under the stream rather than on anything stable about it.
+# DATE_MISMATCH is the clearest case — it exists precisely because the dates
+# disagreed, and that is what changes.
+_CACHEABLE_FAILED_REASONS = frozenset(
+    {
+        FailedReason.TEAM1_NOT_FOUND,
+        FailedReason.TEAM2_NOT_FOUND,
+        FailedReason.BOTH_TEAMS_NOT_FOUND,
+        FailedReason.FIXTURE_NOT_IN_LEAGUE,
+        FailedReason.NO_EVENT_FOUND,
+        FailedReason.NO_TENNIS_MATCH,
+        FailedReason.TENNIS_MATCHUP_UNKNOWN,
+        # Deliberately NOT cacheable: EVENT_BEYOND_WINDOW flips the moment the
+        # event enters the fetch window, and FIXTURE_LEAGUE_NOT_SUBSCRIBED flips
+        # the moment the user subscribes the league — a cached verdict would
+        # suppress the match both changes were meant to enable (#754/#791).
+    }
+)
+
+
+def _negative_cache_enabled() -> bool:
+    """Whether failed matches are remembered between runs (#754). Default OFF.
+
+    Read per call so a soak can be started and stopped with a restart, and so
+    tests can toggle it without reloading the module — same convention as
+    TEAMARR_TOKEN_INDEX.
+    """
+    return os.environ.get("TEAMARR_NEGATIVE_CACHE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 class StreamMatcher:
@@ -384,13 +490,15 @@ class StreamMatcher:
 
         # Initialize sub-matchers
         self._team_matcher = TeamMatcher(
-            service, self._cache, days_ahead=self._days_ahead, db_factory=db_factory
+            service,
+            self._cache,
+            days_ahead=self._days_ahead,
+            db_factory=db_factory,
+            include_leagues=self._include_leagues,
         )
         self._event_matcher = EventCardMatcher(service, self._cache)
-        self._racing_matcher = RacingMatcher(service, self._cache)
-        self._tennis_matcher = TennisMatcher(
-            service, self._cache, majors_only=tennis_majors_only
-        )
+        self._racing_matcher = RacingMatcher(service, self._cache, db_factory=db_factory)
+        self._tennis_matcher = TennisMatcher(service, self._cache, majors_only=tennis_majors_only)
         # EPG tennis programmes that could not be resolved to a matchup, per
         # tvg_id (mf7.9) — surfaced on the linear stream's result in
         # _reconcile_epg when nothing else matched.
@@ -413,7 +521,7 @@ class StreamMatcher:
         # Prefetched events (populated in match_all for multi-league matching)
         self._prefetched_events: dict[str, list[Event]] | None = None
 
-        # EPG program index (epic teamarrv2-183). When present (group opted in
+        # EPG program index (epic teamarr-183). When present (group opted in
         # via 183.6), the matcher augments name matching with EPG-title matching
         # for streams carrying a tvg_id. None = no EPG matching (default).
         self._epg_index = epg_index
@@ -462,9 +570,7 @@ class StreamMatcher:
         # custom date regex describes where the date lives; the batch shows
         # how it's formatted (one 16/07 proves the source is day-first).
         if self._custom_regex is not None:
-            self._custom_regex.learn_date_format(
-                s.get("name", "") for s in streams
-            )
+            self._custom_regex.learn_date_format(s.get("name", "") for s in streams)
 
         # Prefetch events for multi-league matching (significant performance boost)
         # This fetches events ONCE for all streams instead of per-stream
@@ -644,17 +750,13 @@ class StreamMatcher:
 
         def _record(slot: _PrefetchSlot, exc: Exception) -> None:
             """One slot's failure must neither kill the batch nor be cached."""
-            logger.warning(
-                "[PREFETCH] %s %s failed: %s", slot.league, slot.fetch_date, exc
-            )
+            logger.warning("[PREFETCH] %s %s failed: %s", slot.league, slot.fetch_date, exc)
             slot.events = []
             slot.failed = True
 
         if concurrent_slots:
             workers = min(PREFETCH_MAX_WORKERS, len(concurrent_slots))
-            with ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="prefetch"
-            ) as executor:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="prefetch") as executor:
                 futures = {
                     executor.submit(
                         self._service.get_events,
@@ -685,9 +787,7 @@ class StreamMatcher:
 
         # Pass 3 (sequential): assemble in league order and publish to
         # shared_events, exactly as the serial version did.
-        for league_idx, (league, slots) in enumerate(
-            zip(self._search_leagues, plan, strict=True)
-        ):
+        for league_idx, (league, slots) in enumerate(zip(self._search_leagues, plan, strict=True)):
             league_events: list[Event] = []
             for slot in slots:
                 league_events.extend(slot.events)
@@ -713,8 +813,7 @@ class StreamMatcher:
             # provider under the prefetch's concurrency) is the signal to turn
             # PREFETCH_MAX_WORKERS down.
             logger.warning(
-                "[PREFETCH] %d/%d fetches failed and were NOT cached; "
-                "affected leagues: %s",
+                "[PREFETCH] %d/%d fetches failed and were NOT cached; affected leagues: %s",
                 len(failed_slots),
                 service_calls,
                 ", ".join(sorted({s.league for s in failed_slots})),
@@ -741,8 +840,11 @@ class StreamMatcher:
         event_league_sport = self._get_event_league_sport()
 
         classified = classify_stream(
-            stream_name, league_event_type, self._custom_regex,
-            self._feed_home_terms, self._feed_away_terms,
+            stream_name,
+            league_event_type,
+            self._custom_regex,
+            self._feed_home_terms,
+            self._feed_away_terms,
             event_league_sport=event_league_sport,
         )
 
@@ -762,14 +864,17 @@ class StreamMatcher:
                 fallback = self._try_mixed_group_fallbacks(stream_name, stream_id, target_date)
                 if fallback is not None:
                     return fallback
-            return [MatchedStreamResult(
-                stream_name=stream_name,
-                stream_id=stream_id,
-                matched=False,
-                included=False,
-                category=StreamCategory.PLACEHOLDER,
-                exclusion_reason="unclassifiable",
-            )]
+            return [
+                MatchedStreamResult(
+                    stream_name=stream_name,
+                    stream_id=stream_id,
+                    matched=False,
+                    included=False,
+                    category=StreamCategory.PLACEHOLDER,
+                    exclusion_reason="unclassifiable",
+                    **_extraction_fields(classified),
+                )
+            ]
 
         # Step 3: Gate TEAM_ONLY when disabled, then route by category.
         if classified.category == StreamCategory.TEAM_ONLY and not self._team_streams_enabled:
@@ -781,14 +886,17 @@ class StreamMatcher:
                 fallback = self._try_mixed_group_fallbacks(stream_name, stream_id, target_date)
                 if fallback is not None:
                     return fallback
-            return [MatchedStreamResult(
-                stream_name=stream_name,
-                stream_id=stream_id,
-                matched=False,
-                included=False,
-                category=StreamCategory.PLACEHOLDER,
-                exclusion_reason="team_streams_disabled",
-            )]
+            return [
+                MatchedStreamResult(
+                    stream_name=stream_name,
+                    stream_id=stream_id,
+                    matched=False,
+                    included=False,
+                    category=StreamCategory.PLACEHOLDER,
+                    exclusion_reason="team_streams_disabled",
+                    **_extraction_fields(classified),
+                )
+            ]
 
         # Gate the name-identifies-event categories when Stream Name matching is
         # disabled for this source. TEAM_ONLY is gated above by Team matching; the
@@ -801,14 +909,26 @@ class StreamMatcher:
             StreamCategory.TENNIS_MATCH,
             StreamCategory.ALL_STAR,
         ):
-            return [MatchedStreamResult(
-                stream_name=stream_name,
-                stream_id=stream_id,
-                matched=False,
-                included=False,
-                category=StreamCategory.PLACEHOLDER,
-                exclusion_reason="name_match_disabled",
-            )]
+            return [
+                MatchedStreamResult(
+                    stream_name=stream_name,
+                    stream_id=stream_id,
+                    matched=False,
+                    included=False,
+                    category=StreamCategory.PLACEHOLDER,
+                    exclusion_reason="name_match_disabled",
+                    **_extraction_fields(classified),
+                )
+            ]
+
+        # Negative cache (#754): this stream failed recently for a reason that
+        # does not change between runs, so skip routing, candidate scoring AND
+        # the mixed-group fallbacks below. Classification has already run — it
+        # happens before any cache check — so an unclassifiable stream is not a
+        # target here and gains nothing.
+        cached_fail = self._cached_failure(classified, stream_id, stream_name)
+        if cached_fail is not None:
+            return cached_fail
 
         outcomes = self._route_to_outcomes(classified, stream_id, target_date)
 
@@ -825,7 +945,7 @@ class StreamMatcher:
             if fallback is not None:
                 return fallback
 
-        return [
+        results = [
             self._outcome_to_result(
                 outcome=o,
                 stream_id=stream_id,
@@ -834,6 +954,84 @@ class StreamMatcher:
             )
             for o in outcomes
         ]
+        self._remember_failure(outcomes, stream_id, stream_name)
+        return results
+
+    def _cached_failure(
+        self, classified, stream_id: int, stream_name: str
+    ) -> "list[MatchedStreamResult] | None":
+        """A remembered failure for this stream, or None to match it properly (#754).
+
+        Returns the SAME ``FailedReason`` the real attempt produced, read back
+        from the cache entry. Reporting a generic verdict instead would flatten
+        the failure taxonomy the UI reads — the trap #747 hit with
+        FIXTURE_NOT_IN_LEAGUE — so a hit whose stored reason is missing or no
+        longer cacheable is treated as a miss and re-matched.
+        """
+        # No database, no cache. A matcher built without a db_factory (unit
+        # tests, ad-hoc callers) holds a StreamMatchCache whose connection
+        # factory is None, and every read on it raises.
+        if not _negative_cache_enabled() or self._db_factory is None:
+            return None
+
+        entry = self._cache.get(self._group_id, stream_id, stream_name, include_failed=True)
+        if entry is None or entry.event_id != FAILED_MATCH_EVENT_ID:
+            return None
+
+        raw = (entry.cached_data or {}).get("failed_reason")
+        try:
+            reason = FailedReason(raw)
+        except ValueError:
+            return None
+        if reason not in _CACHEABLE_FAILED_REASONS:
+            # Written by an older build, or the allowlist shrank. Re-match
+            # rather than trust a verdict this build no longer stands behind.
+            return None
+
+        # from_cache=True is what BatchMatchResult counts; no separate tally.
+        return [
+            MatchedStreamResult(
+                stream_name=stream_name,
+                stream_id=stream_id,
+                matched=False,
+                included=False,
+                category=classified.category,
+                failed_reason=reason,
+                from_cache=True,
+                **_extraction_fields(classified),
+            )
+        ]
+
+    def _remember_failure(
+        self, outcomes: "list[MatchOutcome]", stream_id: int, stream_name: str
+    ) -> None:
+        """Remember a failure whose reason is stable between runs (#754).
+
+        Only when EVERY outcome failed: a TEAM_ONLY stream that fanned out to
+        one match and one miss has matched, and caching that as a failure would
+        lose the match on the next run. The reason must also be identical
+        across outcomes — a mixed pair says the verdict is not the stable
+        property this cache assumes.
+        """
+        if not _negative_cache_enabled() or self._db_factory is None or not outcomes:
+            return
+        if any(o.is_matched for o in outcomes):
+            return
+
+        reasons = {o.failed_reason for o in outcomes}
+        if len(reasons) != 1:
+            return
+        reason = reasons.pop()
+        if reason not in _CACHEABLE_FAILED_REASONS:
+            return
+
+        self._cache.set_failed(
+            group_id=self._group_id,
+            stream_id=stream_id,
+            stream_name=stream_name,
+            generation=self._generation,
+            reason=reason.value,
+        )
 
     def _route_to_outcomes(
         self,
@@ -856,9 +1054,9 @@ class StreamMatcher:
         if classified.category == StreamCategory.EVENT_CARD:
             return [self._match_event_card(classified, stream_id, target_date)]
         if classified.category == StreamCategory.RACING_EVENT:
-            return [self._match_racing_event(
-                classified, stream_id, target_date, anchor_dt=anchor_dt
-            )]
+            return [
+                self._match_racing_event(classified, stream_id, target_date, anchor_dt=anchor_dt)
+            ]
         if classified.category == StreamCategory.TENNIS_MATCH:
             return self._match_tennis_event(classified, stream_id, target_date)
         if classified.category == StreamCategory.TEAM_ONLY:
@@ -866,9 +1064,7 @@ class StreamMatcher:
         if classified.category == StreamCategory.ALL_STAR:
             return self._match_all_star(classified, stream_id, target_date, anchor_dt=anchor_dt)
         # TEAM_VS_TEAM
-        return [
-            self._match_team_vs_team(classified, stream_id, target_date, anchor_dt=anchor_dt)
-        ]
+        return [self._match_team_vs_team(classified, stream_id, target_date, anchor_dt=anchor_dt)]
 
     def _match_via_epg(
         self,
@@ -955,8 +1151,11 @@ class StreamMatcher:
             # dedicated programme path below (mf7.9, #642), which requires a
             # tournament AND a player pair or court before binding anything.
             classified = classify_stream(
-                epg_input, league_event_type, self._custom_regex,
-                self._feed_home_terms, self._feed_away_terms,
+                epg_input,
+                league_event_type,
+                self._custom_regex,
+                self._feed_home_terms,
+                self._feed_away_terms,
             )
             if classified.category == StreamCategory.PLACEHOLDER:
                 continue
@@ -975,6 +1174,7 @@ class StreamMatcher:
                     outcome.match_method = MatchMethod.EPG
                     outcome.epg_program_start = program.start_dt
                     outcome.epg_program_end = program.end_dt
+                    outcome.epg_program_title = epg_input
                     ev_id = outcome.event.id if outcome.event else None
                     prev = best_by_event.get(ev_id)
                     skew_s = (
@@ -1025,9 +1225,11 @@ class StreamMatcher:
                 # occurrence and anchor its attach/detach window to the wrong slot.
                 # The matcher gates candidate events to those airing within
                 # ANCHOR_MATCH_TOLERANCE of this instant (live broadcast only).
-                primary_outcomes = list(self._route_to_outcomes(
-                    classified, stream_id, target_date, anchor_dt=program.start_dt
-                ))
+                primary_outcomes = list(
+                    self._route_to_outcomes(
+                        classified, stream_id, target_date, anchor_dt=program.start_dt
+                    )
+                )
 
             # Pair each matched outcome with its effective classification so the
             # racing fallback (which re-classifies) can pass the right object to
@@ -1061,6 +1263,8 @@ class StreamMatcher:
                 outcome.match_method = MatchMethod.EPG
                 outcome.epg_program_start = program.start_dt
                 outcome.epg_program_end = program.end_dt
+                # Exception keywords read the programme, not "ESPN 2" (#829).
+                outcome.epg_program_title = epg_input
                 # Diagnostic: program slot vs matched event time. A large skew
                 # (Δ) is the tell-tale of a wrong-occurrence bind (bead t5e) —
                 # the program and the event it matched are hours/days apart.
@@ -1098,9 +1302,7 @@ class StreamMatcher:
                     and getattr(ev, "sessions", None)
                     and program.start_dt is not None
                 ):
-                    s_code, s_dist = nearest_session(
-                        ev, program.start_dt, self._sport_durations
-                    )
+                    s_code, s_dist = nearest_session(ev, program.start_dt, self._sport_durations)
                     if s_code is not None:
                         key = (ev_id, s_code)
                         skew_s = s_dist
@@ -1115,8 +1317,7 @@ class StreamMatcher:
             sample = " | ".join(t[:60] for t in attempted_titles[:3])
             self._epg_no_match[tvg_id] = (
                 f"EPG: {len(programs)} programme(s) in window, {attempted} attempted, "
-                f"{skipped_non_event} non-event"
-                + (f"; e.g. {sample}" if sample else "")
+                f"{skipped_non_event} non-event" + (f"; e.g. {sample}" if sample else "")
             )
         if programs:
             tennis_unknown = len(self._epg_tennis_unknown.get(tvg_id, ()))
@@ -1268,8 +1469,7 @@ class StreamMatcher:
             if not sport_hint:
                 return None
             sports = {
-                s.lower()
-                for s in ([sport_hint] if isinstance(sport_hint, str) else sport_hint)
+                s.lower() for s in ([sport_hint] if isinstance(sport_hint, str) else sport_hint)
             }
             leagues = [
                 lg
@@ -1288,9 +1488,7 @@ class StreamMatcher:
         def _in_desc(team) -> bool:
             for form in (team.name, team.short_name):
                 form_norm = normalize_text(form or "")
-                if len(form_norm) >= 3 and re.search(
-                    rf"\b{re.escape(form_norm)}\b", desc_norm
-                ):
+                if len(form_norm) >= 3 and re.search(rf"\b{re.escape(form_norm)}\b", desc_norm):
                     return True
             return False
 
@@ -1319,8 +1517,7 @@ class StreamMatcher:
         if len(candidates) != 1:
             if len(candidates) > 1:
                 logger.debug(
-                    "[EPG_MATCH] description fallback ambiguous (%d candidates) "
-                    "for prog '%s'",
+                    "[EPG_MATCH] description fallback ambiguous (%d candidates) for prog '%s'",
                     len(candidates),
                     (program.title or "")[:48],
                 )
@@ -1615,12 +1812,14 @@ class StreamMatcher:
             fallback = self._try_racing_fallback(stream_name, stream_id, target_date)
             if fallback is not None:
                 outcome, racing_classified = fallback
-                return [self._outcome_to_result(
-                    outcome=outcome,
-                    stream_id=stream_id,
-                    stream_name=stream_name,
-                    classified=racing_classified,
-                )]
+                return [
+                    self._outcome_to_result(
+                        outcome=outcome,
+                        stream_id=stream_id,
+                        stream_name=stream_name,
+                        classified=racing_classified,
+                    )
+                ]
         if primary != StreamCategory.TENNIS_MATCH:
             fallback = self._try_tennis_feed_fallback(stream_name, stream_id, target_date)
             if fallback is not None:
@@ -1662,8 +1861,11 @@ class StreamMatcher:
             return None
 
         tennis_classified = classify_stream(
-            text, "event", self._custom_regex,
-            self._feed_home_terms, self._feed_away_terms,
+            text,
+            "event",
+            self._custom_regex,
+            self._feed_home_terms,
+            self._feed_away_terms,
             event_league_sport="tennis",
         )
         if tennis_classified.category != StreamCategory.TENNIS_MATCH:
@@ -1712,17 +1914,17 @@ class StreamMatcher:
         path (_match_via_epg). Returns the matched outcome paired with its
         racing classification, or None if the fallback doesn't apply/match.
         """
-        if not any(
-            self._league_event_types.get(lg) == "event"
-            for lg in self._include_leagues
-        ):
+        if not any(self._league_event_types.get(lg) == "event" for lg in self._include_leagues):
             return None
         if not has_racing_text_evidence(text):
             return None
 
         racing_classified = classify_stream(
-            text, "event", self._custom_regex,
-            self._feed_home_terms, self._feed_away_terms,
+            text,
+            "event",
+            self._custom_regex,
+            self._feed_home_terms,
+            self._feed_away_terms,
         )
         if racing_classified.category != StreamCategory.RACING_EVENT:
             return None
@@ -1750,12 +1952,14 @@ class StreamMatcher:
         tennis_leagues = self._tennis_leagues()
 
         if not tennis_leagues:
-            return [MatchOutcome.filtered(
-                FilteredReason.LEAGUE_NOT_INCLUDED,
-                stream_name=classified.normalized.original,
-                stream_id=stream_id,
-                detail="No tennis leagues configured",
-            )]
+            return [
+                MatchOutcome.filtered(
+                    FilteredReason.LEAGUE_NOT_INCLUDED,
+                    stream_name=classified.normalized.original,
+                    stream_id=stream_id,
+                    detail="No tennis leagues configured",
+                )
+            ]
 
         # Court/round feeds: no player pair — fan out across ALL tennis
         # leagues at once (a court hosts both tours' draws).
@@ -1783,12 +1987,14 @@ class StreamMatcher:
             if outcome.is_matched:
                 return [outcome]
 
-        return [MatchOutcome.failed(
-            reason=outcome.failed_reason if outcome else None,
-            stream_name=classified.normalized.original,
-            stream_id=stream_id,
-            detail=outcome.detail if outcome else "No matching tennis match found",
-        )]
+        return [
+            MatchOutcome.failed(
+                reason=outcome.failed_reason if outcome else None,
+                stream_name=classified.normalized.original,
+                stream_id=stream_id,
+                detail=outcome.detail if outcome else "No matching tennis match found",
+            )
+        ]
 
     def _outcome_to_result(
         self,
@@ -1819,12 +2025,6 @@ class StreamMatcher:
             reason = outcome.failed_reason.value if outcome.failed_reason else "failed"
             exclusion_reason = reason
 
-        # Convert list hint to comma-separated string for storage
-        league_hint = classified.league_hint
-        detected_league_str = (
-            ", ".join(league_hint) if isinstance(league_hint, list) else league_hint
-        )
-
         return MatchedStreamResult(
             stream_name=stream_name,
             stream_id=stream_id,
@@ -1838,10 +2038,8 @@ class StreamMatcher:
             from_cache=outcome.match_method == MatchMethod.CACHE if outcome.match_method else False,
             origin_match_method=outcome.origin_match_method,  # For cache hits
             category=classified.category,
-            parsed_team1=classified.team1,
-            parsed_team2=classified.team2,
-            detected_league=detected_league_str,
             card_segment=classified.card_segment,  # UFC segment from stream name
+            **_extraction_fields(classified),
             # Preserve detailed reason enums from MatchOutcome
             failed_reason=outcome.failed_reason,
             filtered_reason=outcome.filtered_reason,
@@ -1851,6 +2049,7 @@ class StreamMatcher:
             matched_side=outcome.matched_side,
             epg_program_start=outcome.epg_program_start,
             epg_program_end=outcome.epg_program_end,
+            epg_program_title=outcome.epg_program_title,
         )
 
     def _get_dominant_event_type(self) -> str | None:

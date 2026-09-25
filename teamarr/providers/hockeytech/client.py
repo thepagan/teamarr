@@ -1,8 +1,7 @@
 """HockeyTech API HTTP client.
 
-Fetches data from the HockeyTech API that powers CHL league websites (OHL, WHL, QMJHL)
-plus AHL, PWHL, and USHL. This is an undocumented API - endpoints discovered via
-browser network inspection.
+Fetches data from the HockeyTech API that powers ECHL, USHL, and Canadian Junior A
+league websites. This is an undocumented API discovered via browser network inspection.
 
 No rate limiting observed, but we implement caching to be respectful.
 
@@ -82,8 +81,7 @@ API_KEYS: dict[str, str] = {
 class HockeyTechClient(BaseHTTPClient):
     """Low-level HockeyTech API client.
 
-    Provides access to CHL league data (OHL, WHL, QMJHL) plus AHL, PWHL, USHL
-    via the HockeyTech API that powers their official websites.
+    Provides access to HockeyTech-backed leagues via their official websites.
 
     Uses LeagueMappingSource for league routing - provider_league_id in database
     contains the HockeyTech client_code (ohl, whl, lhjmq, etc.).

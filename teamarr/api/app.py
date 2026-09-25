@@ -11,6 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from teamarr.api.cache_refresh import start_cache_refresh
 from teamarr.api.routes import (
     aliases,
     backup,
@@ -26,6 +27,7 @@ from teamarr.api.routes import (
     logs,
     numbering_exceptions,
     presets,
+    race_feeds,
     settings,
     sort_priorities,
     stats,
@@ -44,7 +46,6 @@ from teamarr.database.subscription import get_league_configs
 from teamarr.dispatcharr import close_dispatcharr, get_factory
 from teamarr.providers import ProviderRegistry
 from teamarr.services import (
-    create_cache_service,
     create_scheduler_service,
     init_league_mapping_service,
 )
@@ -207,7 +208,7 @@ def _run_startup_tasks():
         _run_ufc_segment_migration(get_db, "ufc_segment_fix_v2")
         _run_ufc_segment_migration(get_db, "ufc_segment_fix_v3")
 
-        # Refresh team/league cache (this takes time)
+        # The cache refresh is independent from application readiness.
         skip_cache = os.getenv("SKIP_CACHE_REFRESH", "").lower() in (
             "1",
             "true",
@@ -215,14 +216,8 @@ def _run_startup_tasks():
         )
         if skip_cache:
             logger.info("[STARTUP] Cache refresh skipped (SKIP_CACHE_REFRESH set)")
-        else:
-            startup_state.set_phase(StartupPhase.REFRESHING_CACHE)
-            cache_service = create_cache_service(get_db)
-            logger.info("[STARTUP] Refreshing team/league cache on startup...")
-            cache_service.refresh()
-            logger.info("[STARTUP] Team/league cache refreshed")
 
-        # Reload league mapping service to pick up new league names from cache
+        # Existing cache entries still need to populate in-memory league mappings.
         league_mapping_service.reload()
 
         # Load display settings from database into config cache
@@ -312,6 +307,10 @@ def _run_startup_tasks():
         startup_state.set_phase(StartupPhase.READY)
         logger.info("[STARTUP] Teamarr ready")
 
+        if not skip_cache:
+            logger.info("[STARTUP] Refreshing team/league cache in background...")
+            start_cache_refresh(get_db)
+
     except Exception as e:
         logger.exception("[STARTUP] Failed: %s", e)
         startup_state.set_error(str(e))
@@ -385,6 +384,7 @@ def create_app() -> FastAPI:
     app.include_router(aliases.router, prefix="/api/v1", tags=["Team Aliases"])
     app.include_router(epg.router, prefix="/api/v1", tags=["EPG"])
     app.include_router(keywords.router, prefix="/api/v1/keywords", tags=["Exception Keywords"])
+    app.include_router(race_feeds.router, prefix="/api/v1/race-feeds", tags=["Race Feeds"])
     app.include_router(cache.router, prefix="/api/v1", tags=["Cache"])
     app.include_router(leagues.router, prefix="/api/v1", tags=["Custom Leagues"])
     app.include_router(logs.router, prefix="/api/v1", tags=["Logging"])

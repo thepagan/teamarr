@@ -1,6 +1,6 @@
 """Regression: combined GET /settings must serialize the full EPG section.
 
-Bug teamarrv2-335: the combined `/settings` handler built EPGSettingsModel
+Bug teamarr-335: the combined `/settings` handler built EPGSettingsModel
 without `epg_xtream_fallback_enabled`, so it silently fell back to the model
 default (False) regardless of the stored value. The Settings page loads its EPG
 state from the combined endpoint, so the saved XC-fallback toggle reverted on
@@ -54,3 +54,8 @@ def test_combined_settings_includes_xtream_fallback_key():
     # Explicit guard for the exact field that regressed.
     epg = client.get("/api/v1/settings").json().get("epg", {})
     assert "epg_xtream_fallback_enabled" in epg
+
+
+def test_combined_settings_includes_stream_profile_overrides():
+    epg = client.get("/api/v1/settings").json().get("epg", {})
+    assert "stream_profile_overrides" in epg

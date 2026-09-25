@@ -26,12 +26,19 @@ import {
   updateChannelNumberingSettings,
   getStreamOrderingSettings,
   updateStreamOrderingSettings,
+  applyStreamOrdering,
+  getStreamOrderingScopes,
+  getStreamOrderingScope,
+  createStreamOrderingScope,
+  updateStreamOrderingScope,
+  deleteStreamOrderingScope,
   getUpdateCheckSettings,
   updateUpdateCheckSettings,
   checkForUpdates,
   getFeedSeparationSettings,
   updateFeedSeparationSettings,
   getLeagueConfigs,
+  getLeagueDivisions,
   upsertLeagueConfig,
   deleteLeagueConfig,
   getEmbySettings,
@@ -48,6 +55,8 @@ import {
   getProxyProviders,
   getProxySettings,
   updateProxySettings,
+  getManagedTeamChannelSettings,
+  updateManagedTeamChannelSettings,
 } from "@/api/settings"
 
 // ---------------------------------------------------------------------------
@@ -107,6 +116,15 @@ export const useUpdateLifecycleSettings = settingsMutationHook(updateLifecycleSe
   ["settings", "channel-numbering"],
 ])
 
+export const useManagedTeamChannelSettings = settingsQueryHook(
+  "managed-team-channels",
+  getManagedTeamChannelSettings,
+)
+export const useUpdateManagedTeamChannelSettings = settingsMutationHook(
+  updateManagedTeamChannelSettings,
+  [["settings", "managed-team-channels"]],
+)
+
 export const useSchedulerSettings = settingsQueryHook("scheduler", getSchedulerSettings)
 export const useUpdateSchedulerSettings = settingsMutationHook(updateSchedulerSettings, [
   ["settings", "scheduler"],
@@ -153,6 +171,45 @@ export const useStreamOrderingSettings = settingsQueryHook(
 export const useUpdateStreamOrderingSettings = settingsMutationHook(updateStreamOrderingSettings, [
   ["settings", "stream-ordering"],
 ])
+
+/** Reorder-only pass (#576): no query to invalidate — it changes Dispatcharr, not settings. */
+export function useApplyStreamOrdering() {
+  return useMutation({ mutationFn: applyStreamOrdering })
+}
+
+export const useStreamOrderingScopes = settingsQueryHook(
+  "stream-ordering-scopes",
+  getStreamOrderingScopes,
+)
+
+export function useStreamOrderingScope(id: number | null) {
+  return useQuery({
+    queryKey: ["settings", "stream-ordering-scopes", id],
+    queryFn: () => getStreamOrderingScope(id!),
+    enabled: id !== null,
+  })
+}
+
+function streamOrderingScopeMutationHook<TData, TVariables>(
+  mutationFn: (variables: TVariables) => Promise<TData>,
+) {
+  return function useStreamOrderingScopeMutation() {
+    const queryClient = useQueryClient()
+    return useMutation({
+      mutationFn,
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ["settings", "stream-ordering-scopes"] })
+      },
+    })
+  }
+}
+
+export const useCreateStreamOrderingScope = streamOrderingScopeMutationHook(createStreamOrderingScope)
+export const useUpdateStreamOrderingScope = streamOrderingScopeMutationHook(
+  ({ id, data }: { id: number; data: Parameters<typeof updateStreamOrderingScope>[1] }) =>
+    updateStreamOrderingScope(id, data),
+)
+export const useDeleteStreamOrderingScope = streamOrderingScopeMutationHook(deleteStreamOrderingScope)
 
 export const useUpdateCheckSettings = settingsQueryHook("update-check", getUpdateCheckSettings)
 export const useUpdateUpdateCheckSettings = settingsMutationHook(updateUpdateCheckSettings, [
@@ -330,6 +387,14 @@ export function useLeagueConfigs() {
   })
 }
 
+export function useLeagueDivisions() {
+  return useQuery({
+    queryKey: ["league-divisions"],
+    queryFn: getLeagueDivisions,
+    staleTime: Infinity, // a static catalog compiled into the backend
+  })
+}
+
 export function useUpsertLeagueConfig() {
   const queryClient = useQueryClient()
 
@@ -340,6 +405,8 @@ export function useUpsertLeagueConfig() {
         channel_profile_ids?: (number | string)[] | null
         channel_group_id?: number | null
         channel_group_mode?: string | null
+        matchup_order?: string | null
+        included_divisions?: string[] | null
       }
     }) => upsertLeagueConfig(leagueCode, data),
     onSuccess: () => {

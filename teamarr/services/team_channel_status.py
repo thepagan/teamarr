@@ -110,6 +110,20 @@ def find_next_live_window(
     return candidates[0] if candidates else None
 
 
+def find_current_live_window(
+    xmltv_content: str | None,
+    channel_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return the live event programme currently airing on a team channel."""
+    programme = find_next_live_window(xmltv_content, channel_id, now)
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+    if programme and programme["start"] and programme["start"] <= current_time:
+        if programme["stop"] is None or programme["stop"] > current_time:
+            return programme
+    return None
+
+
 def build_team_channel_status(
     team: dict[str, Any],
     dispatcharr_channel: Any | None,
@@ -117,6 +131,7 @@ def build_team_channel_status(
     xmltv_updated_at: str | datetime | None = None,
     dispatcharr_error: str | None = None,
     now: datetime | None = None,
+    ownership: Any | None = None,
 ) -> dict[str, Any]:
     """Build the API response payload for a static team channel."""
     next_live_window = find_next_live_window(
@@ -170,6 +185,13 @@ def build_team_channel_status(
             "active": bool(team.get("active")),
         },
         "dispatcharr_channel": dispatcharr_payload,
+        "management": {
+            "enabled": bool(team.get("managed_channel_enabled")),
+            "owned": ownership is not None,
+            "sync_status": getattr(ownership, "sync_status", None),
+            "sync_message": getattr(ownership, "sync_message", None),
+            "last_verified_at": getattr(ownership, "last_verified_at", None),
+        },
         "next_live_window": programme_payload,
         "status": status,
         "missing": missing,

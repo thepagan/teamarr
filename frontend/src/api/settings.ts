@@ -16,6 +16,9 @@ export interface DispatcharrSettings {
   default_channel_group_id: number | null
   // Channel group mode: 'static', 'sport', 'league', or custom pattern
   default_channel_group_mode: string | null
+  // Dedicated output defaults for managed Team EPG channels.
+  managed_team_channel_profile_ids: (number | string)[] | null
+  managed_team_channel_group_id: number | null
   // Clean up ALL unused logos in Dispatcharr after generation
   cleanup_unused_logos: boolean
 }
@@ -28,6 +31,14 @@ export interface LifecycleSettings {
   channel_range_start: number
   channel_range_end: number | null
 }
+
+export interface ManagedTeamChannelSettings {
+  range_start: number
+  range_end: number | null
+  priority_ids: number[]
+}
+
+export type ManagedTeamChannelSettingsUpdate = Partial<ManagedTeamChannelSettings>
 
 export interface SchedulerSettings {
   enabled: boolean
@@ -58,11 +69,18 @@ export interface EPGSettings {
   epg_xtream_cache_hours: number
   epg_channel_source_enabled: boolean
   epg_channel_source_groups: number[]
+  stream_profile_overrides: StreamProfileOverride[]
   epg_stream_pre_buffer_minutes: number
   epg_stream_post_buffer_minutes: number
   tennis_majors_only: boolean
   /** Game-thumbs base URL prefixed onto relative art paths in templates (z02s). */
   art_base_url: string
+}
+
+export interface StreamProfileOverride {
+  target_type: "dispatcharr_channel_group"
+  target_id: number
+  stream_profile_id: number
 }
 
 // Note: team_schedule_days_ahead default is 30 (for Team EPG)
@@ -108,6 +126,16 @@ export interface TSDBKeyValidationResult {
 
 export async function validateTSDBKey(apiKey: string): Promise<TSDBKeyValidationResult> {
   return api.post("/settings/tsdb/validate-key", { api_key: apiKey })
+}
+
+export async function getManagedTeamChannelSettings(): Promise<ManagedTeamChannelSettings> {
+  return api.get("/settings/managed-team-channels")
+}
+
+export async function updateManagedTeamChannelSettings(
+  data: ManagedTeamChannelSettingsUpdate,
+): Promise<ManagedTeamChannelSettings> {
+  return api.put("/settings/managed-team-channels", data)
 }
 
 export interface TeamFilterEntry {
@@ -177,6 +205,25 @@ export interface StreamOrderingSettingsUpdate {
   rules: StreamOrderingRule[]
 }
 
+export interface StreamOrderingScope {
+  id: number
+  name: string
+  sports: string[]
+  leagues: string[]
+  rules: StreamOrderingRule[]
+  use_global_scoring: boolean
+  use_global_priority: boolean
+}
+
+export interface StreamOrderingScopeUpdate {
+  name: string
+  sports: string[]
+  leagues: string[]
+  rules: StreamOrderingRule[]
+  use_global_scoring: boolean
+  use_global_priority: boolean
+}
+
 export interface UpdateCheckSettings {
   enabled: boolean
   notify_stable: boolean
@@ -226,6 +273,8 @@ export interface ExceptionKeywordListResponse {
 
 export interface FeedSeparationSettings {
   enabled: boolean
+  // Sport codes the split applies to; [] = every sport (#732)
+  sports: string[]
   home_terms: string[]
   away_terms: string[]
   detect_team_names: boolean
@@ -234,6 +283,7 @@ export interface FeedSeparationSettings {
 
 export interface FeedSeparationSettingsUpdate {
   enabled?: boolean
+  sports?: string[]
   home_terms?: string[]
   away_terms?: string[]
   detect_team_names?: boolean
@@ -556,6 +606,44 @@ export async function updateStreamOrderingSettings(
   return api.put("/settings/stream-ordering", data)
 }
 
+export interface ApplyStreamOrderingResult {
+  channels_reordered: number
+  streams_reordered: number
+  windows_synced: number
+  order_drift_synced: number
+  stats_refreshed: number
+}
+
+/** Re-sort every managed channel's streams now, without a generation run (#576). */
+export async function applyStreamOrdering(): Promise<ApplyStreamOrderingResult> {
+  return api.post("/settings/stream-ordering/apply", {})
+}
+
+export async function getStreamOrderingScopes(): Promise<StreamOrderingScope[]> {
+  return api.get("/settings/stream-ordering/scopes")
+}
+
+export async function getStreamOrderingScope(id: number): Promise<StreamOrderingScope> {
+  return api.get(`/settings/stream-ordering/scopes/${id}`)
+}
+
+export async function createStreamOrderingScope(
+  data: StreamOrderingScopeUpdate,
+): Promise<StreamOrderingScope> {
+  return api.post("/settings/stream-ordering/scopes", data)
+}
+
+export async function updateStreamOrderingScope(
+  id: number,
+  data: StreamOrderingScopeUpdate,
+): Promise<StreamOrderingScope> {
+  return api.put(`/settings/stream-ordering/scopes/${id}`, data)
+}
+
+export async function deleteStreamOrderingScope(id: number): Promise<void> {
+  return api.delete(`/settings/stream-ordering/scopes/${id}`)
+}
+
 // Update Check Settings API
 export async function getUpdateCheckSettings(): Promise<UpdateCheckSettings> {
   return api.get("/settings/update-check")
@@ -590,6 +678,16 @@ export interface SubscriptionLeagueConfig {
   channel_group_id: number | null
   channel_group_mode: string | null
   matchup_order: string | null // "auto" | "away_first" | "home_first"; null = global setting
+  included_divisions: string[] | null // #811: null = every division ESPN files under the league
+}
+
+export interface LeagueDivision {
+  key: string
+  label: string
+}
+
+export interface LeagueDivisionsResponse {
+  divisions: Record<string, LeagueDivision[]>
 }
 
 export interface LeagueConfigListResponse {
@@ -609,9 +707,15 @@ export async function upsertLeagueConfig(
     channel_group_id?: number | null
     channel_group_mode?: string | null
     matchup_order?: string | null
+    included_divisions?: string[] | null
   }
 ): Promise<SubscriptionLeagueConfig> {
   return api.put(`/league-configs/${encodeURIComponent(leagueCode)}`, data)
+}
+
+// Leagues whose ingest can be narrowed by division, and their divisions (#811)
+export async function getLeagueDivisions(): Promise<LeagueDivisionsResponse> {
+  return api.get("/league-divisions")
 }
 
 export async function deleteLeagueConfig(leagueCode: string): Promise<void> {

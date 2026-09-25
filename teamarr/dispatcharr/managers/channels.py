@@ -149,16 +149,40 @@ class ChannelManager:
             logger.debug("[CHANNEL_CACHE] Cleared")
 
     def _ensure_cache(self) -> list[DispatcharrChannel]:
-        """Ensure cache is populated. Returns cached channels list."""
+        """Ensure cache is populated. Returns cached channels list.
+
+        A failed fetch is NOT cached: caching ``[]`` would make every later
+        read in the run see an empty Dispatcharr, and callers that create on
+        "missing" would then duplicate every channel they own (#826). The
+        next call retries instead.
+        """
+        populated = self._try_populate_cache()
+        if populated is None:
+            return []
+        return populated
+
+    def _try_populate_cache(self) -> list[DispatcharrChannel] | None:
+        """Populate the cache if needed; None when the fetch failed."""
         if not self._cache.is_populated():
-            raw_channels = self._client.paginated_get(
+            raw_channels = self._client.paginated_get_or_none(
                 "/api/channels/channels/?page=1&page_size=1000",
                 error_context="channels",
             )
+            if raw_channels is None:
+                return None
             channels = [DispatcharrChannel.from_api(c) for c in raw_channels]
             self._cache.populate(channels)
             logger.debug("[CHANNEL_CACHE] Populated %d channels", len(channels))
         return self._cache.get_all()
+
+    def fetch_channels(self) -> list[DispatcharrChannel] | None:
+        """All channels, or ``None`` when Dispatcharr could not be read.
+
+        Unlike ``get_channels`` this never answers an empty list for a failed
+        read, so a caller can refuse to act rather than act on nothing.
+        """
+        with self._lock:
+            return self._try_populate_cache()
 
     def get_channels(self, use_cache: bool = True) -> list[DispatcharrChannel]:
         """Get all channels from Dispatcharr.
@@ -351,13 +375,25 @@ class ChannelManager:
             channel = DispatcharrChannel.from_api(channel_data)
 
             # DIAG: If streams were in the request, verify the API response matches
+            # — membership AND order. Array order is the channel's stream priority,
+            # so a Dispatcharr build that reorders what we sent is the one thing
+            # that would make ordering unfixable from our side; the old
+            # sorted()-only check could not have told us (#712).
             if "streams" in data:
-                sent_streams = data["streams"]
+                sent_streams = list(data["streams"])
                 got_streams = list(channel.streams)
                 if sorted(sent_streams) != sorted(got_streams):
                     logger.warning(
                         "[STREAM_AUDIT] API MISMATCH: ch %d sent streams=%s "
                         "but API returned streams=%s",
+                        channel_id,
+                        sent_streams,
+                        got_streams,
+                    )
+                elif sent_streams != got_streams:
+                    logger.warning(
+                        "[STREAM_AUDIT] API REORDERED: ch %d sent streams=%s "
+                        "but API returned the same streams in order %s",
                         channel_id,
                         sent_streams,
                         got_streams,

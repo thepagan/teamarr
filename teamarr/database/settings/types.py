@@ -25,6 +25,10 @@ class DispatcharrSettings:
     default_channel_group_id: int | None = None
     # Channel group mode: 'static', 'sport', 'league', or custom pattern like '{sport} | {league}'
     default_channel_group_mode: str = "static"
+    # Dedicated output defaults for persistent Team EPG channels. These do not
+    # inherit event-channel defaults: None means no group / all profiles.
+    managed_team_channel_profile_ids: list[int | str] | None = None
+    managed_team_channel_group_id: int | None = None
     # When True, call Dispatcharr's /api/channels/logos/cleanup/ after generation
     # This removes ALL unused logos in Dispatcharr, not just ones Teamarr uploaded
     cleanup_unused_logos: bool = False
@@ -50,6 +54,15 @@ class LifecycleSettings:
     channel_post_buffer_minutes: int = 60
     channel_range_start: int = 101
     channel_range_end: int | None = None
+
+
+@dataclass
+class ManagedTeamChannelSettings:
+    """Numbering settings for persistent, opt-in Team EPG channels."""
+
+    range_start: int = 9000
+    range_end: int | None = None
+    priority_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -100,6 +113,11 @@ class EPGSettings:
     # Which DP channel groups to include as channel-source candidates (group ids).
     # Empty = include all (ybt.2). Scopes the scan and drives the sorting rule.
     epg_channel_source_groups: list[int] = field(default_factory=list)
+    # Explicit stream-profile override targets. Current target_type is
+    # 'dispatcharr_channel_group'; future source types can share this contract.
+    stream_profile_overrides: list[dict[str, int | str]] = field(
+        default_factory=list
+    )
     epg_stream_pre_buffer_minutes: int = 60
     epg_stream_post_buffer_minutes: int = 60
     # Tennis: only match/attach grand-slam tournaments (#283 first slice) —
@@ -308,9 +326,15 @@ class FeedSeparationSettings:
     When enabled, detects feed indicators (HOME/AWAY tokens or team names)
     in stream names and creates separate channels per feed, resolving
     to actual team names.
+
+    ``sports`` scopes the split (#732). Home/away feeds are an RSN phenomenon —
+    real for baseball/basketball/hockey/football, absent by definition in
+    racing, combat sports, tennis and golf (see lifecycle/feed_side.py). An
+    empty list means every sport, which is what existing installs upgrade to.
     """
 
     enabled: bool = False  # Master toggle
+    sports: list[str] = field(default_factory=list)  # Sport codes; [] = all sports
     home_terms: list[str] = field(default_factory=lambda: ["HOME"])
     away_terms: list[str] = field(default_factory=lambda: ["AWAY"])
     detect_team_names: bool = True  # Also match team names as feed indicators
@@ -389,6 +413,9 @@ class AllSettings:
 
     dispatcharr: DispatcharrSettings = field(default_factory=DispatcharrSettings)
     lifecycle: LifecycleSettings = field(default_factory=LifecycleSettings)
+    managed_team_channels: ManagedTeamChannelSettings = field(
+        default_factory=ManagedTeamChannelSettings
+    )
     reconciliation: ReconciliationSettings = field(default_factory=ReconciliationSettings)
     scheduler: SchedulerSettings = field(default_factory=SchedulerSettings)
     epg: EPGSettings = field(default_factory=EPGSettings)

@@ -9,8 +9,8 @@ Provides functionality for:
 """
 
 import logging
-import re
 import os
+import re
 import sqlite3
 import subprocess
 from collections.abc import Callable
@@ -307,7 +307,8 @@ class BackupService:
         except FileNotFoundError as exc:
             tool = Path(command[0]).name
             raise RuntimeError(
-                f"{tool} is not installed in the Teamarr runtime. Install PostgreSQL client tools to {action}."
+                f"{tool} is not installed in the Teamarr runtime. "
+                f"Install PostgreSQL client tools to {action}."
             ) from exc
 
         if result.returncode == 0:
@@ -606,7 +607,11 @@ class BackupService:
                 action="restore PostgreSQL backup",
             )
         except Exception as e:
-            logger.error("[RESTORE] Failed to restore PostgreSQL backup %s: %s", backup_path.name, e)
+            logger.error(
+                "[RESTORE] Failed to restore PostgreSQL backup %s: %s",
+                backup_path.name,
+                e,
+            )
             return False, str(e), str(pre_restore_path) if pre_restore_path else None
 
         logger.info("[RESTORE] PostgreSQL database restored from %s", backup_path.name)
@@ -616,7 +621,9 @@ class BackupService:
             str(pre_restore_path) if pre_restore_path else None,
         )
 
-    def _import_sqlite_backup_into_postgres(self, backup_path: Path) -> tuple[bool, str, str | None]:
+    def _import_sqlite_backup_into_postgres(
+        self, backup_path: Path
+    ) -> tuple[bool, str, str | None]:
         """Import a SQLite Teamarr backup into the active PostgreSQL database."""
         try:
             source_conn = sqlite3.connect(str(backup_path))
@@ -652,7 +659,11 @@ class BackupService:
 
                 self._reset_postgres_sequences(conn, common_tables)
         except Exception as exc:
-            logger.error("[RESTORE] Failed to import SQLite backup %s into PostgreSQL: %s", backup_path.name, exc)
+            logger.error(
+                "[RESTORE] Failed to import SQLite backup %s into PostgreSQL: %s",
+                backup_path.name,
+                exc,
+            )
             return False, str(exc), str(pre_restore_path) if pre_restore_path else None
         finally:
             source_conn.close()
@@ -660,7 +671,8 @@ class BackupService:
         logger.info("[RESTORE] Imported SQLite backup %s into PostgreSQL", backup_path.name)
         return (
             True,
-            "SQLite backup imported into PostgreSQL. Please restart the application for changes to take effect.",
+            "SQLite backup imported into PostgreSQL. "
+            "Please restart the application for changes to take effect.",
             str(pre_restore_path) if pre_restore_path else None,
         )
 
@@ -797,7 +809,10 @@ class BackupService:
             f"INSERT INTO {self._quote_ident(table_name)} ({insert_columns}) "
             f"VALUES ({placeholders})"
         )
-        target_conn.executemany(insert_sql, [tuple(row[column] for column in columns) for row in source_rows])
+        target_conn.executemany(
+            insert_sql,
+            [tuple(row[column] for column in columns) for row in source_rows],
+        )
         return len(source_rows)
 
     def _reset_postgres_sequences(self, conn: Any, table_names: list[str]) -> None:

@@ -40,7 +40,7 @@ import { useGroups } from "@/hooks/useGroups"
 import { useQuery } from "@tanstack/react-query"
 import { getLeagues } from "@/api/teams"
 import { deleteManagedChannel, getChannelStreams } from "@/api/channels"
-import type { ManagedChannel, ChannelStreamEntry, StreamRuleMatch } from "@/api/channels"
+import type { ManagedChannel, ChannelStreamEntry, ChannelStreamsResponse, StreamRuleMatch } from "@/api/channels"
 import { OrphansDialog } from "@/components/managed-channels/OrphansDialog"
 import { ResetAllDialog } from "@/components/managed-channels/ResetAllDialog"
 import { getLeagueDisplayName, getSportDisplayName } from "@/lib/utils"
@@ -66,6 +66,9 @@ function eventSummary(
   channel: ManagedChannel,
   leagueLabel: string | null
 ): { text: string; title: string } {
+  if (channel.channel_type === "team") {
+    return { text: "Persistent team channel", title: "Persistent team channel" }
+  }
   const fullMatchup =
     channel.home_team || channel.away_team
       ? `${channel.away_team ?? ""} / ${channel.home_team ?? ""}`
@@ -189,8 +192,8 @@ const fmtSigned = (n: number) => (n > 0 ? `+${n}` : String(n))
 // number is decoded to band(+score); staleness compares stored vs the freshly
 // recomputed `expected` priority.
 function PriorityCell(
-  { priority, expected, rules, generating }:
-  { priority: number; expected: number; rules: StreamRuleMatch[]; generating: boolean },
+  { priority, expected, rules, sortingScope, generating }:
+  { priority: number; expected: number; rules: StreamRuleMatch[]; sortingScope: string; generating: boolean },
 ) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -250,6 +253,9 @@ function PriorityCell(
         <div className="absolute left-0 top-full z-50 mt-1 w-64 rounded-md border bg-popover p-1.5 shadow-lg">
           <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
             Matched rules
+          </div>
+          <div className="px-1 pb-1 text-[10px] text-muted-foreground">
+            Sorting scope: <span className="font-medium text-foreground">{sortingScope}</span>
           </div>
           <div className="space-y-0.5">
             {priorityMatches.map((r, i) => (
@@ -462,6 +468,7 @@ interface ChannelRowProps {
   expanded: boolean
   selected: boolean
   streams: ChannelStreamEntry[] | undefined
+  currentEvent: ChannelStreamsResponse["current_event"] | undefined
   loading: boolean
   isGenerating: boolean
   sportLabel: string
@@ -479,6 +486,7 @@ const ChannelRow = React.memo(function ChannelRow({
   expanded,
   selected,
   streams,
+  currentEvent,
   loading,
   isGenerating,
   sportLabel,
@@ -488,7 +496,8 @@ const ChannelRow = React.memo(function ChannelRow({
   onToggleSelect,
   onDelete,
 }: ChannelRowProps) {
-  const { formatRelativeTime, timezone } = useDateFormat()
+  const { formatDateTime, formatRelativeTime, timezone } = useDateFormat()
+  const isTeamChannel = channel.channel_type === "team"
   return (
     <>
       <TableRow className={expanded ? "border-b-0" : ""}>
@@ -507,6 +516,7 @@ const ChannelRow = React.memo(function ChannelRow({
           <Checkbox
             checked={selected}
             onCheckedChange={() => onToggleSelect(channel.id)}
+            disabled={isTeamChannel}
           />
         </TableCell>
         <TableCell>
@@ -564,14 +574,16 @@ const ChannelRow = React.memo(function ChannelRow({
         </TableCell>
         <TableCell>
           <div className="flex items-center justify-end">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onDelete(channel)}
-              title="Delete"
-            >
-              <Trash2 className="h-4 w-4 text-destructive" />
-            </Button>
+            {!isTeamChannel && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onDelete(channel)}
+                title="Delete"
+              >
+                <Trash2 className="h-4 w-4 text-destructive" />
+              </Button>
+            )}
           </div>
         </TableCell>
         <TableCell></TableCell>
@@ -580,15 +592,43 @@ const ChannelRow = React.memo(function ChannelRow({
         <TableRow className="hover:bg-transparent border-b border-border/40">
           <TableCell colSpan={10} className="p-0 pb-2">
             <div className="ml-4 border-l-2 border-border/50 pl-2 pr-4 pt-2">
-            {loading ? (
-              <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
-                <LoaderCircle className="h-3 w-3 animate-spin" />
-                Loading streams…
-              </div>
-            ) : (streams ?? []).length === 0 ? (
-              <p className="text-xs text-muted-foreground py-1">No active streams.</p>
-            ) : (
-              <table className="w-full text-xs">
+              {loading ? (
+                <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
+                  <LoaderCircle className="h-3 w-3 animate-spin" />
+                  Loading streams…
+                </div>
+              ) : (
+                <>
+                  {isTeamChannel && currentEvent && (
+                    <div className="mb-2 rounded bg-muted/50 px-2 py-1.5 text-xs">
+                      <div className="font-semibold">
+                        {currentEvent.is_attached
+                          ? "Attached Event"
+                          : "Next Event"}: {currentEvent.title ?? "Unknown"}
+                      </div>
+                      {currentEvent.sub_title && (
+                        <div className="text-muted-foreground">{currentEvent.sub_title}</div>
+                      )}
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-muted-foreground">
+                        {currentEvent.start && <span>Start: {formatDateTime(currentEvent.start)}</span>}
+                        {currentEvent.stop && <span>Stop: {formatDateTime(currentEvent.stop)}</span>}
+                        {currentEvent.attach_at && <span>Attach: {formatDateTime(currentEvent.attach_at)}</span>}
+                        {currentEvent.detach_at && <span>Detach: {formatDateTime(currentEvent.detach_at)}</span>}
+                      </div>
+                    </div>
+                  )}
+                  {(streams ?? []).length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-1">
+                      {isTeamChannel ? "No assigned streams." : "No active streams."}
+                    </p>
+                  ) : (
+                    <>
+                      {isTeamChannel && (
+                        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                          Assigned streams
+                        </p>
+                      )}
+                      <table className="w-full text-xs">
                 <colgroup>
                   <col className="w-[24%]" />
                   <col className="w-[16%]" />
@@ -637,13 +677,16 @@ const ChannelRow = React.memo(function ChannelRow({
                       <td className="py-1 pr-4 text-muted-foreground">{stream.m3u_account_name ?? "—"}</td>
                       <td className="py-1 pr-4"><MethodCell stream={stream} /></td>
                       <td className="py-1 pr-4"><FeedSideCell side={stream.feed_side} /></td>
-                      <td className="py-1 pr-4"><PriorityCell priority={stream.priority} expected={stream.expected_priority} rules={stream.matched_rules} generating={isGenerating} /></td>
+                      <td className="py-1 pr-4"><PriorityCell priority={stream.priority} expected={stream.expected_priority} rules={stream.matched_rules} sortingScope={stream.sorting_scope} generating={isGenerating} /></td>
                       <td className="py-1"><StreamStatsBadges stats={stream.stream_stats} /></td>
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            )}
+                      </table>
+                    </>
+                  )}
+                </>
+              )}
             </div>
           </TableCell>
         </TableRow>
@@ -663,6 +706,7 @@ export function ManagedChannelsTable() {
   // Expand states
   const [expandedChannels, setExpandedChannels] = useState<Set<number>>(new Set())
   const [channelStreams, setChannelStreams] = useState<Map<number, ChannelStreamEntry[]>>(new Map())
+  const [channelCurrentEvents, setChannelCurrentEvents] = useState<Map<number, ChannelStreamsResponse["current_event"]>>(new Map())
   const [loadingStreams, setLoadingStreams] = useState<Set<number>>(new Set())
 
   const { isGenerating } = useGenerationProgress()
@@ -772,13 +816,16 @@ export function ManagedChannelsTable() {
     return channels
   }, [channelsData, nameFilter, sportFilter, leagueFilter, statusFilter])
 
+  const teamChannels = filteredChannels.filter((channel) => channel.channel_type === "team")
+  const eventChannels = filteredChannels.filter((channel) => channel.channel_type === "event")
+
   const {
     selectedIds,
     toggle: toggleSelect,
     toggleAll: toggleSelectAll,
     isAllSelected,
     setSelectedIds,
-  } = useRowSelection(filteredChannels)
+  } = useRowSelection(eventChannels)
 
   // Mutation for bulk delete
   const bulkDeleteMutation = useMutation({
@@ -808,6 +855,7 @@ export function ManagedChannelsTable() {
     try {
       const data = await getChannelStreams(channelId)
       setChannelStreams((prev) => new Map(prev).set(channelId, data.streams))
+      setChannelCurrentEvents((prev) => new Map(prev).set(channelId, data.current_event))
     } catch {
       setChannelStreams((prev) => new Map(prev).set(channelId, []))
     } finally {
@@ -855,7 +903,7 @@ export function ManagedChannelsTable() {
   }, [isGenerating])
 
   const handleDelete = async () => {
-    if (!deleteConfirm) return
+    if (!deleteConfirm || deleteConfirm.channel_type === "team") return
     try {
       const result = await deleteMutation.mutateAsync(deleteConfirm.id)
       if (result.success) {
@@ -870,8 +918,75 @@ export function ManagedChannelsTable() {
   }
 
   const handleBulkDelete = () => {
-    bulkDeleteMutation.mutate(Array.from(selectedIds))
+    bulkDeleteMutation.mutate(
+      Array.from(selectedIds).filter((id) =>
+        filteredChannels.some((channel) => channel.id === id && channel.channel_type === "event")
+      )
+    )
   }
+
+  const renderChannelRows = (channels: ManagedChannel[]) => channels.map((channel) => (
+    <ChannelRow
+      key={channel.id}
+      channel={channel}
+      expanded={expandedChannels.has(channel.id)}
+      selected={selectedIds.has(channel.id)}
+      streams={channelStreams.get(channel.id)}
+      currentEvent={channelCurrentEvents.get(channel.id)}
+      loading={loadingStreams.has(channel.id)}
+      isGenerating={isGenerating}
+      sportLabel={channel.sport ? getSportDisplayName(channel.sport, sportsMap) : "-"}
+      leagueLabel={getLeagueDisplay(channel.league)}
+      groupTitle={channel.event_epg_group_id ? groupLookup.get(channel.event_epg_group_id) : undefined}
+      onToggleExpand={handleToggleExpand}
+      onToggleSelect={toggleSelect}
+      onDelete={setDeleteConfirm}
+    />
+  ))
+
+  const renderTableHeader = (isEventTable: boolean) => (
+    <TableHeader>
+      <TableRow>
+        <TableHead className="w-8"></TableHead>
+        <TableHead className="w-10">
+          {isEventTable && <Checkbox checked={isAllSelected} onCheckedChange={toggleSelectAll} />}
+        </TableHead>
+        <TableHead className="w-[25%]">Channel</TableHead>
+        <TableHead className="w-[25%]">Event</TableHead>
+        <TableHead className="w-28">Sport</TableHead>
+        <TableHead className="w-20">League</TableHead>
+        <TableHead className="w-20">Status</TableHead>
+        <TableHead className="w-24">Delete At</TableHead>
+        <TableHead className="w-16 text-right">Actions</TableHead>
+        <TableHead className="w-6"></TableHead>
+      </TableRow>
+      {isEventTable && (
+        <TableRow className="border-b-2 border-border">
+          <TableHead className="py-0.5 pb-1.5"></TableHead>
+          <TableHead className="py-0.5 pb-1.5"></TableHead>
+          <TableHead className="py-0.5 pb-1.5">
+            <div className="relative">
+              <Input type="text" placeholder="Filter..." value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} className="h-[18px] text-[0.65rem] italic px-1 pr-4 rounded-sm" />
+              {nameFilter && <button onClick={() => setNameFilter("")} className="absolute right-0.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><X className="h-2.5 w-2.5" /></button>}
+            </div>
+          </TableHead>
+          <TableHead className="py-0.5 pb-1.5"></TableHead>
+          <TableHead className="py-0.5 pb-1.5">
+            <FilterSelect value={sportFilter} onChange={setSportFilter} options={[{ value: "", label: "All" }, ...sports.map((s) => ({ value: s, label: getSportDisplayName(s, sportsMap) }))]} />
+          </TableHead>
+          <TableHead className="py-0.5 pb-1.5">
+            <FilterSelect value={leagueFilter} onChange={setLeagueFilter} options={[{ value: "", label: "All" }, ...leagues.map((l) => ({ value: l, label: l }))]} />
+          </TableHead>
+          <TableHead className="py-0.5 pb-1.5">
+            <FilterSelect value={statusFilter} onChange={setStatusFilter} options={[{ value: "", label: "All" }, ...statuses.map((s) => ({ value: s, label: s }))]} />
+          </TableHead>
+          <TableHead className="py-0.5 pb-1.5"></TableHead>
+          <TableHead className="py-0.5 pb-1.5"></TableHead>
+          <TableHead className="py-0.5 pb-1.5"></TableHead>
+        </TableRow>
+      )}
+    </TableHeader>
+  )
 
   if (error) {
     return (
@@ -977,113 +1092,32 @@ export function ManagedChannelsTable() {
               No managed channels found.
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-8"></TableHead>
-                  <TableHead className="w-10">
-                    <Checkbox
-                      checked={isAllSelected}
-                      onCheckedChange={toggleSelectAll}
-                    />
-                  </TableHead>
-                  <TableHead className="w-[25%]">Channel</TableHead>
-                  <TableHead className="w-[25%]">Event</TableHead>
-                  <TableHead className="w-28">Sport</TableHead>
-                  <TableHead className="w-20">League</TableHead>
-                  <TableHead className="w-20">Status</TableHead>
-                  <TableHead className="w-24">Delete At</TableHead>
-                  <TableHead className="w-16 text-right">Actions</TableHead>
-                  <TableHead className="w-6"></TableHead>
-                </TableRow>
-                {/* Filter row */}
-                <TableRow className="border-b-2 border-border">
-                  <TableHead className="py-0.5 pb-1.5"></TableHead>
-                  <TableHead className="py-0.5 pb-1.5"></TableHead>
-                  <TableHead className="py-0.5 pb-1.5">
-                    <div className="relative">
-                      <Input
-                        type="text"
-                        placeholder="Filter..."
-                        value={nameFilter}
-                        onChange={(e) => setNameFilter(e.target.value)}
-                        className="h-[18px] text-[0.65rem] italic px-1 pr-4 rounded-sm"
-                      />
-                      {nameFilter && (
-                        <button
-                          onClick={() => setNameFilter("")}
-                          className="absolute right-0.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                        >
-                          <X className="h-2.5 w-2.5" />
-                        </button>
-                      )}
-                    </div>
-                  </TableHead>
-                  <TableHead className="py-0.5 pb-1.5"></TableHead>
-                  <TableHead className="py-0.5 pb-1.5">
-                    <FilterSelect
-                      value={sportFilter}
-                      onChange={setSportFilter}
-                      options={[
-                        { value: "", label: "All" },
-                        ...sports.map((s) => ({
-                          value: s,
-                          label: getSportDisplayName(s, sportsMap),
-                        })),
-                      ]}
-                    />
-                  </TableHead>
-                  <TableHead className="py-0.5 pb-1.5">
-                    <FilterSelect
-                      value={leagueFilter}
-                      onChange={setLeagueFilter}
-                      options={[
-                        { value: "", label: "All" },
-                        ...leagues.map((l) => ({ value: l, label: l })),
-                      ]}
-                    />
-                  </TableHead>
-                  <TableHead className="py-0.5 pb-1.5">
-                    <FilterSelect
-                      value={statusFilter}
-                      onChange={setStatusFilter}
-                      options={[
-                        { value: "", label: "All" },
-                        ...statuses.map((s) => ({ value: s, label: s })),
-                      ]}
-                    />
-                  </TableHead>
-                  <TableHead className="py-0.5 pb-1.5"></TableHead>
-                  <TableHead className="py-0.5 pb-1.5"></TableHead>
-                  <TableHead className="py-0.5 pb-1.5"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredChannels.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
-                      No channels match the current filters.
-                    </TableCell>
-                  </TableRow>
-                ) : filteredChannels.map((channel) => (
-                  <ChannelRow
-                    key={channel.id}
-                    channel={channel}
-                    expanded={expandedChannels.has(channel.id)}
-                    selected={selectedIds.has(channel.id)}
-                    streams={channelStreams.get(channel.id)}
-                    loading={loadingStreams.has(channel.id)}
-                    isGenerating={isGenerating}
-                    sportLabel={channel.sport ? getSportDisplayName(channel.sport, sportsMap) : "-"}
-                    leagueLabel={getLeagueDisplay(channel.league)}
-                    groupTitle={channel.event_epg_group_id ? groupLookup.get(channel.event_epg_group_id) : undefined}
-                    onToggleExpand={handleToggleExpand}
-                    onToggleSelect={toggleSelect}
-                    onDelete={setDeleteConfirm}
-                  />
-                ))}
-              </TableBody>
-            </Table>
+            <div className="space-y-6">
+              {teamChannels.length > 0 && (
+                <section>
+                  <h2 className="mb-2 text-sm font-semibold">Team Channels</h2>
+                  <Table>
+                    {renderTableHeader(false)}
+                    <TableBody>{renderChannelRows(teamChannels)}</TableBody>
+                  </Table>
+                </section>
+              )}
+              <section>
+                <h2 className="mb-2 text-sm font-semibold">Event Channels</h2>
+                <Table>
+                  {renderTableHeader(true)}
+                  <TableBody>
+                    {eventChannels.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
+                          No event channels match the current filters.
+                        </TableCell>
+                      </TableRow>
+                    ) : renderChannelRows(eventChannels)}
+                  </TableBody>
+                </Table>
+              </section>
+            </div>
           )}
 
       </CollapsibleSection>

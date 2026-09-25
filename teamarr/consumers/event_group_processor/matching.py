@@ -6,6 +6,7 @@ resolution and UFC/racing segment expansion of the matched-stream list.
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from sqlite3 import Connection
 from typing import TYPE_CHECKING, Any
@@ -13,12 +14,57 @@ from typing import TYPE_CHECKING, Any
 from teamarr.consumers.event_group_processor.stream_fetcher import (
     managed_channel_ids,
 )
-from teamarr.consumers.matching import BatchMatchResult, StreamCategory, StreamMatcher
+from teamarr.consumers.matching import (
+    MATCH_WINDOW_DAYS,
+    BatchMatchResult,
+    StreamCategory,
+    StreamMatcher,
+)
+from teamarr.consumers.matching.epg_resolver import (
+    EpgCatalogIndex,
+    build_epg_catalog_index,
+)
 from teamarr.database.groups import EventEPGGroup
 from teamarr.database.settings import get_feed_separation_settings
 from teamarr.utilities.tz import get_user_timezone, to_utc
 
 logger = logging.getLogger(__name__)
+
+
+def _separation_applies(event: Any, separation_sports: list[str] | None) -> bool:
+    """Whether feed separation splits channels for this event's sport (#732).
+
+    An empty or missing list means every sport — separation was global before
+    #732, so that is both the upgrade default and the "no opinion" answer.
+
+    An event with no sport is never excluded by a non-empty list: the sport is
+    the only thing the list can speak about, so not knowing it means the list
+    has nothing to say, and the master toggle stands. Excluding here would
+    silently un-split channels whenever a provider omitted the field.
+    """
+    if not separation_sports:
+        return True
+    sport = getattr(event, "sport", None)
+    if not sport:
+        return True
+    return sport in separation_sports
+
+
+@dataclass(frozen=True)
+class _EpgResolutionInputs:
+    """Everything ``resolve_program_tvg_ids`` needs that does not vary by group.
+
+    Built once per generation run by ``StreamMatching._epg_resolution_inputs``
+    (#734). ``catalog`` is the pre-derived index over ``epg_data_list``; both
+    are carried so the resolver's own back-compat path stays available.
+    """
+
+    epg_data_list: list[dict]
+    stream_channels: dict
+    channel_by_uuid: dict
+    active_source_ids: "set[int] | None"
+    own_source_id: "int | None"
+    catalog: EpgCatalogIndex
 
 
 class StreamMatching:
@@ -39,6 +85,8 @@ class StreamMatching:
         _get_all_known_leagues: Any
         _load_sport_durations: Any
         _get_lifecycle_service: Any
+        # Run-scoped memo for _epg_resolution_inputs (#734).
+        _epg_inputs_cache: Any
 
     def _match_streams(
         self,
@@ -69,7 +117,7 @@ class StreamMatching:
             row = conn.execute(
                 "SELECT include_final_events, "
                 "epg_xtream_fallback_enabled, epg_xtream_cache_hours, "
-                "event_match_days_back, event_match_days_ahead, "
+                "event_match_days_ahead, "
                 "tennis_majors_only "
                 "FROM settings WHERE id = 1"
             ).fetchone()
@@ -78,7 +126,6 @@ class StreamMatching:
             )
             xtream_fallback = bool(row["epg_xtream_fallback_enabled"]) if row else False
             xtream_cache_hours = (row["epg_xtream_cache_hours"] if row else 24) or 24
-            match_days_back = (row["event_match_days_back"] if row else 7) or 7
             match_days_ahead = (row["event_match_days_ahead"] if row else 3) or 3
             tennis_majors_only = bool(row["tennis_majors_only"]) if row else False
 
@@ -97,7 +144,7 @@ class StreamMatching:
         # epg_index is None → matcher behaves exactly as before.
         epg_index = self._build_epg_index(
             group, streams, target_date,
-            match_days_back, match_days_ahead, xtream_fallback,
+            match_days_ahead, xtream_fallback,
             xtream_cache_hours,
         )
 
@@ -164,7 +211,6 @@ class StreamMatching:
         group,
         streams: list[dict],
         target_date: date,
-        match_days_back: int,
         match_days_ahead: int,
         xtream_fallback: bool = False,
         xtream_cache_hours: int = 24,
@@ -196,35 +242,31 @@ class StreamMatching:
 
         # Resolve stream tvg_ids -> EPG-source tvg_ids. Needs the EPGData catalog
         # (for direct + name matching) and the stream->channel map (for the
-        # curated channel fallback). Both are single scoped fetches.
-        try:
-            epg_data_list = self._dispatcharr_client.channels.get_epg_data_list()
-            # Teamarr's own output channels must not claim stream->channel slots
-            # (#512): last-write-wins would let them mask a shared stream's
-            # curated channel and break tier-1 (curated) EPG resolution.
-            stream_channels, channel_by_uuid = self._dispatcharr_client.channels.get_channel_maps(
-                exclude_channel_ids=managed_channel_ids(self._db_factory)
-            )
-        except Exception as e:
-            logger.warning("[EPG-MATCH] Failed to load EPG resolution data: %s", e)
+        # curated channel fallback). Fetched and indexed once per RUN, not per
+        # group (#734).
+        inputs = self._epg_resolution_inputs()
+        if inputs is None:
             return None
 
-        # Direct/name matching must only use the ACTIVE imported EPG (curated
-        # channel links are trusted regardless). _Teamarr (our own output) is
-        # excluded so we never resolve a stream to our generated guide.
-        active_source_ids = self._active_epg_source_ids()
         resolution, _stats = resolve_program_tvg_ids(
-            streams, epg_data_list, stream_channels,
-            active_source_ids=active_source_ids,
-            channel_by_uuid=channel_by_uuid,
-            own_source_id=self._own_epg_source_id(),
+            streams,
+            inputs.epg_data_list,
+            inputs.stream_channels,
+            active_source_ids=inputs.active_source_ids,
+            channel_by_uuid=inputs.channel_by_uuid,
+            own_source_id=inputs.own_source_id,
+            catalog=inputs.catalog,
         )
 
         # Window mirrors the event match window so programs overlapping any
-        # candidate event are indexed. Localize to the user's timezone before
-        # converting to UTC (to_utc rejects naive datetimes).
+        # candidate event are indexed. The back edge is the same MATCH_WINDOW_DAYS
+        # the name matcher uses (#744): one lookback for every match method,
+        # hidden and hardcoded by design — this used to read the retired
+        # event_match_days_back column and silently disagreed (7 vs 30).
+        # Localize to the user's timezone before converting to UTC (to_utc
+        # rejects naive datetimes).
         day_start = datetime.combine(target_date, time.min, tzinfo=get_user_timezone())
-        window_start = to_utc(day_start - timedelta(days=match_days_back))
+        window_start = to_utc(day_start - timedelta(days=MATCH_WINDOW_DAYS))
         window_end = to_utc(day_start + timedelta(days=match_days_ahead + 1))
 
         try:
@@ -257,6 +299,66 @@ class StreamMatching:
             group.id, index.program_count(), len(index.tvg_ids()),
         )
         return index
+
+    def _epg_resolution_inputs(self) -> "_EpgResolutionInputs | None":
+        """The run-invariant inputs to ``resolve_program_tvg_ids``, fetched once (#734).
+
+        None when the Dispatcharr fetches fail — the caller then skips EPG
+        matching for the group, exactly as it did when the fetch was inline.
+
+        None of these depend on the group, but ``_build_epg_index`` runs per
+        group, so every EPG-enabled source used to re-pay for all of them. On a
+        real install that was ~2.6s of duplicate HTTP per group per run:
+        ``get_epg_data_list`` is a single unpaginated response of every EPGData
+        row Dispatcharr holds (50k+ on the profiled install, 1.5s), and
+        ``get_channel_maps`` walks the whole channel list again (1.0s).
+
+        Cached for the life of the processor, which is one generation run —
+        ``process_all_groups`` clears it alongside ``_shared_events`` so a
+        second run on the same instance re-fetches. A failure is NOT cached:
+        one transient Dispatcharr blip must not disable EPG matching for every
+        remaining group in the run.
+        """
+        cached = getattr(self, "_epg_inputs_cache", None)
+        if cached is not None:
+            return cached
+
+        try:
+            epg_data_list = self._dispatcharr_client.channels.get_epg_data_list()
+            # Teamarr's own output channels must not claim stream->channel slots
+            # (#512): last-write-wins would let them mask a shared stream's
+            # curated channel and break tier-1 (curated) EPG resolution.
+            stream_channels, channel_by_uuid = self._dispatcharr_client.channels.get_channel_maps(
+                exclude_channel_ids=managed_channel_ids(self._db_factory)
+            )
+        except Exception as e:
+            logger.warning("[EPG-MATCH] Failed to load EPG resolution data: %s", e)
+            return None
+
+        # Direct/name matching must only use the ACTIVE imported EPG (curated
+        # channel links are trusted regardless). _Teamarr (our own output) is
+        # excluded so we never resolve a stream to our generated guide.
+        active_source_ids = self._active_epg_source_ids()
+        inputs = _EpgResolutionInputs(
+            epg_data_list=epg_data_list,
+            stream_channels=stream_channels,
+            channel_by_uuid=channel_by_uuid,
+            active_source_ids=active_source_ids,
+            own_source_id=self._own_epg_source_id(),
+            catalog=build_epg_catalog_index(epg_data_list, active_source_ids),
+        )
+        logger.info(
+            "[EPG-MATCH] Loaded EPG resolution inputs for this run: "
+            "%d EPGData rows, %d stream->channel entries",
+            len(epg_data_list),
+            len(stream_channels),
+        )
+        self._epg_inputs_cache = inputs
+        return inputs
+
+    def clear_epg_resolution_cache(self) -> None:
+        """Drop the run-scoped EPG resolution inputs (#734)."""
+        self._epg_inputs_cache = None
 
     def _own_epg_source_id(self) -> "int | None":
         """The app's OWN configured EPG-source id (``dispatcharr_epg_id`` setting).
@@ -405,16 +507,26 @@ class StreamMatching:
                             # MatchMethod.EPG matches; None for name matches (full-life).
                             "epg_program_start": result.epg_program_start,
                             "epg_program_end": result.epg_program_end,
+                            # Programme title|sub_title: exception keywords are
+                            # checked against it after the stream name (#829).
+                            "epg_program_title": result.epg_program_title,
+                            # The stream's own date/time/tz as the classifier
+                            # read them (#245): racing session binding falls
+                            # back to the timestamp when the name carries no
+                            # session word.
+                            "stream_date": result.extracted_date,
+                            "stream_time": result.extracted_time,
+                            "stream_tz": result.extracted_tz,
                         }
                     )
 
         # Apply UFC segment expansion
         # This splits UFC streams into separate segment channels
-        matched = self._expand_ufc_segments(matched, stream_timezone)
+        matched = self._expand_mma_segments(matched, stream_timezone)
 
         # Apply racing session expansion
         # This splits racing streams into separate per-session channels
-        matched = self._expand_racing_segments(matched)
+        matched = self._expand_racing_segments(matched, stream_timezone)
 
         return matched
 
@@ -423,6 +535,7 @@ class StreamMatching:
         matched_streams: list[dict],
         detect_team_names: bool,
         separation_enabled: bool,
+        separation_sports: list[str] | None = None,
     ) -> list[dict]:
         """Resolve feed hints to actual teams (Phase 2 feed separation).
 
@@ -454,6 +567,10 @@ class StreamMatching:
             detect_team_names: Whether to scan stream names for team name patterns
             separation_enabled: Whether resolved teams also create feed-separated
                 channels (feed_separation.enabled master toggle)
+            separation_sports: Sport codes the split applies to (#732). Empty or
+                None means every sport — the pre-#732 behavior, and what
+                existing installs upgrade to. Narrows the master toggle only;
+                it can never turn separation on where the toggle is off.
         """
         for entry in matched_streams:
             event = entry.get("event")
@@ -493,8 +610,10 @@ class StreamMatching:
                             source = "team_name_detect"
                             break
 
+            splits = separation_enabled and _separation_applies(event, separation_sports)
+
             entry["stream_feed_team"] = feed_team
-            entry["feed_team"] = feed_team if separation_enabled else None
+            entry["feed_team"] = feed_team if splits else None
 
             if feed_team:
                 logger.info(
@@ -502,7 +621,7 @@ class StreamMatching:
                     entry["stream"]["name"][:50],
                     feed_team.name,
                     source,
-                    "on" if separation_enabled else "off",
+                    "on" if splits else "off",
                 )
 
         return matched_streams
@@ -512,17 +631,24 @@ class StreamMatching:
         group: EventEPGGroup,
         conn: Connection,
         passed_event_ids: set[str],
+        separated_event_ids: set[str] | None = None,
     ) -> int:
-        """Reclaim feed-separated channels after the master toggle is turned off (#672).
+        """Reclaim feed-separated channels that are no longer eligible to be split (#672).
 
-        Disabling ``feed_separation.enabled`` makes ``_resolve_feed_teams``
-        stop populating ``feed_team``, so every lookup this run carries
+        Ineligibility has two causes and one symptom. Turning off
+        ``feed_separation.enabled``, or dropping an event's sport from
+        ``feed_separation.sports`` (#732), both make ``_resolve_feed_teams``
+        stop populating ``feed_team``, so every lookup for that event carries
         ``feed_team_id=None``. ``find_existing_channel`` then constrains on
         ``feed_team_id IS NULL`` and matches (or creates) the base channel —
         the rows already carrying a feed team are never returned, so they are
         never synced, never renamed and never deleted. They sat beside a
         freshly created duplicate base channel until their scheduled deletion,
         consuming the numbers of their feed block the whole time.
+
+        Narrowing the sport list is therefore the same bug as #672 in a
+        different disguise, which is why this runs every pass on the events
+        that lost eligibility rather than only when the master toggle is off.
 
         Scoped to events that survived the team filter this run, so every
         deleted feed channel has a base channel to land on in the same pass —
@@ -533,6 +659,9 @@ class StreamMatching:
             group: The event group being processed
             conn: Database connection
             passed_event_ids: Segment-aware event IDs that passed team filtering
+            separated_event_ids: Of those, the IDs still eligible for splitting
+                this run. None or empty means none are — the master toggle is
+                off, which is the original #672 case.
 
         Returns:
             Number of channels deleted.
@@ -542,10 +671,13 @@ class StreamMatching:
         if not passed_event_ids:
             return 0
 
+        still_separated = separated_event_ids or set()
         reclaimable = [
             ch
             for ch in get_managed_channels_for_group(conn, group.id)
-            if getattr(ch, "feed_team_id", None) and ch.event_id in passed_event_ids
+            if getattr(ch, "feed_team_id", None)
+            and ch.event_id in passed_event_ids
+            and ch.event_id not in still_separated
         ]
         if not reclaimable:
             return 0
@@ -563,7 +695,7 @@ class StreamMatching:
                 deleted += 1
                 logger.info(
                     "[FEED] Reclaimed feed channel '%s' (event_id=%s, feed_team_id=%s) "
-                    "— feed separation is off",
+                    "— feed separation no longer applies",
                     channel.channel_name,
                     channel.event_id,
                     channel.feed_team_id,
@@ -725,7 +857,7 @@ class StreamMatching:
 
         return None
 
-    def _expand_ufc_segments(
+    def _expand_mma_segments(
         self, matched_streams: list[dict], stream_timezone: str | None = None
     ) -> list[dict]:
         """Expand UFC streams into segment-based channels.
@@ -740,12 +872,14 @@ class StreamMatching:
         Returns:
             Expanded list with UFC streams grouped by segment
         """
-        from teamarr.consumers.ufc_segments import expand_ufc_segments
+        from teamarr.consumers.mma_segments import expand_mma_segments
 
         sport_durations = self._load_sport_durations_cached()
-        return expand_ufc_segments(matched_streams, sport_durations, stream_timezone)
+        return expand_mma_segments(matched_streams, sport_durations, stream_timezone)
 
-    def _expand_racing_segments(self, matched_streams: list[dict]) -> list[dict]:
+    def _expand_racing_segments(
+        self, matched_streams: list[dict], stream_timezone: str | None = None
+    ) -> list[dict]:
         """Expand racing streams into session-based channels.
 
         Splits each matched racing stream into one entry per race-weekend
@@ -761,7 +895,7 @@ class StreamMatching:
         from teamarr.consumers.racing_segments import expand_racing_segments
 
         sport_durations = self._load_sport_durations_cached()
-        return expand_racing_segments(matched_streams, sport_durations)
+        return expand_racing_segments(matched_streams, sport_durations, stream_timezone)
 
     def _enrich_matched_events(self, matched_streams: list[dict]) -> list[dict]:
         """Enrich all matched events with fresh status from provider.

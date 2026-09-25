@@ -15,6 +15,7 @@ from teamarr.core import Event
 
 from ._host import _LifecycleHost
 from .feed_side import resolve_feed_side
+from .stream_profiles import resolve_stream_profile_for_group
 from .timing import compute_stream_window, is_channel_event_live, is_stream_in_window
 from .types import (
     ChannelCreationResult,
@@ -111,8 +112,7 @@ class ChannelCreator(_LifecycleHost):
                 }
                 self._league_configs = league_configs
 
-                # Stream profile: always global default
-                stream_profile_id = dispatcharr_settings.default_stream_profile_id
+                default_stream_profile_id = dispatcharr_settings.default_stream_profile_id
 
                 for matched in matched_streams:
                     try:
@@ -132,6 +132,9 @@ class ChannelCreator(_LifecycleHost):
                         event_provider = getattr(event, "provider", "espn")
                         stream_name = stream.get("name", "")
                         stream_id = stream.get("id")
+                        stream_profile_id = resolve_stream_profile_for_group(
+                            conn, default_stream_profile_id, stream.get("dp_channel_group_id")
+                        )
 
                         # UFC segment support: extract segment info if present
                         segment = matched.get("segment")  # e.g., "prelims", "main_card"
@@ -180,6 +183,9 @@ class ChannelCreator(_LifecycleHost):
                         # How the stream matched ('epg', 'fuzzy', …) for the
                         # epg_match ordering rule.
                         match_method = matched.get("match_method")
+                        # EPG matches: the programme's title|sub_title, which
+                        # exception keywords also read (#829).
+                        epg_program_title = matched.get("epg_program_title")
 
                         # Time-windowed membership (183.5): for EPG-matched linear
                         # streams, derive attach/detach from the program slot +/-
@@ -231,7 +237,7 @@ class ChannelCreator(_LifecycleHost):
 
                         # Check exception keyword
                         matched_keyword, keyword_behavior = self._check_exception_keyword(
-                            stream_name, conn
+                            stream_name, conn, event, epg_program_title
                         )
 
                         # V1 Parity: If behavior is 'ignore', skip stream entirely
@@ -286,6 +292,7 @@ class ChannelCreator(_LifecycleHost):
                                 segment=segment,
                                 match_type=match_type,
                                 match_method=match_method,
+                                epg_program_title=epg_program_title,
                                 stream_feed_team_id=stream_feed_team_id,
                                 stream_feed_side=stream_feed_side,
                                 attach_at=attach_at,
@@ -366,6 +373,7 @@ class ChannelCreator(_LifecycleHost):
                             feed_label_style=feed_label_style,
                             match_type=match_type,
                             match_method=match_method,
+                            epg_program_title=epg_program_title,
                             stream_feed_team_id=stream_feed_team_id,
                             stream_feed_side=stream_feed_side,
                             attach_at=attach_at,
@@ -477,6 +485,7 @@ class ChannelCreator(_LifecycleHost):
         segment: str | None = None,
         match_type: str = "event",
         match_method: str | None = None,
+        epg_program_title: str | None = None,
         stream_feed_team_id: str | None = None,
         stream_feed_side: str | None = None,
         attach_at: str | None = None,
@@ -498,8 +507,10 @@ class ChannelCreator(_LifecycleHost):
             remove_stream_from_channel,
             stream_exists_on_channel,
             update_stream_account_name,
+            update_stream_channel_source_group,
             update_stream_feed_side,
             update_stream_feed_team,
+            update_stream_program_title,
             update_stream_window,
         )
 
@@ -595,6 +606,8 @@ class ChannelCreator(_LifecycleHost):
                     dispatcharr_channel_group=stream.get("dp_channel_group"),
                     feed_team_id=stream_feed_team_id,
                     feed_side=stream_feed_side,
+                    sport=event.sport,
+                    league=event.league,
                 )
                 if priority is None:
                     priority = get_next_stream_priority(conn, existing.id)
@@ -612,9 +625,11 @@ class ChannelCreator(_LifecycleHost):
                     source_group_id=source_group_id,
                     match_type=match_type,
                     match_method=match_method,
+                    epg_program_title=epg_program_title,
                     feed_team_id=stream_feed_team_id,
                     feed_side=stream_feed_side,
                     dispatcharr_channel_group=stream.get("dp_channel_group"),
+                    dispatcharr_channel_group_id=stream.get("dp_channel_group_id"),
                     attach_at=attach_at,
                     detach_at=detach_at,
                 )
@@ -728,6 +743,13 @@ class ChannelCreator(_LifecycleHost):
                     update_stream_window(
                         conn, existing.id, stream_id, attach_at, detach_at
                     )
+                if epg_program_title:
+                    # Keyword enforcement re-reads the stored programme text
+                    # (#829); keep it on the guide's current programme. Guarded
+                    # like the window: a name-matched run never blanks it.
+                    update_stream_program_title(
+                        conn, existing.id, stream_id, epg_program_title
+                    )
                 if stream_feed_team_id:
                     # Backfill the resolved feed team (#489) so rows attached
                     # before the column existed feed the team_feed ordering
@@ -742,7 +764,6 @@ class ChannelCreator(_LifecycleHost):
                     update_stream_feed_side(
                         conn, existing.id, stream_id, stream_feed_side
                     )
-
             result.existing.append(
                 {
                     "stream": stream_name,
@@ -760,6 +781,12 @@ class ChannelCreator(_LifecycleHost):
                     "channel_number": existing.channel_number,
                     "action": "separate_exists",
                 }
+            )
+
+        dp_channel_group_id = stream.get("dp_channel_group_id")
+        if dp_channel_group_id is not None:
+            update_stream_channel_source_group(
+                conn, existing.id, stream_id, dp_channel_group_id
             )
 
         # Sync channel settings
@@ -860,6 +887,7 @@ class ChannelCreator(_LifecycleHost):
         feed_label_style: str | None = None,
         match_type: str = "event",
         match_method: str | None = None,
+        epg_program_title: str | None = None,
         stream_feed_team_id: str | None = None,
         stream_feed_side: str | None = None,
         attach_at: str | None = None,
@@ -984,7 +1012,7 @@ class ChannelCreator(_LifecycleHost):
                     channel_name,
                     stream_profile_id,
                 )
-                # Window-gate the INITIAL stream membership (bead teamarrv2-uye).
+                # Window-gate the INITIAL stream membership (bead teamarr-uye).
                 # An EPG-matched linear stream carries an attach_at/detach_at slot;
                 # channel creation is event-anchored (create_threshold) and usually
                 # fires hours before the attach window opens. Pushing the stream
@@ -1084,9 +1112,11 @@ class ChannelCreator(_LifecycleHost):
                 source_group_id=group_id,
                 match_type=match_type,
                 match_method=match_method,
+                epg_program_title=epg_program_title,
                 feed_team_id=stream_feed_team_id,
                 feed_side=stream_feed_side,
                 dispatcharr_channel_group=stream.get("dp_channel_group"),
+                dispatcharr_channel_group_id=stream.get("dp_channel_group_id"),
                 attach_at=attach_at,
                 detach_at=detach_at,
             )

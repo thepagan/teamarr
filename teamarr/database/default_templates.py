@@ -1,4 +1,4 @@
-"""Curated default template set (epic teamarrv2-tvnk, issue #329).
+"""Curated default template set (epic teamarr-tvnk, issue #329).
 
 Gracenote-modeled defaults, seeded UNASSIGNED — the user scopes them (see
 docs/guide/templates/defaults.md for the recommended scoping table). Design
@@ -228,6 +228,8 @@ def _content_matches(row, spec: dict) -> bool:
         return False
     if not _art_matches(row.event_channel_logo_url, spec.get("event_channel_logo_url")):
         return False
+    if not _art_matches(row.team_channel_logo_url, spec.get("team_channel_logo_url")):
+        return False
     return all(_norm(getattr(row, f)) == _norm(spec.get(f)) for f in _CONTENT_FIELDS)
 
 
@@ -432,9 +434,13 @@ def _team_base(**overrides) -> dict:
     """
     base = {
         "template_type": "team",
+        "team_channel_name": "{league} | {team_name}",
         "title_format": "{gracenote_category}",
         "subtitle_template": "{team1} {at_vs} {team2}",
         "program_art_url": _TEAM_ART,
+        "team_channel_logo_url": (
+            "{league_id}/{team_name|pascal}/logo.png?style=1&logo=true&fallback=true"
+        ),
         "game_duration_mode": "sport",
         "pregame_enabled": True,
         "postgame_enabled": True,

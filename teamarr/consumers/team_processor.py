@@ -22,7 +22,12 @@ from typing import Any
 from teamarr.consumers.team_epg import TeamEPGGenerator, TeamEPGOptions
 from teamarr.core import Programme
 from teamarr.services import SportsDataService, create_default_service
-from teamarr.utilities.art_url import read_art_base_url
+from teamarr.templates.resolver import TemplateResolver
+from teamarr.utilities.art_url import (
+    apply_art_base_url,
+    is_relative_art_path,
+    read_art_base_url,
+)
 from teamarr.utilities.tz import now_utc
 from teamarr.utilities.xmltv import programmes_to_xmltv
 
@@ -195,6 +200,21 @@ class TeamProcessor:
                 return result
 
             return self._process_team_internal(conn, team)
+
+    def render_event_programme(self, conn: Connection, team_id: int, event) -> Programme | None:
+        """Render one event for a team channel using its current template."""
+        team = self._get_team(conn, team_id)
+        if not team:
+            return None
+        options = self._build_options(conn, team)
+        return self._epg_generator.render_event(
+            event,
+            team_id=team.provider_team_id,
+            league=team.primary_league,
+            channel_id=team.channel_id,
+            logo_url=team.channel_logo_url or team.team_logo_url,
+            options=options,
+        )
 
     def process_all_teams(
         self,
@@ -489,7 +509,7 @@ class TeamProcessor:
                 channel_id=team.channel_id,
                 team_name=team.team_name,
                 team_abbrev=team.team_abbrev,
-                logo_url=team.channel_logo_url or team.team_logo_url,
+                logo_url=self._resolve_channel_logo(options, team),
                 options=options,
                 provider=team.provider,
                 sport=team.sport,
@@ -512,8 +532,8 @@ class TeamProcessor:
             if programmes:
                 channel_dict = {
                     "id": team.channel_id,
-                    "name": team.team_name,
-                    "icon": team.channel_logo_url or team.team_logo_url,
+                    "name": self._resolve_channel_name(options, team),
+                    "icon": self._resolve_channel_logo(options, team),
                 }
                 from teamarr.database.settings import get_epg_settings
 
@@ -544,6 +564,7 @@ class TeamProcessor:
         in the EPG generator, which is critical for thread-safety during
         parallel processing.
         """
+        from teamarr.database.leagues import get_league_display
         from teamarr.database.settings import get_all_settings
         from teamarr.database.templates import (
             get_template,
@@ -582,6 +603,8 @@ class TeamProcessor:
             default_duration_hours=all_settings.durations.default,
             sport_durations=sport_durations,
             epg_timezone=all_settings.epg.epg_timezone,
+            art_base_url=all_settings.epg.art_base_url,
+            league_display_name=get_league_display(conn, team.primary_league),
             midnight_crossover_mode=all_settings.epg.midnight_crossover_mode,
             template_id=team.template_id,
             template=template_config,  # Pre-loaded template
@@ -591,6 +614,50 @@ class TeamProcessor:
             # user setting — the toggle was removed in the v2.7.0 EPG overhaul).
             include_final_events=True,
         )
+
+    @staticmethod
+    def _resolve_channel_name(options: TeamEPGOptions, team: TeamConfig) -> str:
+        template = options.template
+        name = template.team_channel_name if template else None
+        if name:
+            return TemplateResolver(options.art_base_url).resolve_with_map(
+                name,
+                {
+                    "league": options.league_display_name or team.primary_league.upper(),
+                    "league_id": team.primary_league,
+                    "league_code": team.primary_league,
+                    "team_name": team.team_name,
+                },
+            )
+        return team.team_name
+
+    @staticmethod
+    def _resolve_channel_logo(options: TeamEPGOptions, team: TeamConfig) -> str | None:
+        """Return the team-template channel logo, falling back to provider artwork.
+
+        Teamarr-managed channels deliberately do not read the per-team
+        ``channel_logo_url`` override. A template value without variables can
+        be resolved before schedule generation; variable-backed logos are
+        resolved with the team schedule in the managed-channel lifecycle.
+        """
+        template = options.template
+        logo = template.team_channel_logo_url if template else None
+        if logo:
+            resolved = TemplateResolver(options.art_base_url).resolve_with_map(
+                logo,
+                {
+                    "league": options.league_display_name or team.primary_league.upper(),
+                    "league_id": team.primary_league,
+                    "league_code": team.primary_league,
+                    "team_name": team.team_name,
+                },
+            )
+            resolved = apply_art_base_url(resolved, options.art_base_url)
+            # A game-thumbs path with no base URL configured is not a URL a
+            # guide client can fetch; keep the provider artwork instead (#826).
+            if not is_relative_art_path(resolved):
+                return resolved
+        return team.team_logo_url
 
     def _get_team(self, conn: Connection, team_id: int) -> TeamConfig | None:
         """Get team by ID."""
@@ -768,6 +835,7 @@ def process_team(
 def process_all_teams(
     db_factory: Any,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    service: SportsDataService | None = None,
 ) -> BatchTeamResult:
     """Process all active teams.
 
@@ -776,9 +844,13 @@ def process_all_teams(
     Args:
         db_factory: Factory function returning database connection
         progress_callback: Optional callback(current, total, team_name)
+        service: Optional SportsDataService to reuse. A full generation run
+            passes its one run-scoped service so team processing shares the
+            same warm event cache as group processing and lifecycle; omitting
+            it builds a processor-local service with a cold cache.
 
     Returns:
         BatchTeamResult
     """
-    processor = TeamProcessor(db_factory=db_factory)
+    processor = TeamProcessor(db_factory=db_factory, service=service)
     return processor.process_all_teams(progress_callback=progress_callback)

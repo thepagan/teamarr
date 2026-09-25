@@ -1,4 +1,4 @@
-"""Bell Media CFL provider normalization and routing tests."""
+"""Bell Media provider normalization and routing tests."""
 
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -14,6 +14,7 @@ COMPETITORS = [
         "name": "BC Lions",
         "club": "Lions",
         "shortName": "BC",
+        "seoIdentifier": "bc-lions",
         "primaryColor": "F15623",
     },
     {
@@ -72,10 +73,15 @@ class _Client:
         self.events = list(events)
 
     def supports_league(self, league):
-        return league == "cfl"
+        return league in {"cfl", "ohl", "pwhl"}
 
     def get_mapping(self, league):
-        return SimpleNamespace(sport="football") if league == "cfl" else None
+        mappings = {
+            "cfl": SimpleNamespace(sport="football", provider_league_id="cfl"),
+            "ohl": SimpleNamespace(sport="hockey", provider_league_id="ohl"),
+            "pwhl": SimpleNamespace(sport="hockey", provider_league_id="pwhl"),
+        }
+        return mappings.get(league)
 
     def get_competitors(self, league):
         return COMPETITORS if league == "cfl" else []
@@ -103,6 +109,62 @@ def test_team_parsing_and_league_discovery():
     assert provider.get_supported_leagues() == ["cfl"]
 
 
+def test_hockey_team_parsing_uses_tsn_widget_logo_url():
+    provider = _provider()
+
+    team = provider._parse_team(
+        {
+            "competitorId": 14,
+            "name": "London Knights",
+            "club": "Knights",
+            "shortName": "LDN",
+            "seoIdentifier": "london-knights",
+        },
+        "ohl",
+    )
+
+    assert team is not None
+    assert team.logo_url == "https://widgets.sports.bellmedia.ca/img/ohl/london-knights.webp"
+
+
+def test_event_only_hockey_team_uses_tsn_widget_logo_url():
+    provider = _provider()
+
+    team = provider._parse_event_team(
+        {
+            "competitorId": 6,
+            "location": "Toronto",
+            "name": "Sceptres",
+            "shortName": "TOR",
+            "seoIdentifier": "toronto-sceptres",
+        },
+        {},
+        "pwhl",
+    )
+
+    assert team is not None
+    assert team.logo_url == "https://widgets.sports.bellmedia.ca/img/pwhl/toronto-sceptres.webp"
+
+
+def test_cfl_team_parsing_uses_tsn_widget_logo_url():
+    provider = _provider()
+
+    assert (
+        provider._parse_team(COMPETITORS[0], "cfl").logo_url
+        == "https://widgets.sports.bellmedia.ca/img/cfl/bc-lions.webp"
+    )
+
+
+def test_missing_seo_identifier_has_no_widget_logo():
+    provider = _provider()
+
+    competitor = {key: value for key, value in COMPETITORS[0].items() if key != "seoIdentifier"}
+    team = provider._parse_team(competitor, "ohl")
+
+    assert team is not None
+    assert team.logo_url is None
+
+
 def test_event_parsing_uses_top_as_away_and_bottom_as_home():
     event = _provider([_event()]).get_event("13419712", "cfl")
 
@@ -115,6 +177,14 @@ def test_event_parsing_uses_top_as_away_and_bottom_as_home():
     assert event.broadcasts == ["TSN", "TSN1"]
     assert event.venue and event.venue.name == "McMahon Stadium"
     assert event.season_type == "regular"
+
+
+def test_event_parsing_canonicalizes_hockey_season_types():
+    provider = _provider()
+
+    assert provider._parse_event(_event(seasonTypeId=0), "ohl", {}).season_type == "preseason"
+    assert provider._parse_event(_event(seasonTypeId=1), "ohl", {}).season_type == "regular"
+    assert provider._parse_event(_event(seasonTypeId=2), "ohl", {}).season_type == "postseason"
 
 
 def test_scheduled_event_hides_scores():
@@ -212,4 +282,31 @@ def test_client_uses_bellmedia_origin():
     assert str(requests[0].url).startswith(
         "https://next-gen.sports.bellmedia.ca/v2/competitor/football/cfl"
     )
+    client.close()
+
+
+def test_client_reads_hockey_daily_calendar_groups(monkeypatch):
+    client = BellMediaClient()
+    groups = []
+    monkeypatch.setattr(
+        client,
+        "get_calendar",
+        lambda league: {
+            "season": 2026,
+            "monthlyCalendar": {
+                "2026-09": {"calendarDates": ["2026-09-12", "2026-09-13", "2026-09-14"]}
+            },
+        },
+    )
+    monkeypatch.setattr(
+        client,
+        "get_schedule_group",
+        lambda league, grouping, season: groups.append(grouping)
+        or [{"eventId": grouping}, {"eventId": grouping}],
+    )
+
+    events = client.get_events_between("ohl", date(2026, 9, 13), date(2026, 9, 14))
+
+    assert groups == ["2026-09-13", "2026-09-14"]
+    assert [event["eventId"] for event in events] == ["2026-09-13", "2026-09-14"]
     client.close()

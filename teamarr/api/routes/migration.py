@@ -13,7 +13,12 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from teamarr.database.connection import DEFAULT_DB_PATH, _is_postgres_url, get_connection, get_database_url
+from teamarr.database.connection import (
+    DEFAULT_DB_PATH,
+    _is_postgres_url,
+    get_connection,
+    get_database_url,
+)
 
 logger = logging.getLogger(__name__)
 

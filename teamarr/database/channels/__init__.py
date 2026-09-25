@@ -31,7 +31,9 @@ from .history import (
 # Keywords operations
 from .keywords import (
     check_exception_keyword,
+    event_identity_text,
     get_exception_keywords,
+    get_keywords_for_league,
 )
 
 # Settings helpers
@@ -45,6 +47,8 @@ from .settings_helpers import (
 from .streams import (
     add_stream_to_channel,
     compute_stream_priority_from_rules,
+    get_all_channel_streams,
+    get_all_ordered_stream_ids,
     get_channel_streams,
     get_next_stream_priority,
     get_ordered_stream_ids,
@@ -52,10 +56,12 @@ from .streams import (
     reorder_channel_streams,
     stream_exists_on_channel,
     update_stream_account_name,
+    update_stream_channel_source_group,
     update_stream_feed_side,
     update_stream_feed_team,
     update_stream_name,
     update_stream_priority,
+    update_stream_program_title,
     update_stream_window,
 )
 from .types import ManagedChannel, ManagedChannelStream
@@ -80,6 +86,8 @@ __all__ = [
     # Streams
     "add_stream_to_channel",
     "compute_stream_priority_from_rules",
+    "get_all_channel_streams",
+    "get_all_ordered_stream_ids",
     "get_channel_streams",
     "get_next_stream_priority",
     "get_ordered_stream_ids",
@@ -87,10 +95,12 @@ __all__ = [
     "reorder_channel_streams",
     "stream_exists_on_channel",
     "update_stream_account_name",
+    "update_stream_channel_source_group",
     "update_stream_feed_side",
     "update_stream_feed_team",
     "update_stream_name",
     "update_stream_priority",
+    "update_stream_program_title",
     "update_stream_window",
     # History
     "log_channel_history",
@@ -98,7 +108,9 @@ __all__ = [
     "cleanup_old_history",
     # Keywords
     "get_exception_keywords",
+    "get_keywords_for_league",
     "check_exception_keyword",
+    "event_identity_text",
     # Settings helpers
     "get_dispatcharr_settings",
     "get_reconciliation_settings",

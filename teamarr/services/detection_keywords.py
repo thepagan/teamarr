@@ -94,6 +94,8 @@ class DetectionKeywordService:
     _exclusion_patterns: ClassVar[list[Pattern[str]] | None] = None
     _separators: ClassVar[list[str] | None] = None
     _league_alias_map: ClassVar[dict[str, str] | None] = None
+    _league_display_map: ClassVar[dict[str, str] | None] = None
+    _league_codes: ClassVar[dict[str, str] | None] = None
 
     # ==========================================================================
     # Pattern Accessors
@@ -512,29 +514,73 @@ class DetectionKeywordService:
         return cls.detect_event_type(text) == "EVENT_CARD"
 
     @classmethod
-    def _get_league_alias_map(cls) -> dict[str, str]:
-        """Build a map from league aliases/short codes to canonical league_code.
+    def _load_league_maps(cls) -> None:
+        """Load the league lookup maps from the leagues table in one query.
 
-        Maps league_id and league_alias (lowercased) to the primary key league_code.
-        E.g., 'ncaam' → 'mens-college-basketball', 'epl' → 'eng.1'.
+        - ``_league_alias_map``: league_id and league_alias (lowercased) →
+          league_code. E.g., 'ncaam' → 'mens-college-basketball', 'epl' → 'eng.1'.
+        - ``_league_display_map``: display_name (lowercased) → league_code.
+          E.g., 'serie a' → 'ita.1'.
+        - ``_league_codes``: league_code (lowercased) → league_code.
         """
-        if cls._league_alias_map is None:
-            cls._league_alias_map = {}
-            try:
+        alias_map: dict[str, str] = {}
+        display_map: dict[str, str] = {}
+        codes: dict[str, str] = {}
+        try:
+            with get_db() as conn:
+                rows = conn.execute(
+                    "SELECT league_code, league_id, league_alias, display_name FROM leagues"
+                ).fetchall()
+                for row in rows:
+                    canonical = row["league_code"]
+                    codes[canonical.lower()] = canonical
+                    if row["league_id"]:
+                        alias_map[row["league_id"].lower()] = canonical
+                    if row["league_alias"]:
+                        alias_map[row["league_alias"].lower()] = canonical
+                    if row["display_name"]:
+                        display_map[" ".join(row["display_name"].split()).lower()] = canonical
+        except Exception as e:
+            logger.debug("[DETECT_SVC] Could not load league alias map: %s", e)
+        cls._league_alias_map = alias_map
+        cls._league_display_map = display_map
+        cls._league_codes = codes
 
-                with get_db() as conn:
-                    rows = conn.execute(
-                        "SELECT league_code, league_id, league_alias FROM leagues"
-                    ).fetchall()
-                    for row in rows:
-                        canonical = row["league_code"]
-                        if row["league_id"]:
-                            cls._league_alias_map[row["league_id"].lower()] = canonical
-                        if row["league_alias"]:
-                            cls._league_alias_map[row["league_alias"].lower()] = canonical
-            except Exception as e:
-                logger.debug("[DETECT_SVC] Could not load league alias map: %s", e)
-        return cls._league_alias_map
+    @classmethod
+    def _get_league_alias_map(cls) -> dict[str, str]:
+        """Map league aliases/short codes to canonical league_code."""
+        if cls._league_alias_map is None:
+            cls._load_league_maps()
+        return cls._league_alias_map or {}
+
+    @classmethod
+    def resolve_league_name(cls, name: str) -> str | list[str] | None:
+        """Resolve free text naming a league to its canonical league code(s).
+
+        A custom league regex captures whatever the provider writes — usually a
+        display name ('Premier League', 'Serie A') rather than the code a group
+        subscribes to ('eng.1', 'ita.1') — so the raw capture never matched a
+        subscription and valid streams were filtered as league_not_included
+        (#820). Tried most-exact first: league_code, league_id/league_alias,
+        display_name, then the league hint patterns (user and built-in) — the
+        same mapping built-in detection uses. A ':' is appended for the patterns
+        because they require a delimiter after the league name, which a bare
+        capture never has. Display names outrank the patterns so
+        'Brazilian Serie A' stays bra.1 instead of hitting the ``serie a`` hint.
+
+        Returns:
+            League code (str), list of codes for umbrella brands, or None when
+            the text names no known league.
+        """
+        key = " ".join(name.split()).lower()
+        if not key:
+            return None
+        if cls._league_codes is None:
+            cls._load_league_maps()
+        for lookup in (cls._league_codes, cls._league_alias_map, cls._league_display_map):
+            if lookup and key in lookup:
+                return lookup[key]
+        return cls.detect_league(f"{key}:")
 
     @classmethod
     def _resolve_league_code(cls, code: str) -> str:
@@ -664,6 +710,8 @@ class DetectionKeywordService:
         cls._exclusion_patterns = None
         cls._separators = None
         cls._league_alias_map = None
+        cls._league_display_map = None
+        cls._league_codes = None
         logger.info("[DETECT_SVC] Pattern cache invalidated")
 
     @classmethod

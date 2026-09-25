@@ -78,10 +78,9 @@ CREATE TABLE IF NOT EXISTS templates (
     pregame_conditional_rows JSON DEFAULT '[]',
     postgame_conditional_rows JSON DEFAULT '[{"condition": "has_recap", "template": "{game_recap.last}", "priority": 10, "label": "Recap (provider)"}]',
     idle_conditional_rows JSON DEFAULT '[]',
-    -- Offseason register seeded enabled (#418): with it off, idle content
+    -- No-schedule register seeded enabled (#418): with it off, idle content
     -- renders {*.next} literals into real guides once a team has no next game.
-    -- description_enabled is the master toggle; title stays unset so it falls
-    -- back to the idle title (which carries no .next).
+    -- Each enabled field replaces its normal idle counterpart independently.
     idle_offseason JSON DEFAULT '{"title_enabled": false, "title": null, "subtitle_enabled": true, "subtitle": "No upcoming game currently on schedule", "description_enabled": true, "description": "No upcoming {team_name} games scheduled."}',
 
     -- Conditional Descriptions (advanced)
@@ -90,7 +89,11 @@ CREATE TABLE IF NOT EXISTS templates (
 
     -- Event Template Specific (for event-based EPG)
     event_channel_name TEXT,
-    event_channel_logo_url TEXT
+    team_channel_name TEXT,
+    event_channel_logo_url TEXT,
+
+    -- Team Template Specific (for persistent managed team channels)
+    team_channel_logo_url TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name);
@@ -136,6 +139,8 @@ CREATE TABLE IF NOT EXISTS teams (
 
     -- Status
     active BOOLEAN DEFAULT 1,
+    managed_channel_enabled BOOLEAN NOT NULL DEFAULT 0,
+    managed_channel_number INTEGER,
 
     -- One entry per team per league (ESPN reuses IDs across leagues for different teams)
     UNIQUE(provider, provider_team_id, sport, primary_league),
@@ -146,6 +151,60 @@ CREATE INDEX IF NOT EXISTS idx_teams_channel_id ON teams(channel_id);
 CREATE INDEX IF NOT EXISTS idx_teams_active ON teams(active);
 CREATE INDEX IF NOT EXISTS idx_teams_provider ON teams(provider);
 CREATE INDEX IF NOT EXISTS idx_teams_sport ON teams(sport);
+
+-- Persistent Dispatcharr ownership records for opt-in Team EPG channels.
+-- ``teams.channel_id`` stays the XMLTV identity; this table is the sole
+-- authority for Teamarr ownership and must never be inferred from a tvg_id.
+CREATE TABLE IF NOT EXISTS managed_team_channels (
+    team_id INTEGER PRIMARY KEY,
+    dispatcharr_channel_id INTEGER,
+    dispatcharr_uuid TEXT,
+    channel_number INTEGER NOT NULL,
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    sync_message TEXT,
+    last_verified_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_team_channels_dispatcharr
+    ON managed_team_channels(dispatcharr_channel_id);
+
+-- Temporary stream memberships for durable managed team channels. These stay
+-- separate from managed_channel_streams, whose foreign key and lifecycle are
+-- specific to event-expiring channels.
+CREATE TABLE IF NOT EXISTS managed_team_channel_streams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    dispatcharr_stream_id INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    event_provider TEXT NOT NULL,
+    source_group_id INTEGER NOT NULL,
+    stream_name TEXT,
+    m3u_account_name TEXT,
+    match_method TEXT,
+    match_type TEXT NOT NULL DEFAULT 'event',
+    feed_team_id TEXT,
+    feed_side TEXT,
+    dispatcharr_channel_group TEXT,
+    priority INTEGER NOT NULL DEFAULT 999,
+    event_start TIMESTAMP,                    -- UTC; the soonest game wins the channel (#826)
+    attach_at TIMESTAMP,
+    detach_at TIMESTAMP,
+    removed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (team_id) REFERENCES managed_team_channels(team_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_team_stream_identity
+    ON managed_team_channel_streams(
+        team_id, dispatcharr_stream_id, event_id, event_provider, source_group_id,
+        attach_at
+    );
+CREATE INDEX IF NOT EXISTS idx_managed_team_streams_active
+    ON managed_team_channel_streams(team_id, removed_at, attach_at, detach_at);
 
 CREATE TRIGGER IF NOT EXISTS update_teams_timestamp
 AFTER UPDATE ON teams
@@ -166,7 +225,7 @@ CREATE TABLE IF NOT EXISTS settings (
     -- Look Ahead Settings
     team_schedule_days_ahead INTEGER DEFAULT 30,    -- How far to fetch team schedules (for .next vars, conditionals)
     event_match_days_ahead INTEGER DEFAULT 3,       -- Event-stream matching window forward (Event Groups only)
-    event_match_days_back INTEGER DEFAULT 7,        -- Event-stream matching window backward (for weekly sports like NFL)
+    event_match_days_back INTEGER DEFAULT 7,        -- RETIRED (Jan 2026, #744): unread. Lookback is MATCH_WINDOW_DAYS for every match method
     epg_output_days_ahead INTEGER DEFAULT 14,       -- Days to include in final XMLTV
     epg_lookback_hours INTEGER DEFAULT 6,           -- Check for in-progress games
 
@@ -180,13 +239,13 @@ CREATE TABLE IF NOT EXISTS settings (
     -- Buffer minutes for after_event delete timing and same_day midnight crossover (default 60)
     channel_post_buffer_minutes INTEGER DEFAULT 60,
 
-    -- EPG program-data matching master switch (epic teamarrv2-183.6). Default
+    -- EPG program-data matching master switch (epic teamarr-183.6). Default
     -- OFF (opt-in); also feature-gated on the connected Dispatcharr exposing
     -- /api/epg/programs/search/. Per-group epg_match_enabled has no effect unless
     -- this global switch is on.
     epg_match_enabled BOOLEAN DEFAULT 0,
 
-    -- XC (Xtream) provider EPG fallback (epic teamarrv2-crs). Default OFF
+    -- XC (Xtream) provider EPG fallback (epic teamarr-crs). Default OFF
     -- (opt-in). EPG matching normally requires a valid stream-to-EPG mapping in
     -- Dispatcharr (curated channel link or imported-guide name match). As a
     -- backup, when a stream's M3U account is an Xtream panel, Teamarr can fetch
@@ -198,7 +257,7 @@ CREATE TABLE IF NOT EXISTS settings (
     -- happens only when the cache is older than this. Default 24h.
     epg_xtream_cache_hours INTEGER DEFAULT 24,
 
-    -- EPG channel-source mode (epic teamarrv2-183.9). When enabled, an additional
+    -- EPG channel-source mode (epic teamarr-183.9). When enabled, an additional
     -- system-managed source ("Dispatcharr Channels") feeds EPG matching from the
     -- streams already assigned to curated Dispatcharr channels (using each
     -- channel's own EPG), alongside the per-group M3U-group EPG matching. Teamarr's
@@ -208,10 +267,15 @@ CREATE TABLE IF NOT EXISTS settings (
     -- (JSON array of channel_group ids). Empty array = include all groups
     -- (back-compatible). Scoping to selected groups skips EPG-matching work for
     -- undesired groups (faster generation) and drives the "Dispatcharr Group"
-    -- stream-ordering rule. (epic teamarrv2-ybt.2)
+    -- stream-ordering rule. (epic teamarr-ybt.2)
     epg_channel_source_groups TEXT DEFAULT '[]',
+    -- Optional stream-profile overrides. Each item has a target_type and stable
+    -- target_id, e.g. {"target_type":"dispatcharr_channel_group","target_id":7,
+    -- "stream_profile_id":3}. Current UI supports Dispatcharr channel groups;
+    -- this discriminated shape also permits future Sources-tab target types.
+    stream_profile_overrides TEXT DEFAULT '[]',
 
-    -- EPG stream time-windowing buffers (epic teamarrv2-183.5).
+    -- EPG stream time-windowing buffers (epic teamarr-183.5).
     -- SEPARATE from the channel create/delete buffers above: these apply to the
     -- attach/detach window of time-shared linear streams (EPG matching), so one
     -- linear stream attaches to an event channel only near game time. Global
@@ -271,6 +335,9 @@ CREATE TABLE IF NOT EXISTS settings (
     include_final_events BOOLEAN DEFAULT 0,      -- Include completed events for today
     channel_range_start INTEGER DEFAULT 101,     -- First auto-assigned channel number
     channel_range_end INTEGER,                   -- Last auto-assigned channel (null = no limit)
+    managed_team_channel_range_start INTEGER DEFAULT 9000,
+    managed_team_channel_range_end INTEGER,
+    managed_team_channel_priority_ids JSON DEFAULT '[]',
 
     -- Default Team Filtering (for Event Groups)
     default_include_teams JSON,                  -- Global include filter [{"provider":"espn","team_id":"33","league":"nfl"}, ...]
@@ -318,6 +385,8 @@ CREATE TABLE IF NOT EXISTS settings (
     default_stream_profile_id INTEGER,        -- Default stream profile for event channels
     default_channel_group_id INTEGER,         -- Default channel group for event channels
     default_channel_group_mode TEXT DEFAULT 'static', -- 'static', 'sport', 'league', or custom pattern
+    managed_team_channel_profile_ids JSON,    -- Dedicated channel profiles for managed team channels
+    managed_team_channel_group_id INTEGER,    -- Dedicated channel group for managed team channels
     cleanup_unused_logos BOOLEAN DEFAULT 0,   -- Call Dispatcharr's cleanup API after generation
 
     -- Reconciliation Settings
@@ -448,6 +517,7 @@ CREATE TABLE IF NOT EXISTS settings (
     -- Feed Separation (HOME/AWAY stream detection)
     -- When enabled, detects feed indicators in stream names and creates separate channels per feed
     feed_separation_enabled BOOLEAN DEFAULT 0,          -- Master toggle (off by default)
+    feed_separation_sports JSON DEFAULT '[]',           -- Sport codes to split ([] = every sport, #732)
     feed_home_terms JSON DEFAULT '["HOME"]',            -- Terms that indicate home feed
     feed_away_terms JSON DEFAULT '["AWAY"]',            -- Terms that indicate away feed
     feed_detect_team_names BOOLEAN DEFAULT 1,           -- Also detect team names as feed indicators
@@ -484,7 +554,28 @@ CREATE TABLE IF NOT EXISTS settings (
     channelsdvr_servers JSON,
 
     -- Schema Version
-    schema_version INTEGER DEFAULT 92
+    schema_version INTEGER DEFAULT 96
+);
+
+-- Scoped stream-ordering rulesets. Runtime resolution intentionally remains
+-- separate; this table only owns the persisted configuration and assignments.
+CREATE TABLE IF NOT EXISTS stream_ordering_scopes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    rules JSON NOT NULL DEFAULT '[]',
+    use_global_scoring BOOLEAN NOT NULL DEFAULT 1,
+    use_global_priority BOOLEAN NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS stream_ordering_scope_assignments (
+    ruleset_id INTEGER NOT NULL,
+    scope_type TEXT NOT NULL CHECK(scope_type IN ('sport', 'league')),
+    scope_value TEXT NOT NULL,
+    PRIMARY KEY (ruleset_id, scope_type, scope_value),
+    UNIQUE (scope_type, scope_value),
+    FOREIGN KEY (ruleset_id) REFERENCES stream_ordering_scopes(id) ON DELETE CASCADE
 );
 
 -- Insert default settings
@@ -726,7 +817,11 @@ CREATE TABLE IF NOT EXISTS subscription_league_config (
     channel_group_mode TEXT DEFAULT NULL,       -- NULL = use global default ('static', 'sport', 'league', or custom pattern)
     -- Matchup order override (#692): NULL = use the global setting
     matchup_order TEXT DEFAULT NULL
-        CHECK(matchup_order IS NULL OR matchup_order IN ('auto', 'away_first', 'home_first'))
+        CHECK(matchup_order IS NULL OR matchup_order IN ('auto', 'away_first', 'home_first')),
+    -- NCAA divisions this league still ingests (#811): NULL = every division
+    -- ESPN files under the league, otherwise a JSON list of division keys
+    -- (see COLLEGE_SCOREBOARD_DIVISIONS). A dropped division is never fetched.
+    included_divisions JSON DEFAULT NULL
 );
 
 
@@ -1004,7 +1099,7 @@ CREATE TABLE IF NOT EXISTS leagues (
     last_cache_refresh TIMESTAMP,
 
     -- Custom League Flag
-    -- 1: user-added via the UI (TSDB-only, premium-gated; see epic teamarrv2-eqz).
+    -- 1: user-added via the UI (TSDB-only, premium-gated; see epic teamarr-eqz).
     --    Lives only in the DB, not schema.sql. The CRUD API only ever mutates or
     --    deletes rows with is_custom=1, so built-in leagues can't be touched.
     -- 0: built-in league seeded from schema.sql.
@@ -1074,16 +1169,16 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
     ('olympics-mens-ice-hockey', 'espn', 'hockey/olympics-mens-ice-hockey', NULL, 'Men''s Ice Hockey - Olympics', 'hockey', '/olympics-2026.png', NULL, 1, 'Olympic Hockey', 'olymh', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('olympics-womens-ice-hockey', 'espn', 'hockey/olympics-womens-ice-hockey', NULL, 'Women''s Ice Hockey - Olympics', 'hockey', '/olympics-2026.png', NULL, 1, 'Olympic W Hockey', 'olywh', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
 
-    -- Hockey - CHL/Canadian Major Junior (HockeyTech)
-    ('chl', 'hockeytech', 'chl', NULL, 'Canadian Hockey League', 'hockey', 'https://raw.githubusercontent.com/sethwv/game-thumbs/dev/assets/CHL.png', NULL, 1, 'CHL', 'chl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
-    ('ohl', 'hockeytech', 'ohl', NULL, 'Ontario Hockey League', 'hockey', 'https://raw.githubusercontent.com/sethwv/game-thumbs/main/assets/OHL_LIGHTMODE.png', 'https://raw.githubusercontent.com/sethwv/game-thumbs/main/assets/OHL_DARKMODE.png', 1, 'OHL', 'ohl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
-    ('whl', 'hockeytech', 'whl', NULL, 'Western Hockey League', 'hockey', 'https://media.chl.ca/wp-content/uploads/sites/6/2023/08/18153245/Western_Hockey_League.svg_-1.png', NULL, 1, 'WHL', 'whl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
-    ('qmjhl', 'hockeytech', 'lhjmq', NULL, 'Quebec Major Junior Hockey League', 'hockey', 'https://media.chl.ca/wp-content/uploads/sites/2/2023/05/25155229/logo_q_lg.png', NULL, 1, 'QMJHL', 'qmjhl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    -- Hockey - Bell Media (TSN public score widget)
+    ('chl', 'bellmedia', 'chl', NULL, 'Canadian Hockey League', 'hockey', 'https://raw.githubusercontent.com/sethwv/game-thumbs/dev/assets/CHL.png', NULL, 1, 'CHL', 'chl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('ohl', 'bellmedia', 'ohl', NULL, 'Ontario Hockey League', 'hockey', 'https://raw.githubusercontent.com/sethwv/game-thumbs/main/assets/OHL_LIGHTMODE.png', 'https://raw.githubusercontent.com/sethwv/game-thumbs/main/assets/OHL_DARKMODE.png', 1, 'OHL', 'ohl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('whl', 'bellmedia', 'whl', NULL, 'Western Hockey League', 'hockey', 'https://media.chl.ca/wp-content/uploads/sites/6/2023/08/18153245/Western_Hockey_League.svg_-1.png', NULL, 1, 'WHL', 'whl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('qmjhl', 'bellmedia', 'lhjmq', NULL, 'Quebec Major Junior Hockey League', 'hockey', 'https://media.chl.ca/wp-content/uploads/sites/2/2023/05/25155229/logo_q_lg.png', NULL, 1, 'QMJHL', 'qmjhl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
 
-    -- Hockey - Pro/Minor Pro Leagues (HockeyTech)
-    ('ahl', 'hockeytech', 'ahl', NULL, 'American Hockey League', 'hockey', 'https://theahl.com/wp-content/uploads/sites/3/2025/10/AHL90_500.png', NULL, 1, 'AHL', 'ahl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    -- Hockey - Pro/Minor Pro Leagues
+    ('ahl', 'bellmedia', 'ahl', NULL, 'American Hockey League', 'hockey', 'https://theahl.com/wp-content/uploads/sites/3/2025/10/AHL90_500.png', NULL, 1, 'AHL', 'ahl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
     ('echl', 'hockeytech', 'echl', NULL, 'East Coast Hockey League', 'hockey', 'https://raw.githubusercontent.com/sethwv/game-thumbs/dev/assets/ECHL.png', NULL, 1, 'ECHL', 'echl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
-    ('pwhl', 'hockeytech', 'pwhl', NULL, 'Professional Women''s Hockey League', 'hockey', 'https://raw.githubusercontent.com/sethwv/game-thumbs/main/assets/PWHL.png', NULL, 1, 'PWHL', 'pwhl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
+    ('pwhl', 'bellmedia', 'pwhl', NULL, 'Professional Women''s Hockey League', 'hockey', 'https://raw.githubusercontent.com/sethwv/game-thumbs/main/assets/PWHL.png', NULL, 1, 'PWHL', 'pwhl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
 
     -- Hockey - US Junior (HockeyTech)
     ('ushl', 'hockeytech', 'ushl', NULL, 'United States Hockey League', 'hockey', 'https://dbukjj6eu5tsf.cloudfront.net/ushl.sidearmsports.com/images/responsive_2022/ushl_on-dark.svg', NULL, 1, 'USHL', 'ushl', 'team_vs_team', NULL, NULL, NULL, NULL, 1),
@@ -1227,6 +1322,9 @@ INSERT OR REPLACE INTO leagues (league_code, provider, provider_league_id, provi
 
     -- MMA (ESPN) - Combat sport with event cards
     ('ufc', 'espn', 'mma/ufc', NULL, 'Ultimate Fighting Championship', 'mma', 'https://a.espncdn.com/i/teamlogos/leagues/500/ufc.png', NULL, 0, 'UFC', 'ufc', 'event_card', NULL, NULL, NULL, NULL, 1),
+    ('pfl', 'espn', 'mma/pfl', NULL, 'Professional Fighters League', 'mma', 'https://a.espncdn.com/i/teamlogos/leagues/500/pfl.png', NULL, 0, 'PFL', 'pfl', 'event_card', NULL, NULL, NULL, NULL, 1),
+    -- LFA has no league logo on ESPN's CDN (500/lfa.png is a 404) — the generic MMA icon is the only option.
+    ('lfa', 'espn', 'mma/lfa', NULL, 'Legacy Fighting Alliance', 'mma', 'https://a.espncdn.com/redesign/assets/img/icons/ESPN-icon-mma.png', NULL, 0, 'LFA', 'lfa', 'event_card', NULL, NULL, NULL, NULL, 1),
 
     -- Volleyball (ESPN)
     ('mens-college-volleyball', 'espn', 'volleyball/mens-college-volleyball', NULL, 'NCAA Men''s Volleyball', 'volleyball', 'https://www.ncaa.com/modules/custom/casablanca_core/img/sportbanners/volleyball.png', NULL, 1, 'NCAA Volleyball', 'ncaavb', 'team_vs_team', 'Men''s College Volleyball', NULL, NULL, NULL, 1),
@@ -1503,6 +1601,11 @@ CREATE TABLE IF NOT EXISTS provider_group_cache (
     group_key TEXT NOT NULL,              -- provider's stable group id (SEC=8, Big Ten=5, ...)
     group_name TEXT NOT NULL,             -- 'Southeastern Conference'
     group_abbrev TEXT,                    -- 'SEC' (core tree shortName)
+    -- Parent group in the provider's season tree: the division the conference
+    -- sits under (football 80/81 = FBS/FCS, basketball 50 = NCAA Division I).
+    -- Powers the {division} channel-group wildcard (#717).
+    parent_key TEXT,                      -- '80'
+    parent_name TEXT,                     -- 'FBS'
     season INTEGER,                       -- season year the tree was read from
     last_refreshed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -1592,10 +1695,12 @@ CREATE TABLE IF NOT EXISTS managed_channel_streams (
     match_type TEXT DEFAULT 'event'          -- 'event' (TEAM_VS_TEAM) or 'team' (TEAM_ONLY)
         CHECK(match_type IN ('event', 'team')),
     match_method TEXT,                        -- how the stream was matched: 'epg', 'fuzzy', 'cache', etc. (drives the epg_match stream-ordering rule)
+    epg_program_title TEXT,                   -- (#829) matched EPG programme title|sub_title for EPG-matched streams; exception keywords are checked against it after the stream name. NULL for name matches.
     feed_team_id TEXT,                        -- (#489) resolved feed/matched team (provider team id, same namespace as managed_channels.feed_team_id); drives team_feed/not_team_feed ordering rules ahead of the name regex. NULL = no team resolved.
     feed_side TEXT                            -- (#533) which side this feed is: 'home', 'away', or NULL = UNKNOWN. Tri-state by design — NULL is a real value (no feed signal, or a sport with no sides), never "not home therefore away". Drives home_feed/away_feed ordering rules; unknown matches neither.
         CHECK(feed_side IN ('home', 'away')),
     dispatcharr_channel_group TEXT,           -- (ybt.3) the DP channel's own group name, for channel-source streams; drives the 'dispatcharr_group' stream-ordering rule. NULL for non-channel-source streams.
+    dispatcharr_channel_group_id INTEGER,     -- Stable DP channel-group id for channel-source stream-profile overrides. NULL for non-channel-source streams.
 
     -- Priority (0 = primary, higher = failover)
     priority INTEGER DEFAULT 0,
@@ -1612,7 +1717,7 @@ CREATE TABLE IF NOT EXISTS managed_channel_streams (
     removed_at TIMESTAMP,
     remove_reason TEXT,
 
-    -- Time-windowed membership (epic teamarrv2-183.5).
+    -- Time-windowed membership (epic teamarr-183.5).
     -- NULL = full-life membership (default; dedicated/name-matched streams stay
     -- attached for the channel's whole life). Non-NULL = time-shared linear
     -- stream that is only active in Dispatcharr while attach_at <= now < detach_at
@@ -1697,16 +1802,42 @@ CREATE TABLE IF NOT EXISTS consolidation_exception_keywords (
     enabled BOOLEAN DEFAULT 1
 );
 
--- Seed default language keywords
-INSERT OR IGNORE INTO consolidation_exception_keywords (label, match_terms, behavior) VALUES
-    ('Spanish', 'Spanish, En Español, (ESP), Español', 'consolidate'),
-    ('French', 'French, En Français, (FRA), Français', 'consolidate'),
-    ('German', 'German, (GER), Deutsch', 'consolidate'),
-    ('Portuguese', 'Portuguese, (POR), Português', 'consolidate'),
-    ('Italian', 'Italian, (ITA), Italiano', 'consolidate'),
-    ('Japanese', 'Japanese, (JPN), 日本語', 'consolidate'),
-    ('Korean', 'Korean, (KOR), 한국어', 'consolidate'),
-    ('Chinese', 'Chinese, (CHN), (CHI), 中文', 'consolidate');
+-- Default language keywords are NOT seeded here (#726): executescript runs on
+-- every startup, so an INSERT OR IGNORE seed resurrects rows the user deleted.
+-- Seeding lives in database/exception_keywords.py::seed_default_exception_keywords,
+-- which inserts a default at most once per install and records it below.
+
+-- Which default labels this install has already been offered. A label present
+-- here is never seeded again, so deleting or renaming a default is permanent.
+CREATE TABLE IF NOT EXISTS seeded_default_exception_keywords (
+    label TEXT PRIMARY KEY,
+    seeded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Race feeds (#245): per-league driver and feed-variant rows that ride the
+-- exception-keyword engine. Each row is a keyword scoped to ONE league —
+-- "Hamilton" must fire on F1 streams and never on the Tiger-Cats — with a
+-- stable feed_key so a roster refresh can update the label/terms of a managed
+-- row without touching the user's behavior/enabled choice. Default behavior is
+-- 'ignore': out of the box no onboard/pit-lane/tracker stream reaches any
+-- channel; the user flips the drivers they want to 'consolidate' and each gets
+-- its own channel per session (the existing Sub-Consolidate path).
+CREATE TABLE IF NOT EXISTS race_feeds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    league TEXT NOT NULL,                     -- 'f1'
+    feed_key TEXT NOT NULL,                   -- 'driver:charles-leclerc' | 'variant:pit-lane'
+    kind TEXT NOT NULL CHECK(kind IN ('driver', 'variant')),
+    label TEXT NOT NULL,                      -- channel-name suffix / {exception_keyword}
+    match_terms TEXT NOT NULL,                -- comma-separated, same grammar as exception keywords
+    behavior TEXT NOT NULL DEFAULT 'ignore'
+        CHECK(behavior IN ('consolidate', 'separate', 'ignore')),
+    enabled BOOLEAN DEFAULT 1,
+    managed BOOLEAN DEFAULT 1,                -- label/terms owned by the roster refresh
+    last_seen TIMESTAMP,                      -- last refresh that still listed this row
+    UNIQUE(league, feed_key)
+);
+CREATE INDEX IF NOT EXISTS idx_race_feeds_league ON race_feeds(league, enabled);
 
 CREATE INDEX IF NOT EXISTS idx_exception_keywords_enabled ON consolidation_exception_keywords(enabled);
 CREATE INDEX IF NOT EXISTS idx_exception_keywords_behavior ON consolidation_exception_keywords(behavior);

@@ -17,3 +17,14 @@ def test_league_upsert_ignores_semicolons_in_comments():
     assert f1_index < conflict_index < stream_cache_index
     assert "enabled = EXCLUDED.enabled;" in postgres_sql
     assert "the others are seeded\nON CONFLICT" not in postgres_sql
+
+
+def test_new_managed_channel_and_race_feed_booleans_are_postgres_native():
+    schema_sql = (Path(__file__).parent.parent / "teamarr" / "database" / "schema.sql").read_text()
+
+    postgres_sql = build_postgres_schema(schema_sql)
+
+    assert "managed_channel_enabled BOOLEAN NOT NULL DEFAULT FALSE" in postgres_sql
+    assert "managed BOOLEAN DEFAULT TRUE" in postgres_sql
+    assert "managed_channel_enabled BOOLEAN NOT NULL DEFAULT 0" not in postgres_sql
+    assert "managed BOOLEAN DEFAULT 1" not in postgres_sql

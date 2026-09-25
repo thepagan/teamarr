@@ -2,6 +2,8 @@ import { api } from "./client"
 
 export interface ManagedChannel {
   id: number
+  channel_type: "event" | "team"
+  team_id: number | null
   event_epg_group_id: number | null // Source group (provenance, not ownership)
   event_id: string
   event_provider: string
@@ -188,6 +190,7 @@ export interface ChannelStreamEntry {
   stream_stats: Record<string, unknown> | null
   stream_stats_updated_at: string | null
   matched_rules: StreamRuleMatch[]
+  sorting_scope: string
   matched_event: string | null
   matched_league: string | null
   cache_match_method: string | null
@@ -206,6 +209,16 @@ export interface StreamNameMatch {
 export interface ChannelStreamsResponse {
   streams: ChannelStreamEntry[]
   stats_refreshed: boolean
+  current_event: {
+    title: string | null
+    sub_title: string | null
+    is_attached: boolean
+    is_live: boolean
+    start: string | null
+    stop: string | null
+    attach_at?: string | null
+    detach_at?: string | null
+  } | null
 }
 
 export async function getChannelStreams(channelId: number): Promise<ChannelStreamsResponse> {

@@ -8,6 +8,7 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from teamarr.core import (
     SEASON_OFFSEASON,
@@ -23,18 +24,41 @@ from teamarr.core import (
     Venue,
 )
 from teamarr.core.sports import normalize_sport
-from teamarr.providers.espn.client import ESPN_TEAM_ID_CORRECTIONS, ESPNClient
+from teamarr.providers.espn.client import (
+    COLLEGE_SCOREBOARD_DIVISIONS,
+    ESPN_TEAM_ID_CORRECTIONS,
+    ESPNClient,
+    league_publishes_rankings,
+    scoreboard_groups_for_divisions,
+)
 from teamarr.providers.espn.constants import STATUS_MAP, TOURNAMENT_SPORTS
 from teamarr.providers.espn.editorial_canary import EditorialDriftCanary
+from teamarr.providers.espn.mma import MMAParserMixin
 from teamarr.providers.espn.tennis import TennisParserMixin
 from teamarr.providers.espn.tournament import TournamentParserMixin
-from teamarr.providers.espn.ufc import UFCParserMixin
 from teamarr.utilities.event_status import is_event_final
 
 logger = logging.getLogger(__name__)
 
+# Poll rankings (#710). ESPN's /teams/{id} payload carries no rank field for any
+# league, so TeamStats.rank has to come from the league's /rankings polls.
+#
+# A poll only counts while it is being voted on: ESPN keeps serving a season's
+# final poll all offseason (on 2026-09-04 the latest college-hockey poll was
+# 2026-04-13), which would stamp last season's ranks onto this season's
+# listings. In-season polls refresh weekly, so anything older than the cutoff is
+# an ended season, not a bye week.
+RANKING_POLL_MAX_AGE_DAYS = 45
+# Tournament brackets ride in the same payload ("NCAA Men's Hockey Tournament
+# Seedings"); a 4-team seed is not a poll rank — that's playoff_seed's job.
+RANKING_SEEDING_POLL_TYPE = "tournament"
+# AP wins ties so an FBS team gets its AP rank rather than the coaches poll,
+# while polls AP does not cover (FCS, D-II) still fill in their own teams.
+RANKING_PRIMARY_POLL_TYPE = "ap"
+RANKING_MAX = 25
 
-class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, SportsProvider):
+
+class ESPNProvider(MMAParserMixin, TennisParserMixin, TournamentParserMixin, SportsProvider):
     """ESPN implementation of SportsProvider.
 
     Pure fetch + normalize layer. No caching - that's handled by SportsDataService.
@@ -52,6 +76,11 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         # events cache instead of fetching each day's scoreboard once per team —
         # so a league's daily scoreboard is fetched once per run, not N_teams times.
         self._cached_events_fn: Callable[[str, date], list[Event]] | None = None
+        # Optional per-league division selection (#811), injected at the
+        # database boundary in providers/__init__.py. Returns the divisions a
+        # league still ingests, or None for all of them — read per fetch, so a
+        # settings change lands on the next run rather than the next restart.
+        self._included_divisions_fn: Callable[[str], list[str] | None] | None = None
         # Drift canary (#506): warns if the editorial scoreboard keys the
         # empty-safe features rely on vanish from every payload (rename drift).
         self._editorial_canary = EditorialDriftCanary()
@@ -70,6 +99,35 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         tests or cache refresh), the scan falls back to direct per-day fetches.
         """
         self._cached_events_fn = fn
+
+    def set_included_divisions_fn(self, fn: Callable[[str], list[str] | None] | None) -> None:
+        """Inject the per-league NCAA division selection lookup (#811).
+
+        When unset (provider used standalone, e.g. in tests or a bare cache
+        refresh), every division ESPN files under the league is fetched — the
+        behaviour before the setting existed.
+        """
+        self._included_divisions_fn = fn
+
+    def _scoreboard_groups(self, league: str) -> tuple[str, ...] | None:
+        """The scoreboard groups to request for ``league`` under the user's config.
+
+        None means "the league's full set" — the client's own default — so a
+        league with no optional divisions, an install with no selection, and a
+        failed lookup all take the identical path.
+        """
+        if self._included_divisions_fn is None:
+            return None
+        if league not in COLLEGE_SCOREBOARD_DIVISIONS:
+            return None
+        try:
+            divisions = self._included_divisions_fn(league)
+        except Exception as e:  # noqa: BLE001 — a config read must never fail a fetch
+            logger.warning("[ESPN] Division config lookup failed for %s: %s", league, e)
+            return None
+        if not divisions:
+            return None
+        return scoreboard_groups_for_divisions(league, divisions)
 
     def supports_league(self, league: str) -> bool:
         # Database is the source of truth
@@ -179,9 +237,39 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         except Exception:
             pass  # Best-effort, don't break event fetching
 
+    def _is_mma(self, league: str, sport: str | None = None) -> bool:
+        """Whether a league is an MMA promotion, and so takes the card path.
+
+        Sport is the authoritative signal, so a new promotion needs only a
+        ``schema.sql`` row (#756). MMA_LEAGUES is the fallback for when the
+        leagues-table lookup can't answer — a provider built without a mapping
+        source, or a DB that predates the row — because the alternative is a
+        silent fall-through to the team scoreboard path with a bad URL.
+        """
+        if sport is None:
+            sport = self._get_sport(league)
+        return sport == "mma" or league in self.MMA_LEAGUES
+
+    def _espn_mma_slug(
+        self, league: str, sport_league: tuple[str, str] | None = None
+    ) -> str:
+        """ESPN's MMA league slug for a Teamarr league code.
+
+        Reads the second half of ``provider_league_id`` ('mma/pfl' → 'pfl')
+        so a new promotion needs only a ``schema.sql`` row. Falls back to the
+        league code itself, which is what every ESPN MMA slug happens to be.
+        """
+        if sport_league is None:
+            sport_league = self._get_sport_league_from_db(league)
+        return sport_league[1] if sport_league else league
+
     def get_events(self, league: str, target_date: date) -> list[Event]:
-        # UFC uses different API endpoint
-        if league == "ufc":
+        # Get sport/league from database config
+        sport_league = self._get_sport_league_from_db(league)
+        sport = self._get_sport(league)
+
+        # MMA promotions use a different API endpoint
+        if self._is_mma(league, sport):
             # ESPN's default MMA scoreboard returns ONLY the current featured
             # card, so any other card was invisible regardless of stream name
             # or regex (#345). Query a ±1-day window around target_date: a
@@ -191,20 +279,18 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
                 (target_date - timedelta(days=1)).strftime("%Y%m%d"),
                 (target_date + timedelta(days=1)).strftime("%Y%m%d"),
             )
-            data = self._client.get_ufc_scoreboard(window)
+            data = self._client.get_mma_scoreboard(
+                self._espn_mma_slug(league, sport_league), window
+            )
             if not data:
                 return []
             # Mixin handles: pure parsing only. The ±1-day fetch window IS the
             # superset; segment-aware date membership (a card touching two
             # days belongs to both, #345) is decided by the user-day window
             # at the service seam (#590).
-            return self._parse_ufc_events(data)
-
-        # Get sport/league from database config
-        sport_league = self._get_sport_league_from_db(league)
+            return self._parse_mma_events(data, league)
 
         # Check if this is a tournament sport
-        sport = self._get_sport(league)
         if sport in TOURNAMENT_SPORTS:
             return self._get_tournament_events(league, target_date, sport, sport_league)
 
@@ -216,12 +302,21 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         target_date: date,
         sport_league: tuple[str, str] | None,
     ) -> list[Event]:
-        """Standard per-date scoreboard fetch (non-UFC, non-tournament)."""
-        date_str = target_date.strftime("%Y%m%d")
-        data = self._client.get_scoreboard(league, date_str, sport_league)
+        """Standard per-date scoreboard fetch (non-MMA, non-tournament)."""
+        return self._scoreboard_events_for(league, target_date.strftime("%Y%m%d"), sport_league)
+
+    def _scoreboard_events_for(
+        self, league: str, date_str: str, sport_league: tuple[str, str] | None
+    ) -> list[Event]:
+        """One scoreboard request for ``date_str`` (a day or a ``A-B`` range), parsed."""
+        data = self._client.get_scoreboard(
+            league, date_str, sport_league, self._scoreboard_groups(league)
+        )
         if not data:
             return []
+        return self._parse_scoreboard_payload(data, league)
 
+    def _parse_scoreboard_payload(self, data: dict, league: str) -> list[Event]:
         # Capture league name from scoreboard for discovered leagues
         self._capture_league_name(data, league)
 
@@ -232,6 +327,58 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
                 events.append(event)
 
         return events
+
+    # ESPN files a scoreboard event under the US-Eastern date of its start
+    # (verified 2026-09-12: 161/161 events across MLB, NFL, NCAAF, EPL, La
+    # Liga). The span fetch below re-creates those buckets from a ranged
+    # response, so the service's per-day raw cache stays the cache of record.
+    SCOREBOARD_BUCKET_TZ = ZoneInfo("America/New_York")
+
+    def get_events_span(
+        self, league: str, start: date, end: date
+    ) -> dict[date, list[Event]] | None:
+        """The provider-day buckets ``start..end`` from ONE ranged scoreboard call (#808).
+
+        The date seam unions D-1, D and D+1 (#601); on a cold cache that was
+        three requests per league. ESPN accepts ``?dates=YYYYMMDD-YYYYMMDD``
+        and answers with the identical event set (measured over 16 league ×
+        weekend cases, including college football's per-conference ``groups``
+        calls), so the union costs one request. Returns the events keyed by
+        the bucket day ESPN would have filed them under, every day in the span
+        present (empty days included), so the caller can cache each bucket
+        exactly as a per-day fetch would have. ``None`` for the MMA and
+        tournament paths, which have their own windowing — the caller falls
+        back to per-day fetches.
+        ``None`` also when the request itself fails, so a blip on the range
+        endpoint costs nothing: the per-day fetches take over.
+        """
+        if end < start:
+            return None
+        sport_league = self._get_sport_league_from_db(league)
+        sport = self._get_sport(league)
+        if self._is_mma(league, sport) or sport in TOURNAMENT_SPORTS:
+            return None
+        data = self._client.get_scoreboard(
+            league, f"{start:%Y%m%d}-{end:%Y%m%d}", sport_league, self._scoreboard_groups(league)
+        )
+        if not data:
+            # A failed range request must not become three cached empty days;
+            # declining lets the caller fetch each day as before.
+            return None
+        events = self._parse_scoreboard_payload(data, league)
+        buckets: dict[date, list[Event]] = {}
+        day = start
+        while day <= end:
+            buckets[day] = []
+            day += timedelta(days=1)
+        for event in events:
+            bucket_day = event.start_time.astimezone(self.SCOREBOARD_BUCKET_TZ).date()
+            # A range answer is the union of its days; anything ESPN filed
+            # outside the asked-for days is not something a per-day fetch
+            # would have returned, so it is dropped rather than mis-filed.
+            if bucket_day in buckets:
+                buckets[bucket_day].append(event)
+        return buckets
 
     def get_sample_candidates(self, league: str) -> list[Event]:
         """Recent + upcoming events for a sample preview, in ≤2 calls.
@@ -244,7 +391,7 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         schedules (NBA Finals, weekly NFL).
         """
         sport = self._get_sport(league)
-        if league == "ufc":
+        if self._is_mma(league, sport):
             # Cards run ~weekly, so a today/yesterday scan is empty most of the
             # week and combat previews always fell back to static samples
             # (#260). One ±7-day range call captures both the last finished
@@ -255,8 +402,8 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
                 (today - timedelta(days=7)).strftime("%Y%m%d"),
                 (today + timedelta(days=7)).strftime("%Y%m%d"),
             )
-            data = self._client.get_ufc_scoreboard(window)
-            return self._parse_ufc_events(data) if data else []
+            data = self._client.get_mma_scoreboard(self._espn_mma_slug(league), window)
+            return self._parse_mma_events(data, league) if data else []
         if sport in TOURNAMENT_SPORTS:
             # Special endpoints — reuse the per-date path over a few days.
             by_event_id: dict[str, Event] = {}
@@ -269,7 +416,9 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         yesterday = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
         by_id: dict[str, Event] = {}
         for date_str in (None, yesterday):  # None = ESPN default (most recent) slate
-            data = self._client.get_scoreboard(league, date_str, sport_league)
+            data = self._client.get_scoreboard(
+                league, date_str, sport_league, self._scoreboard_groups(league)
+            )
             if not data:
                 continue
             self._capture_league_name(data, league)
@@ -289,9 +438,10 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         then returns the most recent one — e.g. NFL in June → the Super Bowl.
         Best sample, since a finished game populates every postgame variable.
         """
-        if self._get_sport(league) in TOURNAMENT_SPORTS:
+        sport = self._get_sport(league)
+        if sport in TOURNAMENT_SPORTS:
             return None
-        if league == "ufc":
+        if self._is_mma(league, sport):
             # Cards are ~weekly; the longest dark stretches (holidays) are a
             # few weeks, so one 35-day window nearly always hits. Finished-
             # first matters for combat: a final card is the only sample that
@@ -299,12 +449,13 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
             end = date.today()
             for _ in range(3):
                 start = end - timedelta(days=35)
-                data = self._client.get_ufc_scoreboard(
-                    f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+                data = self._client.get_mma_scoreboard(
+                    self._espn_mma_slug(league),
+                    f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}",
                 )
                 finals = [
                     e
-                    for e in (self._parse_ufc_events(data) if data else [])
+                    for e in (self._parse_mma_events(data, league) if data else [])
                     if e.home_team and e.away_team and is_event_final(e)
                 ]
                 if finals:
@@ -317,7 +468,10 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
         for _ in range(9):  # ~9 months back
             start = end - window
             data = self._client.get_scoreboard(
-                league, f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}", sport_league
+                league,
+                f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}",
+                sport_league,
+                self._scoreboard_groups(league),
             )
             finals = []
             for event_data in (data or {}).get("events", []):
@@ -467,7 +621,9 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
                 continue
 
             date_str = target_date.strftime("%Y%m%d")
-            data = self._client.get_scoreboard(league, date_str, sport_league)
+            data = self._client.get_scoreboard(
+                league, date_str, sport_league, self._scoreboard_groups(league)
+            )
             if not data:
                 continue
 
@@ -551,11 +707,17 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
             return logos[0].get("href")
         return None
 
+    # ESPN MMA promotions. Every card fetch is keyed on the league's SPORT, so
+    # a new promotion is a schema.sql row — this set is only the fallback for
+    # when that lookup can't answer (see _is_mma), and the source of truth for
+    # the endpoint-capability sets below.
+    MMA_LEAGUES = {"ufc", "pfl", "lfa"}
+
     # Leagues without summary endpoint support
     # These leagues only have scoreboard data - no per-event detail endpoint
     # When get_event() is called for these, we return None immediately to avoid 404s
     # Tennis: site/v2 summary returns HTTP 400 for atp/wta (#282)
-    LEAGUES_WITHOUT_SUMMARY = {"ufc", "atp", "wta"}
+    LEAGUES_WITHOUT_SUMMARY = MMA_LEAGUES | {"atp", "wta"}
 
     # Leagues without teams endpoint support
     # Leagues where /teams endpoint doesn't work or isn't needed:
@@ -563,8 +725,7 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
     # - Olympics: teams only in events, no team filtering/import needed
     # - Tennis: players ride as Teams with synthetic player_* ids (scoreboard
     #   athlete ids are null); ESPN's teams endpoints 400 on them (#282)
-    LEAGUES_WITHOUT_TEAMS = {
-        "ufc",
+    LEAGUES_WITHOUT_TEAMS = MMA_LEAGUES | {
         "boxing",
         "olympics-mens-ice-hockey",
         "olympics-womens-ice-hockey",
@@ -643,6 +804,11 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
             )
             event.home_last_five = home_form
             event.away_last_five = away_form
+            # Typed provider facts used by public variables and the optional
+            # generated-preview formatter. Betting payloads are never parsed.
+            from teamarr.providers.espn.preview import apply_generated_preview_fields
+
+            apply_generated_preview_fields(data, event)
         return event
 
     @staticmethod
@@ -1193,7 +1359,9 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
             away_record=away_record,
             streak=streak_str,
             streak_count=streak_count,
-            rank=team_data.get("rank") if team_data.get("rank", 99) <= 25 else None,
+            # ESPN's team payload carries no rank field for any league (#710);
+            # rank is filled from the league polls by SportsDataService.
+            rank=None,
             playoff_seed=int(stats.get("playoffSeed", 0)) or None,
             games_back=float(stats.get("gamesBehind", 0)) or None,
             conference=conference,
@@ -1202,6 +1370,86 @@ class ESPNProvider(UFCParserMixin, TennisParserMixin, TournamentParserMixin, Spo
             ppg=float(stats.get("avgPointsFor", 0)) or None,
             papg=float(stats.get("avgPointsAgainst", 0)) or None,
         )
+
+    def get_rankings(self, league: str) -> dict[str, int]:
+        """Fetch the league's current poll rankings as {team_id: rank}.
+
+        Merges every live poll in the payload, AP first, so an FBS team gets its
+        AP rank while FCS and D-II teams — whom AP never covers — still get
+        theirs from their own polls. Tournament seedings and offseason-stale
+        polls are skipped; see the module constants for why.
+        """
+        sport_league = self._get_sport_league_from_db(league)
+        _, espn_league = self._client.get_sport_league(league, sport_league)
+        if not league_publishes_rankings(espn_league):
+            return {}
+
+        data = self._client.get_rankings(league, sport_league)
+        if not data or not isinstance(data.get("rankings"), list):
+            return {}
+
+        polls = sorted(
+            (p for p in data["rankings"] if isinstance(p, dict)),
+            key=lambda p: str(p.get("type", "")).lower() != RANKING_PRIMARY_POLL_TYPE,
+        )
+
+        rankings: dict[str, int] = {}
+        for poll in polls:
+            if str(poll.get("type", "")).lower() == RANKING_SEEDING_POLL_TYPE:
+                continue
+            entries = poll.get("ranks")
+            if not isinstance(entries, list) or self._poll_is_stale(entries, league, poll):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                team_id = str((entry.get("team") or {}).get("id") or "")
+                current = entry.get("current")
+                if not isinstance(current, (int, str)):
+                    continue
+                try:
+                    rank = int(current)
+                except ValueError:
+                    continue
+                if team_id and 1 <= rank <= RANKING_MAX:
+                    rankings.setdefault(team_id, rank)
+
+        logger.debug("[ESPN] %s rankings: %d ranked teams", league, len(rankings))
+        return rankings
+
+    def _poll_is_stale(self, entries: list, league: str, poll: dict) -> bool:
+        """True when the poll's newest entry predates the staleness cutoff."""
+        latest = max(
+            (d for d in (self._parse_poll_date(e) for e in entries) if d is not None),
+            default=None,
+        )
+        if latest is None:
+            return False
+        if datetime.now(UTC) - latest <= timedelta(days=RANKING_POLL_MAX_AGE_DAYS):
+            return False
+        logger.debug(
+            "[ESPN] %s poll '%s' is stale (last updated %s) - skipping",
+            league,
+            poll.get("name"),
+            latest.date(),
+        )
+        return True
+
+    @staticmethod
+    def _parse_poll_date(entry: object) -> datetime | None:
+        """Parse a rank entry's lastUpdated/date stamp (ESPN uses 'Z' suffixes)."""
+        if not isinstance(entry, dict):
+            return None
+        for field in ("lastUpdated", "date"):
+            raw = entry.get(field)
+            if not isinstance(raw, str):
+                continue
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        return None
 
     def _parse_record_string(self, record_str: str) -> tuple[int, int, int]:
         """Parse record string like '10-2' or '8-3-1' into (wins, losses, ties)."""

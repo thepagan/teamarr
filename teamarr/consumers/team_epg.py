@@ -41,6 +41,8 @@ class TeamEPGOptions:
     filler_enabled: bool = True  # Enable filler generation
     filler_config: Any = None  # Pre-loaded FillerConfig (avoids DB access in threads)
     epg_timezone: str = "America/New_York"
+    art_base_url: str = ""
+    league_display_name: str | None = None
     midnight_crossover_mode: str = "postgame"  # 'postgame' or 'idle'
 
     # Sport durations (from database settings)
@@ -149,6 +151,22 @@ class TeamEPGGenerator:
             options=options,
             additional_leagues=additional_leagues,
         )
+
+    def render_event(
+        self,
+        event: Event,
+        *,
+        team_id: str,
+        league: str,
+        channel_id: str,
+        logo_url: str | None,
+        options: TeamEPGOptions,
+    ) -> Programme | None:
+        """Render one resolved event through the Team EPG template."""
+        if not options.template:
+            return None
+        context = self._context_builder.build_for_event(event, team_id, league)
+        return self._event_to_programme(event, context, channel_id, logo_url, options)
 
     def generate(
         self,

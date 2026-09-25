@@ -67,6 +67,8 @@ As a backup, enable **Matching → Provider EPG Backup** (the `/matching` page).
 
 Normally each source pulls its candidate streams from an **M3U group** — so EPG matching considers *every* stream in that provider group. If you'd rather match only the channel versions you've **already curated in Dispatcharr**, enable **Matching → Dispatcharr as a Stream Source** (the `/matching` page).
 
+For explicitly selected Dispatcharr groups, you can optionally choose a stream-profile override. Teamarr resolves the profile after **Channels → Stream Priority** produces the final order: the highest-ranked active stream is decisive. If it belongs to a mapped group, that group's override applies. If it has no override, Teamarr uses the global Dispatcharr stream profile, even if a lower-ranked stream has an override.
+
 When on, Teamarr adds a second, **additive** source that:
 
 - Enumerates the Dispatcharr **channels** you've mapped that carry an active, non-`_Teamarr` EPG link.
@@ -167,7 +169,7 @@ A channel that shows **red** in Dispatcharr means no streams are currently attac
 ## Caveats & limits
 
 - **Attach/detach precision is bounded by generation cadence.** A stream can only swap in/out when EPG generation runs (your scheduled cron). With hourly runs, expect roughly hourly granularity — the buffers exist partly to cover this.
-- **Replays and studio shows are intentionally skipped.** Programs tagged *Classic Sport Event* (replays) or *Sports non-event* (studio/talk) don't match. A live channel showing offseason replays will legitimately match little or nothing.
+- **Replays and studio shows are intentionally skipped.** Programs tagged *Classic Sport Event* (replays) or *Sports non-event* (studio/talk) don't match, and so does any programme whose title or sub-title carries a replay or highlights word (*Hlts*, *Highlights*, *Replay*, *Encore*, *Rerun*, *Re-air*, *As-live*) — guides without categories, such as Sky and TNT, put that evidence in the title instead. A live channel showing offseason replays will legitimately match little or nothing.
 - **A matched event must actually exist.** EPG matching pairs a program to a real event in your subscribed leagues. A guide entry for a game in a league you don't follow (or a finished game) won't match.
 - **Strict name matching skips ambiguous names** to avoid wrong matches. Some channels may not resolve by name alone and will rely on the channel-mapping or direct-tvg_id strategies.
 

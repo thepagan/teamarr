@@ -202,6 +202,29 @@ export interface BulkGroupUpdateRequest {
   clear_subscription_leagues?: boolean
   clear_subscription_soccer_mode?: boolean
   clear_subscription_soccer_followed_teams?: boolean
+  // Stream filters + custom regex (#551): a pattern set here is also switched on;
+  // a clear_* flag removes it and switches it off.
+  skip_builtin_filter?: boolean | null
+  stream_include_regex?: string | null
+  stream_exclude_regex?: string | null
+  custom_regex_teams?: string | null
+  custom_regex_date?: string | null
+  custom_regex_month?: string | null
+  custom_regex_day?: string | null
+  custom_regex_time?: string | null
+  custom_regex_league?: string | null
+  custom_regex_fighters?: string | null
+  custom_regex_event_name?: string | null
+  clear_stream_include_regex?: boolean
+  clear_stream_exclude_regex?: boolean
+  clear_custom_regex_teams?: boolean
+  clear_custom_regex_date?: boolean
+  clear_custom_regex_month?: boolean
+  clear_custom_regex_day?: boolean
+  clear_custom_regex_time?: boolean
+  clear_custom_regex_league?: boolean
+  clear_custom_regex_fighters?: boolean
+  clear_custom_regex_event_name?: boolean
 }
 
 export interface BulkGroupUpdateResult {
@@ -316,6 +339,14 @@ export interface PreviewStream {
   start_time: string | null
   from_cache: boolean
   exclusion_reason: string | null
+  failed_reason?: string | null
+  detail?: string | null
+  parsed_team1?: string | null
+  parsed_team2?: string | null
+  detected_league?: string | null
+  extracted_date?: string | null
+  extracted_time?: string | null
+  extracted_tz?: string | null
 }
 
 export interface PreviewGroupResponse {

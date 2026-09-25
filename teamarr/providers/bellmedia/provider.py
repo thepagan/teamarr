@@ -4,6 +4,8 @@ import logging
 from datetime import UTC, date, datetime, timedelta
 
 from teamarr.core import (
+    SEASON_POSTSEASON,
+    SEASON_PRESEASON,
     SEASON_REGULAR,
     Event,
     EventStatus,
@@ -16,6 +18,8 @@ from teamarr.core import (
 from teamarr.providers.bellmedia.client import BellMediaClient
 
 logger = logging.getLogger(__name__)
+
+_WIDGET_LOGO_URL = "https://widgets.sports.bellmedia.ca/img/{league}/{team}.webp"
 
 
 class BellMediaProvider(SportsProvider):
@@ -123,6 +127,7 @@ class BellMediaProvider(SportsProvider):
             abbreviation=competitor.get("shortName") or name[:3].upper(),
             league=league,
             sport=self._sport(league),
+            logo_url=self._logo_url(competitor, league),
             color=competitor.get("primaryColor") or None,
         )
 
@@ -141,6 +146,16 @@ class BellMediaProvider(SportsProvider):
                 return None
             status = self._parse_status(payload)
             broadcasts = self._broadcasts(payload)
+            season_type_id = row.get("seasonTypeId")
+            season_type = (
+                {
+                    0: SEASON_PRESEASON,
+                    1: SEASON_REGULAR,
+                    2: SEASON_POSTSEASON,
+                }.get(season_type_id)
+                if isinstance(season_type_id, int)
+                else None
+            )
             return Event(
                 id=str(event_id),
                 provider=self.name,
@@ -157,7 +172,7 @@ class BellMediaProvider(SportsProvider):
                 venue=Venue(name=payload["venue"]) if payload.get("venue") else None,
                 broadcasts=broadcasts,
                 season_year=row.get("season"),
-                season_type=SEASON_REGULAR if row.get("seasonTypeId") == 1 else None,
+                season_type=season_type,
             )
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning("[BELLMEDIA] Failed to parse event: %s", exc)
@@ -178,8 +193,17 @@ class BellMediaProvider(SportsProvider):
             abbreviation=data.get("shortName") or name[:3].upper(),
             league=league,
             sport=self._sport(league),
+            logo_url=self._logo_url(data, league),
             color=data.get("primaryColor") or None,
         )
+
+    def _logo_url(self, competitor: dict, league: str) -> str | None:
+        """Build the TSN widget artwork URL for a Bell Media competitor."""
+        mapping = self._client.get_mapping(league)
+        seo_identifier = competitor.get("seoIdentifier")
+        if not mapping or not seo_identifier:
+            return None
+        return _WIDGET_LOGO_URL.format(league=mapping.provider_league_id, team=seo_identifier)
 
     @staticmethod
     def _parse_status(payload: dict) -> EventStatus:

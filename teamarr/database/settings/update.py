@@ -76,6 +76,8 @@ def update_dispatcharr_settings(
     default_stream_profile_id: int | None | object = _NOT_PROVIDED,
     default_channel_group_id: int | None | object = _NOT_PROVIDED,
     default_channel_group_mode: str | None | object = _NOT_PROVIDED,
+    managed_team_channel_profile_ids: list[int] | None | object = _NOT_PROVIDED,
+    managed_team_channel_group_id: int | None | object = _NOT_PROVIDED,
     cleanup_unused_logos: bool | None = None,
 ) -> bool:
     """Update Dispatcharr settings.
@@ -100,6 +102,8 @@ def update_dispatcharr_settings(
         default_stream_profile_id=default_stream_profile_id,
         default_channel_group_id=default_channel_group_id,
         default_channel_group_mode=default_channel_group_mode,
+        managed_team_channel_profile_ids=managed_team_channel_profile_ids,
+        managed_team_channel_group_id=managed_team_channel_group_id,
     )
     return _apply(conn, "dispatcharr", provided)
 
@@ -182,6 +186,23 @@ def update_lifecycle_settings(
         if arm_channel_relayout(conn):
             logger.info("[CHANNEL_NUM] Armed one-shot re-grid (channel range changed)")
     return True
+
+
+def update_managed_team_channel_settings(
+    conn: Connection,
+    *,
+    range_start: int | None = None,
+    range_end: int | None | object = _NOT_PROVIDED,
+    priority_ids: list[int] | None = None,
+) -> bool:
+    """Update persistent Team EPG channel numbering settings.
+
+    ``range_end=None`` clears the upper bound; omitted fields remain unchanged.
+    """
+    provided = _skip_none(range_start=range_start, priority_ids=priority_ids) | _skip_missing(
+        range_end=range_end
+    )
+    return _apply(conn, "managed_team_channels", provided)
 
 
 def update_epg_settings(conn: Connection, **kwargs) -> bool:
@@ -488,6 +509,7 @@ def update_update_check_settings(
 def update_feed_separation_settings(
     conn: Connection,
     enabled: bool | None = None,
+    sports: list[str] | None = None,
     home_terms: list[str] | None = None,
     away_terms: list[str] | None = None,
     detect_team_names: bool | None = None,
@@ -496,7 +518,7 @@ def update_feed_separation_settings(
     """Update feed separation settings.
 
     Returns:
-        True if updated (False on invalid label_style)
+        True if updated (False on invalid label_style or unknown sport code)
     """
     if label_style is not None:
         valid_styles = ("team_name", "short_name", "home_away")
@@ -508,8 +530,24 @@ def update_feed_separation_settings(
             )
             return False
 
+    if sports:
+        # An unknown code would never match a real event, silently disabling
+        # separation everywhere rather than failing visibly (#732).
+        known = {
+            row["sport_code"] for row in conn.execute("SELECT sport_code FROM sports")
+        }
+        unknown = sorted(set(sports) - known)
+        if unknown:
+            logger.warning(
+                "[FEED_SEP] Unknown sport code(s) %s, must be one of %s",
+                unknown,
+                sorted(known),
+            )
+            return False
+
     provided = _skip_none(
         enabled=enabled,
+        sports=sports,
         home_terms=home_terms,
         away_terms=away_terms,
         detect_team_names=detect_team_names,

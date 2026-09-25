@@ -41,9 +41,11 @@ The Sources page header shows an overall **X% matched** summary and the **Add St
 | **Status** | Enable/disable toggle |
 | **Actions** | Preview matches, clear cache, edit, delete |
 
-Column headers sort, and a filter row narrows the list by name and status. Selecting rows raises a bulk action bar: **Enable**, **Disable**, **Clear Cache**, **Edit** (bulk-edit shared settings), and **Delete**. When stale sources exist, a **Delete all stale** action appears.
+Column headers sort, and a filter row narrows the list by name and status. Selecting rows raises a bulk action bar: **Enable**, **Disable**, **Clear Cache**, **Edit** (bulk-edit shared settings), and **Delete**. Bulk **Edit** covers the stream timezone, the team filter, the three matching toggles, the subscription (league) override, the built-in-filter skip, the stream include/exclude regexes and every custom regex — only the fields you check are changed, and setting a pattern in bulk also switches it on while clearing it switches it off. When stale sources exist, a **Delete all stale** action appears.
 
 To see *which* streams matched or failed (and fix failures manually), use the **Matched**/**Failed** drill-downs in the [Dashboard](../dashboard)'s run history — the Sources table shows rates, not per-stream detail. The per-source **preview** button shows current stream matches without running a full generation.
+
+Preview lists each unmatched stream with what the classifier actually read out of its name — the two team names it parsed, and the date, time and timezone it extracted — plus the detected league as a dashed badge in the **League** column and the same failure reason the run-history **Failed** drill-down shows. When a stream fails, that line usually says why: a team name that swallowed the provider prefix, a date read in the wrong format, or a league hint pointing somewhere unexpected.
 
 {: .note }
 > The percentage is **stream coverage**: distinct streams matched ÷ eligible streams (always 0–100%). The hover tooltip shows **matches produced** — the total number of stream→event matches. With [EPG matching](../matching/program-matching), one linear stream (ESPN, FS1…) is time-shared across many events, so matches produced can far exceed the stream count. These are tracked separately so coverage stays a true health signal.

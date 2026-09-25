@@ -240,7 +240,12 @@ def _reconcile_table(
         # NOT NULL without default, non-constant defaults)
         verbatim = _extract_column_def(create_sql, col_name)
         col_ident = _quote_identifier(conn, col_name)
-        fallback_def = _translate_column_definition(conn, col["type"] or "", col["dflt_value"], _fallback_column_def(col))
+        fallback_def = _translate_column_definition(
+            conn,
+            col["type"] or "",
+            col["dflt_value"],
+            _fallback_column_def(col),
+        )
         fallback = f"{col_ident} {fallback_def}".strip()
         candidates = [verbatim] if verbatim else []
         if fallback not in candidates:

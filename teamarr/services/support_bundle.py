@@ -159,8 +159,10 @@ class SupportBundleService:
     def _account_names_from(self, conn: sqlite3.Connection) -> set[str]:
         try:
             rows = conn.execute(
-                "SELECT DISTINCT m3u_account_name FROM managed_channel_streams "
-                "WHERE m3u_account_name IS NOT NULL"
+                """SELECT DISTINCT m3u_account_name FROM managed_channel_streams
+                   WHERE m3u_account_name IS NOT NULL
+                   UNION SELECT DISTINCT m3u_account_name FROM managed_team_channel_streams
+                   WHERE m3u_account_name IS NOT NULL"""
             ).fetchall()
             return {str(row[0]) for row in rows if row[0]}
         except sqlite3.Error:
@@ -221,21 +223,30 @@ class SupportBundleService:
     def _channels(self, conn: sqlite3.Connection, errors: list[str]) -> dict[str, Any]:
         channels = self._query(conn, "managed_channels", errors)
         stream_rows = self._query(conn, "managed_channel_streams", errors)
+        team_channels = self._query(conn, "managed_team_channels", errors)
+        team_streams = self._query(conn, "managed_team_channel_streams", errors)
         groups = {
             row["id"]: row.get("name") for row in self._query(conn, "event_epg_groups", errors)
         }
-        ordering = self._safe_stream_ordering(conn, errors)
+        channel_context = {
+            channel["id"]: (channel.get("sport"), channel.get("league"))
+            for channel in channels
+            if isinstance(channel.get("id"), int)
+        }
         by_channel: dict[int, list[dict[str, Any]]] = {}
         for stream in stream_rows:
             model = ManagedChannelStream.from_row(stream)
             stream.pop("m3u_account_name", None)
             stream.pop("m3u_account_id", None)
             stream["source_group_name"] = groups.get(stream.get("source_group_id"))
-            stream["matched_rules"] = self._matched_rules(
-                ordering, model, stream.get("source_group_name")
-            )
             channel_id = stream.get("managed_channel_id")
             if isinstance(channel_id, int):
+                sport, league = channel_context.get(channel_id, (None, None))
+                stream["matched_rules"] = self._matched_rules(
+                    get_stream_ordering_service(conn, sport, league),
+                    model,
+                    stream.get("source_group_name"),
+                )
                 by_channel.setdefault(channel_id, []).append(stream)
 
         channel_entries = []
@@ -248,6 +259,8 @@ class SupportBundleService:
         return {
             "total": len(channels),
             "channels": channel_entries,
+            "managed_team_channels": team_channels,
+            "managed_team_channel_streams": team_streams,
         }
 
     def _safe_stream_ordering(self, conn: sqlite3.Connection, errors: list[str]) -> Any:
@@ -499,7 +512,7 @@ class SupportBundleService:
             [
                 "",
                 "## Report Layout",
-                "`support-report.json` contains summary, signals, configuration, templates, sources_and_subscriptions, channels, generation, matching, reconciliation, environment, and collection_errors.",
+                "`channels` includes event channels plus managed-team ownership and temporary membership rows. `support-report.json` also contains summary, signals, configuration, templates, sources_and_subscriptions, generation, matching, reconciliation, environment, and collection_errors.",
                 "",
                 "## Collection Limits",
                 f"Recent runs: {RUN_LIMIT}; matched/failed stream details per run: {MATCH_DETAIL_LIMIT}; log tail per file: {LOG_BYTES} bytes.",

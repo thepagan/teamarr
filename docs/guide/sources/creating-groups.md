@@ -82,6 +82,8 @@ Named groups accept both `(?<name>...)` and Python's `(?P<name>...)` syntax. The
 
 **Date patterns describe a format, not a literal date.** The best way to write one is with component groups that declare the format structurally — `(?P<day>\d{1,2})/(?P<month>\d{1,2})/(?P<year>\d{2,4})` says "day-first, then month, then year" and can never be misread. A single `(?P<date>...)` blob also works: Teamarr learns the source's format from the whole group before matching (one `16/07` in the list proves the source is day-first, so `05/07` parses as July 5). When the format can be verified this way, the date strictly gates candidate games (±1 day for provider-timezone boundaries) and a mismatch is reported as `date_mismatch`; when it can't be verified, the date only ranks candidates — it never blocks team matching outright.
 
+**League patterns can capture the name as written.** The captured text is resolved to a league code before it is compared with your subscription, the same way built-in league detection works: a league code (`eng.1`), alias (`EPL`), display name (`Serie A`, `2. Bundesliga`), or any league hint phrase (`Premier League`) all work. A capture that names no known league is kept as-is, so the stream is filtered as **League not in group** with that text shown in the detail. The Pattern Tester shows the raw capture, not the resolved code.
+
 **Tennis groups** use the **Teams** patterns for player pairs — the two named groups become player 1 and player 2 (surname-based matching handles tournament prefixes and extra tokens). The built-in parser also recognizes the `Surname, First - Surname, First` provider format without any configuration.
 
 ### Pattern Tester

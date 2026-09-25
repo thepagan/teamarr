@@ -14,6 +14,7 @@ import {
   Menu,
   X,
   Download,
+  ExternalLink,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { useCallback, useEffect, useState } from "react"
@@ -36,7 +37,7 @@ const NAV_ITEMS: { to: string; label: string; icon: LucideIcon; step?: number }[
   { to: "/channels", label: "Channels", icon: Tv, step: 5 },
 ]
 
-async function fetchHealth(): Promise<{ status: string; version: string }> {
+async function fetchHealth(): Promise<{ status: string; version: string; source_url: string }> {
   const resp = await fetch("/health")
   return resp.json()
 }
@@ -91,6 +92,7 @@ export function MainLayout() {
   })
 
   const version = healthQuery.data?.version || "v2.0.0"
+  const sourceUrl = healthQuery.data?.source_url
 
   const { startGeneration, isGenerating } = useGenerationProgress()
 
@@ -407,6 +409,27 @@ export function MainLayout() {
               <Download className="h-3 w-3" />
               {isExportingSupport ? "Preparing support bundle" : "Support bundle"}
             </button>
+            {sourceUrl && (
+              <a
+                href={sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-xs hover:text-foreground"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Source code
+              </a>
+            )}
+          </div>
+          <div className="mt-1 text-center text-xs text-muted-foreground">
+            <a
+              href="https://github.com/Pharaoh-Labs/teamarr/blob/main/LICENSE"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-foreground underline-offset-2 hover:underline"
+            >
+              AGPL-3.0-only
+            </a>
           </div>
           <div className="mt-1 text-center text-xs italic text-muted-foreground">
             Jesse, Teamarr will never support curling 🥌

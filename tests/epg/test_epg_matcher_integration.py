@@ -1,4 +1,4 @@
-"""Integration tests for the EPG path in StreamMatcher (teamarrv2-183.4).
+"""Integration tests for the EPG path in StreamMatcher (teamarr-183.4).
 
 We exercise the EPG-specific orchestration methods (_match_via_epg,
 _reconcile_epg) on a matcher built with no service/DB, patching the shared
@@ -71,6 +71,8 @@ def test_match_via_epg_tags_method_and_window(monkeypatch):
     assert out[0].match_method == MatchMethod.EPG
     assert out[0].epg_program_start == BASE
     assert out[0].epg_program_end == BASE + timedelta(hours=3)
+    # Exception keywords read the programme, not the stream name (#829).
+    assert out[0].epg_program_title == "MLB Baseball | Chicago Cubs at St. Louis Cardinals"
 
 
 def test_match_via_epg_passes_program_start_as_anchor(monkeypatch):
@@ -371,7 +373,7 @@ def test_epg_racing_fallback_uses_racing_classification_in_result(monkeypatch):
 
 
 def test_epg_racing_fallback_requires_text_evidence(monkeypatch):
-    # teamarrv2-w42k: with league_event_type="event", RACING_EVENT is the
+    # teamarr-w42k: with league_event_type="event", RACING_EVENT is the
     # classifier's default bucket, so without a text gate ANY unmatched
     # programme (documentary, movie) reaches the racing matcher and can bind
     # to the day's race by date coverage — one run produced 853 false

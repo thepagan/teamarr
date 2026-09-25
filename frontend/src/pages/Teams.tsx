@@ -77,6 +77,8 @@ interface TeamUpdate {
   channel_logo_url?: string | null
   template_id?: number | null
   active?: boolean
+  managed_channel_enabled?: boolean
+  managed_channel_number?: number | null
 }
 
 interface EditTeamDialogProps {
@@ -97,6 +99,8 @@ function EditTeamDialog({ team, templates, open, onOpenChange, onSave, isSaving 
     channel_logo_url: team.channel_logo_url,
     template_id: team.template_id,
     active: team.active,
+    managed_channel_enabled: team.managed_channel_enabled,
+    managed_channel_number: team.managed_channel_number,
   })
 
   const handleSubmit = async () => {
@@ -172,6 +176,37 @@ function EditTeamDialog({ team, templates, open, onOpenChange, onSave, isSaving 
             />
             <Label className="font-normal">Active</Label>
           </div>
+          <div className="space-y-2 border-t pt-4">
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={formData.managed_channel_enabled ?? false}
+                onCheckedChange={(checked) =>
+                  setFormData({ ...formData, managed_channel_enabled: checked })
+                }
+              />
+              <Label className="font-normal">Manage persistent Dispatcharr channel</Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Creates and keeps this team&apos;s Team EPG channel in the dedicated managed-team range.
+            </p>
+            {formData.managed_channel_enabled && (
+              <div className="space-y-2 max-w-xs">
+                <Label htmlFor="managed_channel_number">Channel number override</Label>
+                <Input
+                  id="managed_channel_number"
+                  type="number"
+                  min={1}
+                  value={formData.managed_channel_number ?? ""}
+                  onChange={(e) => setFormData({
+                    ...formData,
+                    managed_channel_number: e.target.value ? parseInt(e.target.value) : null,
+                  })}
+                  placeholder="Automatic"
+                />
+                <p className="text-xs text-muted-foreground">Leave empty to assign automatically.</p>
+              </div>
+            )}
+          </div>
         </div>
 
         <DialogFooter>
@@ -231,6 +266,8 @@ export function Teams() {
   const [showBulkTemplate, setShowBulkTemplate] = useState(false)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [showBulkChannelId, setShowBulkChannelId] = useState(false)
+  const [showBulkManaged, setShowBulkManaged] = useState(false)
+  const [bulkManagedEnabled, setBulkManagedEnabled] = useState(true)
   const [channelIdMode, setChannelIdMode] = useState<"default" | "custom">("default")
   const [customChannelIdFormat, setCustomChannelIdFormat] = useState("")
   const [isUpdatingChannelIds, setIsUpdatingChannelIds] = useState(false)
@@ -424,6 +461,29 @@ export function Teams() {
     setBulkTemplateId(null)
   }
 
+  // Same per-team PATCH as the edit dialog, so turning management on still
+  // activates the team server-side (#826). No number override in bulk.
+  const handleBulkSetManaged = async () => {
+    const ids = Array.from(selectedIds)
+    let succeeded = 0
+    for (const id of ids) {
+      try {
+        await updateMutation.mutateAsync({
+          teamId: id,
+          data: { managed_channel_enabled: bulkManagedEnabled },
+        })
+        succeeded++
+      } catch {
+        // Continue with others
+      }
+    }
+    toast.success(
+      `${bulkManagedEnabled ? "Enabled" : "Disabled"} managed channels for ${succeeded} team${succeeded !== 1 ? "s" : ""}`
+    )
+    setSelectedIds(new Set())
+    setShowBulkManaged(false)
+  }
+
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds)
     let succeeded = 0
@@ -506,10 +566,11 @@ export function Teams() {
 
       {/* What is Team EPG — info tile */}
       <Alert variant="info" title="What is Team EPG?">
-        A secondary flow for teams you already have static channels for in Dispatcharr.
-        Teamarr generates guide data (a team-only EPG) for them but does <strong>not</strong>{" "}
-        create or manage these channels — it just fills in their EPG. Most setups rely on
-        event-based matching from Sources instead.
+        Team EPG builds a dedicated XMLTV schedule for each active team. You can associate that guide
+        with an existing Dispatcharr channel, or enable management to have Teamarr create and maintain
+        a persistent Dispatcharr channel in the dedicated managed-team range. Managed channels keep the
+        team guide between games and attach streams matched from enabled Sources only while their game
+        windows are active.
       </Alert>
 
       {/* Team EPG settings (lifted from Settings) */}
@@ -660,6 +721,9 @@ export function Teams() {
                 <Button variant="outline" size="sm" onClick={() => setShowBulkChannelId(true)}>
                   Channel ID
                 </Button>
+                <Button variant="outline" size="sm" onClick={() => setShowBulkManaged(true)}>
+                  Managed Channel
+                </Button>
                 <Button variant="destructive" size="sm" onClick={() => setShowBulkDelete(true)}>
                   <Trash2 className="h-3 w-3 mr-1" />
                   Delete
@@ -687,8 +751,8 @@ export function Teams() {
                       onCheckedChange={toggleSelectAll}
                     />
                   </TableHead>
-                  <TableHead
-                    className="w-[28%] cursor-pointer hover:bg-muted/50"
+                   <TableHead
+                     className="w-[22%] cursor-pointer hover:bg-muted/50"
                     onClick={() => handleSort("team")}
                   >
                     <div className="flex items-center">
@@ -711,14 +775,15 @@ export function Teams() {
                       Sport {renderSortIcon("sport")}
                     </div>
                   </TableHead>
-                  <TableHead
-                    className="w-[28%] cursor-pointer hover:bg-muted/50"
+                   <TableHead
+                     className="w-[20%] cursor-pointer hover:bg-muted/50"
                     onClick={() => handleSort("channel")}
                   >
                     <div className="flex items-center">
                       Channel ID {renderSortIcon("channel")}
                     </div>
-                  </TableHead>
+                   </TableHead>
+                   <TableHead className="w-20 text-center">Managed</TableHead>
                   <TableHead
                     className="w-24 cursor-pointer hover:bg-muted/50"
                     onClick={() => handleSort("template")}
@@ -735,11 +800,12 @@ export function Teams() {
                       Status {renderSortIcon("status")}
                     </div>
                   </TableHead>
-                  <TableHead className="w-20 text-right">Actions</TableHead>
+                   <TableHead className="w-20 text-right">Actions</TableHead>
                 </TableRow>
                 {/* Filter row - styled like V1 */}
                 <TableRow className="border-b-2 border-border">
-                  <TableHead className="py-0.5 pb-1.5"></TableHead>
+                   <TableHead className="py-0.5 pb-1.5"></TableHead>
+                   <TableHead className="py-0.5 pb-1.5"></TableHead>
                   <TableHead className="py-0.5 pb-1.5">
                     <div className="relative">
                       <Input
@@ -808,7 +874,7 @@ export function Teams() {
               <TableBody>
                 {filteredTeams.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                     <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
                       No teams match the current filters.
                     </TableCell>
                   </TableRow>
@@ -906,6 +972,37 @@ export function Teams() {
                       </span>
                     </TableCell>
                     <TableCell className="font-mono text-sm">{team.channel_id}</TableCell>
+                    <TableCell className="text-center">
+                      {team.managed_channel_enabled ? (
+                        team.managed_channel_sync_status === "error" ||
+                        team.managed_channel_sync_status === "conflict" ? (
+                          <RichTooltip
+                            title={
+                              team.managed_channel_sync_status === "conflict"
+                                ? "Channel conflict"
+                                : "Channel error"
+                            }
+                            content={
+                              <p className="max-w-xs text-xs">
+                                {team.managed_channel_sync_message ??
+                                  "The last generation could not create or update this channel."}
+                              </p>
+                            }
+                            side="bottom"
+                          >
+                            <Badge variant="destructive" className="cursor-help">
+                              {team.managed_channel_sync_status === "conflict" ? "Conflict" : "Error"}
+                            </Badge>
+                          </RichTooltip>
+                        ) : (
+                          <Badge variant="success">
+                            {team.managed_channel_assigned_number || team.managed_channel_number || "Auto"}
+                          </Badge>
+                        )
+                      ) : (
+                        <span className="text-xs text-muted-foreground">No</span>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {team.template_id ? (
                         <Badge variant="success">
@@ -1017,6 +1114,39 @@ export function Teams() {
             <Button onClick={handleBulkAssignTemplate} disabled={updateMutation.isPending}>
               {updateMutation.isPending && <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />}
               Assign
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Managed Channel Dialog */}
+      <Dialog open={showBulkManaged} onOpenChange={setShowBulkManaged}>
+        <DialogContent onClose={() => setShowBulkManaged(false)}>
+          <DialogHeader>
+            <DialogTitle>Managed Channel</DialogTitle>
+            <DialogDescription>
+              Set persistent channel management for {selectedIds.size} selected team
+              {selectedIds.size !== 1 && "s"}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4 space-y-2">
+            <div className="flex items-center gap-2">
+              <Switch checked={bulkManagedEnabled} onCheckedChange={setBulkManagedEnabled} />
+              <Label className="font-normal">Manage persistent Dispatcharr channel</Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {bulkManagedEnabled
+                ? "Creates and keeps each team's Team EPG channel in the dedicated managed-team range. Channel numbers are assigned automatically; teams are activated."
+                : "Releases each team's managed channel on the next generation. Any channel number override is kept for later."}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowBulkManaged(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleBulkSetManaged} disabled={updateMutation.isPending}>
+              {updateMutation.isPending && <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />}
+              Apply to {selectedIds.size} Team{selectedIds.size !== 1 && "s"}
             </Button>
           </DialogFooter>
         </DialogContent>

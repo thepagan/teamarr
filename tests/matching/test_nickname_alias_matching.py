@@ -83,6 +83,28 @@ class TestShortNameScoring:
         outcome = _match("Cardinals x Dbacks", [_event()])
         assert outcome.category == ResultCategory.MATCHED
 
+    def test_olympiakos_piraeus_matches_espn_olympiacos(self):
+        """Stan Sport's transliteration must match ESPN's UEFA club name."""
+        olympiacos = _team("Olympiacos", "OLY")
+        jagiellonia = _team("Jagiellonia Bialystok", "JAG")
+        event = Event(
+            id="uefa-1",
+            provider="espn",
+            name="Jagiellonia Bialystok at Olympiacos",
+            short_name="JAG @ OLY",
+            start_time=datetime.combine(TODAY, datetime.min.time(), tzinfo=UTC).replace(hour=19),
+            home_team=olympiacos,
+            away_team=jagiellonia,
+            status=EventStatus(state="scheduled"),
+            league="uefa.europa",
+            sport="soccer",
+        )
+
+        outcome = _match("Olympiakos Piraeus v Jagiellonia Białystok", [event])
+
+        assert outcome.category == ResultCategory.MATCHED
+        assert outcome.event is not None and outcome.event.id == "uefa-1"
+
 
 class TestAliasNormalization:
     def test_punctuated_user_alias_fires(self):

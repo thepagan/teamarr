@@ -11,6 +11,7 @@ Configuration via environment variables:
 
 import logging
 import os
+from dataclasses import dataclass
 
 from teamarr.providers.base_client import BaseHTTPClient
 
@@ -54,6 +55,91 @@ COLLEGE_SCOREBOARD_GROUPS: dict[str, tuple[str, ...]] = {
     # NCAA hockey's ungrouped endpoint already returns its complete slate.
     # NCAA soccer and women's hockey expose no season groups.
 }
+
+
+@dataclass(frozen=True)
+class ScoreboardDivision:
+    """One optional division of a league's scoreboard fetch (#811).
+
+    ``key`` is the stable identifier stored in the user's config — never the
+    ESPN group id, which is a provider detail the setting outlives.
+    """
+
+    key: str
+    label: str
+    group: str
+
+
+# Divisions a user can decline to ingest (#811). ESPN files a game under a
+# division when EITHER side belongs to it, so a division the user drops costs
+# only the fixtures played entirely within it: measured over four 2026 slates,
+# every cross-division game (Cal Poly vs Central Washington, Jackson State vs
+# Edward Waters) is in group 90 as well, and NOT ONE of the 345 events unique
+# to group 35 involved a Division I team.
+#
+# Only groups that are genuinely divisions belong here. Women's volleyball's
+# 110 and women's lacrosse's 108 are CONFERENCE supplements (United Athletic,
+# Mid-American) that ESPN omits from the division slate — dropping one would
+# silently lose that conference's whole schedule, so they stay always-on and
+# unselectable. A league absent from this map ignores the setting entirely.
+COLLEGE_SCOREBOARD_DIVISIONS: dict[str, tuple[ScoreboardDivision, ...]] = {
+    "college-football": (
+        ScoreboardDivision("d1", "Division I (FBS & FCS)", "90"),
+        ScoreboardDivision("d2d3", "Division II & III", "35"),
+    ),
+    "mens-college-basketball": (
+        ScoreboardDivision("d1", "NCAA Division I", "50"),
+        ScoreboardDivision("non_d1", "Non-NCAA Division I", "51"),
+    ),
+    "womens-college-basketball": (
+        ScoreboardDivision("d1", "NCAA Division I", "50"),
+        ScoreboardDivision("non_d1", "Non-NCAA Division I", "51"),
+    ),
+    # 91 is a division ("Non-NCAA Division I", the same shape as basketball's
+    # 51); 110 in the same fetch is the United Athletic CONFERENCE and is
+    # therefore absent here, so no selection can drop it.
+    "womens-college-volleyball": (
+        ScoreboardDivision("d1", "NCAA Division I", "90"),
+        ScoreboardDivision("non_d1", "Non-NCAA Division I", "91"),
+    ),
+}
+
+
+def scoreboard_groups_for_divisions(league: str, divisions: list[str] | None) -> tuple[str, ...]:
+    """A league's scoreboard groups, narrowed to the divisions the user keeps.
+
+    ``divisions`` is the user's selection of :data:`COLLEGE_SCOREBOARD_DIVISIONS`
+    keys, or None for "every division" — the default, and the answer for every
+    league with no optional divisions. Groups that are not optional divisions
+    (conference supplements) always survive, and an unknown or empty selection
+    is treated as no selection: narrowing to nothing would silently stop a
+    league from being fetched at all.
+    """
+    groups = COLLEGE_SCOREBOARD_GROUPS.get(league, ())
+    optional = COLLEGE_SCOREBOARD_DIVISIONS.get(league)
+    if not groups or not optional or not divisions:
+        return groups
+    keep = {d.group for d in optional if d.key in divisions}
+    if not keep:
+        return groups
+    dropped = {d.group for d in optional} - keep
+    return tuple(g for g in groups if g not in dropped)
+
+# ESPN publishes poll rankings only for college leagues — /rankings 404s for
+# every pro league (verified 2026-09-04: nfl, usa.1, college-baseball all 404).
+# Confirmed to carry polls: college-football (AP / AFCA coaches / FCS coaches /
+# D-II), both college basketballs (AP / coaches), college volleyball and
+# lacrosse (AVCA, Inside Lacrosse), college hockey (USCHO), and NCAA soccer
+# (United Soccer Coaches). college-baseball and college-softball 404 today but
+# match the 'college' rule, so they light up on their own if ESPN adds a poll —
+# the cost is one 404 per league per cache window.
+NCAA_SOCCER_RANKED_SLUGS = frozenset({"usa.ncaa.m.1", "usa.ncaa.w.1"})
+
+
+def league_publishes_rankings(espn_league: str) -> bool:
+    """True when ESPN exposes a /rankings endpoint for this league slug."""
+    return "college" in espn_league or espn_league in NCAA_SOCCER_RANKED_SLUGS
+
 
 # ESPN team ID corrections for known mismatches between /teams endpoint and scoreboard
 # Format: (league, wrong_id) -> correct_id
@@ -136,6 +222,7 @@ class ESPNClient(BaseHTTPClient):
         league: str,
         date_str: str | None = None,
         sport_league: tuple[str, str] | None = None,
+        groups: tuple[str, ...] | None = None,
     ) -> dict | None:
         """Fetch scoreboard for a league.
 
@@ -145,6 +232,9 @@ class ESPNClient(BaseHTTPClient):
                 default slate — the most-recent-relevant games, which in the
                 offseason is the last completed game (used for sample previews).
             sport_league: Optional (sport, league) tuple from database config
+            groups: NCAA scoreboard groups to fetch, overriding the league's
+                full set — the caller's way to honour a division opt-out
+                (#811). None keeps every configured group.
 
         Returns:
             Raw ESPN response or None on error
@@ -152,7 +242,8 @@ class ESPNClient(BaseHTTPClient):
         sport, espn_league = self.get_sport_league(league, sport_league)
         url = f"{self._base_url}/{sport}/{espn_league}/scoreboard"
         params: dict = {"dates": date_str} if date_str else {}
-        groups = COLLEGE_SCOREBOARD_GROUPS.get(league)
+        if groups is None:
+            groups = COLLEGE_SCOREBOARD_GROUPS.get(league)
         if not groups:
             return self._request(url, params)
 
@@ -282,6 +373,27 @@ class ESPNClient(BaseHTTPClient):
         url = f"{self._base_url}/{sport}/{espn_league}/teams/{team_id}"
         return self._request(url)
 
+    def get_rankings(
+        self,
+        league: str,
+        sport_league: tuple[str, str] | None = None,
+    ) -> dict | None:
+        """Fetch the league's current poll rankings.
+
+        Only college leagues publish polls; everything else 404s (the caller
+        gates on RANKED_LEAGUE_SLUGS so we don't spend the call).
+
+        Args:
+            league: Canonical league code
+            sport_league: Optional (sport, league) tuple from database config
+
+        Returns:
+            Raw ESPN rankings response or None on error
+        """
+        sport, espn_league = self.get_sport_league(league, sport_league)
+        url = f"{self._base_url}/{sport}/{espn_league}/rankings"
+        return self._request(url)
+
     def get_event(
         self,
         league: str,
@@ -346,15 +458,19 @@ class ESPNClient(BaseHTTPClient):
         url = self._season_group_url(sport, espn_league, season, group_id) + "/teams"
         return self._request(url, {"limit": 500})
 
-    # UFC-specific endpoints
+    # MMA-specific endpoints
 
-    def get_ufc_scoreboard(self, date_str: str | None = None) -> dict | None:
-        """Fetch UFC scoreboard with correct bout times.
+    def get_mma_scoreboard(
+        self, espn_league: str = "ufc", date_str: str | None = None
+    ) -> dict | None:
+        """Fetch an MMA promotion's scoreboard with correct bout times.
 
         The scoreboard endpoint returns accurate segment times, unlike the
         app API which is 3 hours off.
 
         Args:
+            espn_league: ESPN MMA league slug ('ufc', 'pfl', ...) — the second
+                half of the league's ``provider_league_id``.
             date_str: YYYYMMDD date or YYYYMMDD-YYYYMMDD range. When None,
                 ESPN returns ONLY its current featured card — any other card
                 is invisible without an explicit date (#345).
@@ -362,10 +478,12 @@ class ESPNClient(BaseHTTPClient):
         Returns:
             Raw ESPN scoreboard response or None on error
         """
-        url = f"{self._base_url}/mma/ufc/scoreboard"
+        url = f"{self._base_url}/mma/{espn_league}/scoreboard"
         params: dict = {"dates": date_str} if date_str else {}
         return self._request(url, params)
 
+    # TODO: PRUNE — get_fighter/get_fighter_record have no callers anywhere in
+    # teamarr/ or tests/; fighter records ride on the scoreboard competitors.
     def get_fighter(self, fighter_id: str) -> dict | None:
         """Fetch UFC fighter profile.
 

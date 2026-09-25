@@ -17,7 +17,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast, overload
 
-from teamarr.core import Event, SportsProvider, Team, TeamStats
+from teamarr.core import GENERATED_PREVIEW_FIELDS, Event, SportsProvider, Team, TeamStats
 from teamarr.database import get_db
 from teamarr.database.provider_cache import (
     dict_to_event,
@@ -31,6 +31,7 @@ from teamarr.database.team_cache import get_team_identity
 from teamarr.providers import ProviderRegistry
 from teamarr.utilities.cache import (
     CACHE_TTL_NEGATIVE,
+    CACHE_TTL_RANKINGS,
     CACHE_TTL_SCHEDULE,
     CACHE_TTL_SINGLE_EVENT,
     CACHE_TTL_TEAM_INFO,
@@ -73,6 +74,7 @@ _EVENT_NOT_FOUND = {"__event_not_found__": True}
 # a team that comes back into season is picked up within a few hours.
 _NOT_FOUND = {"__not_found__": True}
 
+
 # Sentinel distinguishing "no usable cache entry" from a legitimately cached
 # empty result (e.g. a league with no games that day, cached as []). A distinct
 # class (not bare object()) lets callers narrow the load_from_cache() union with
@@ -101,7 +103,6 @@ def _cached_team_identity(provider: str, team_id: str, league: str) -> dict | No
     hit = _TEAM_IDENTITY_MEMO.get(key)
     if hit is not None and now - hit[0] < _TEAM_IDENTITY_MEMO_TTL:
         return hit[1]
-
 
     with get_db() as conn:
         cached = get_team_identity(conn, provider, team_id, league)
@@ -375,9 +376,11 @@ class SportsDataService:
         A failing neighbour bucket must never cost us the day actually asked
         for, so each fetch is isolated.
         """
+        days = provider_day_buckets(target_date)
+        self._prefill_span_buckets(provider, league, days)
         seen: set[tuple[str | None, str | None]] = set()
         events: list[Event] = []
-        for day in provider_day_buckets(target_date):
+        for day in days:
             try:
                 bucket = self._fetch_provider_day(provider, league, day)
             except Exception as e:  # noqa: BLE001 - one bad bucket ≠ lost day
@@ -397,6 +400,79 @@ class SportsDataService:
                 events.append(event)
         return events
 
+    def _prefill_span_buckets(
+        self, provider: SportsProvider, league: str, days: list[date]
+    ) -> None:
+        """Fill the missing raw day buckets with ONE ranged provider call (#808).
+
+        The per-day raw cache stays the cache of record: a provider that can
+        answer a date range (``get_events_span`` — ESPN) returns the events
+        already keyed by ITS bucket day, and each bucket is stored exactly as a
+        per-day fetch would store it, TTL included. Only when two or more of
+        the wanted days are missing is the range worth a request; one missing
+        day is the same single call either way, and that is the steady state
+        for consecutive target dates (D+1 of one day is D of the next). Any
+        failure or a ``None`` answer leaves the buckets missing, so the caller's
+        per-day loop fetches them as before — the range is an optimisation,
+        never the only path.
+        """
+        span = getattr(provider, "get_events_span", None)
+        if span is None:
+            return
+        missing = [
+            d for d in days if isinstance(self._load_raw_bucket(provider, league, d), _CacheMiss)
+        ]
+        if len(missing) < 2:
+            return
+        start, end = min(missing), max(missing)
+        try:
+            buckets = span(league, start, end)
+        except Exception as e:  # noqa: BLE001 - fall back to per-day fetches
+            logger.warning(
+                "[EVENTS] %s span %s..%s for %s failed, using day buckets: %s",
+                type(provider).__name__,
+                start,
+                end,
+                league,
+                e,
+            )
+            return
+        if not isinstance(buckets, dict):
+            # None = the provider declined (MMA/tournament paths, a failed
+            # request); anything else is not a bucket map. Either way the
+            # per-day loop below fetches as before.
+            return
+        for day in missing:
+            raw_key = self._raw_bucket_key(provider, league, day)
+            with self._cache.lock_key(raw_key):
+                if isinstance(self._load_raw_bucket(provider, league, day), _CacheMiss):
+                    self._store_raw_bucket(raw_key, day, buckets.get(day, []))
+
+    def _raw_bucket_key(self, provider: SportsProvider, league: str, day: date) -> str:
+        return make_cache_key("events_raw", type(provider).__name__, league, day.isoformat())
+
+    def _load_raw_bucket(
+        self, provider: SportsProvider, league: str, day: date
+    ) -> list[Event] | _CacheMiss:
+        cached = self._cache.get(self._raw_bucket_key(provider, league, day))
+        if not isinstance(cached, list):
+            return _CACHE_MISS
+        if any(_event_dict_is_stale(e) for e in cached if isinstance(e, dict)):
+            return _CACHE_MISS
+        try:
+            return [dict_to_event(e) for e in cached]
+        except (KeyError, TypeError) as e:
+            logger.warning("[CACHE_ERROR] Raw bucket deserialization failed: %s", e)
+            return _CACHE_MISS
+
+    def _store_raw_bucket(self, raw_key: str, day: date, events: list[Event]) -> None:
+        all_final = len(events) == 0 or all(is_event_final(e) for e in events)
+        self._cache.set(
+            raw_key,
+            [event_to_dict(e) for e in events],
+            get_events_cache_ttl(day, all_events_final=all_final),
+        )
+
     def _fetch_provider_day(
         self, provider: SportsProvider, league: str, day: date
     ) -> list[Event]:
@@ -414,38 +490,19 @@ class SportsDataService:
         matching. Lock order is always events_v2 → events_raw, never the
         reverse, so the nesting cannot cycle.
         """
-        raw_key = make_cache_key(
-            "events_raw", type(provider).__name__, league, day.isoformat()
-        )
+        raw_key = self._raw_bucket_key(provider, league, day)
 
-        def load_bucket() -> list[Event] | _CacheMiss:
-            cached = self._cache.get(raw_key)
-            if not isinstance(cached, list):
-                return _CACHE_MISS
-            if any(_event_dict_is_stale(e) for e in cached if isinstance(e, dict)):
-                return _CACHE_MISS
-            try:
-                return [dict_to_event(e) for e in cached]
-            except (KeyError, TypeError) as e:
-                logger.warning("[CACHE_ERROR] Raw bucket deserialization failed: %s", e)
-                return _CACHE_MISS
-
-        hit = load_bucket()
+        hit = self._load_raw_bucket(provider, league, day)
         if not isinstance(hit, _CacheMiss):
             return hit
 
         with self._cache.lock_key(raw_key):
-            hit = load_bucket()
+            hit = self._load_raw_bucket(provider, league, day)
             if not isinstance(hit, _CacheMiss):
                 return hit
 
             events = provider.get_events(league, day)
-            all_final = len(events) == 0 or all(is_event_final(e) for e in events)
-            self._cache.set(
-                raw_key,
-                [event_to_dict(e) for e in events],
-                get_events_cache_ttl(day, all_events_final=all_final),
-            )
+            self._store_raw_bucket(raw_key, day, events)
             return events
 
     def get_sample_event(self, league: str) -> Event | None:
@@ -660,10 +717,7 @@ class SportsDataService:
         # they must overlay from the fresh fetch (the scoreboard-parsed original
         # has them empty). The summary call is already made here; zero extra cost.
         "game_preview",
-        "series_summary",
-        # Structured preview (tvnk.15) — same summary payload, zero extra cost.
-        "home_last_five",
-        "away_last_five",
+        *GENERATED_PREVIEW_FIELDS,
     )
 
     def refresh_event_status(self, event: Event) -> Event:
@@ -701,9 +755,7 @@ class SportsDataService:
 
         fresh_event = self.get_event(event.id, event.league)
         if not fresh_event:
-            logger.debug(
-                "[SPORTS_DATA] Could not refresh event %s, using cached status", event.id
-            )
+            logger.debug("[SPORTS_DATA] Could not refresh event %s, using cached status", event.id)
             return event
 
         logger.debug(
@@ -732,6 +784,15 @@ class SportsDataService:
                 # None before the game — so {home_team_score}/{final_score}
                 # rendered empty. For scores, only None means "not provided".
                 overlay[field_name] = fresh_val if fresh_val is not None else orig_val
+            elif field_name in GENERATED_PREVIEW_FIELDS:
+                # Generated-preview facts are a pregame snapshot, not a live box score.
+                # Never attach summary facts first observed after kickoff, and
+                # never replace a snapshot already carried by this event.
+                fresh_state = fresh_event.status.state if fresh_event.status else ""
+                if fresh_state in {"in_progress", "in", "live", "final", "post"}:
+                    overlay[field_name] = orig_val
+                else:
+                    overlay[field_name] = orig_val or fresh_val
             else:
                 overlay[field_name] = fresh_val if fresh_val else orig_val
         return replace(event, **overlay)
@@ -744,10 +805,12 @@ class SportsDataService:
     # summary call.
     PREVIEW_LOOKAHEAD_DAYS = 7
     PREVIEW_CACHE_TTL = 6 * 3600  # parsed preview fields; clamped to gametime
+    PREVIEW_SPARSE_CACHE_TTL = 30 * 60  # retry after ESPN publishes richer facts
+    PREVIEW_SNAPSHOT_AFTER_START_TTL = 12 * 3600
     PREVIEW_FETCH_BUDGET = 40  # summary fetches per budget window
     PREVIEW_BUDGET_WINDOW = 3600
 
-    _PREVIEW_FIELDS = ("game_preview", "series_summary", "home_last_five", "away_last_five")
+    _PREVIEW_FIELDS = ("game_preview", *GENERATED_PREVIEW_FIELDS)
 
     def enrich_event_preview(self, event: Event) -> Event:
         """Overlay days-ahead preview fields onto a future event, cheaply.
@@ -761,8 +824,18 @@ class SportsDataService:
         """
         if not event or not event.start_time:
             return event
-        if event.home_last_five or event.away_last_five:
-            return event  # already enriched (e.g. via refresh overlay)
+        preview_key = make_cache_key("event_preview_v2", event.league, event.id)
+        cached = self._cache.get(preview_key)
+        if isinstance(cached, dict):
+            return replace(
+                event,
+                **{f: cached.get(f) or getattr(event, f) for f in self._PREVIEW_FIELDS},
+            )
+        from teamarr.templates.generated_preview import has_generated_preview_enrichment
+
+        if has_generated_preview_enrichment(event):
+            return event  # already fully enriched (e.g. via refresh overlay)
+
         now = datetime.now(UTC)
         start = event.start_time
         if start.tzinfo is None:
@@ -770,14 +843,6 @@ class SportsDataService:
         seconds_to_start = (start - now).total_seconds()
         if seconds_to_start <= 0 or seconds_to_start > self.PREVIEW_LOOKAHEAD_DAYS * 86400:
             return event
-
-        preview_key = make_cache_key("event_preview", event.league, event.id)
-        cached = self._cache.get(preview_key)
-        if isinstance(cached, dict):
-            return replace(
-                event,
-                **{f: cached.get(f) or getattr(event, f) for f in self._PREVIEW_FIELDS},
-            )
 
         budget_key = make_cache_key("event_preview_budget", "window")
         spent = self._cache.get(budget_key) or 0
@@ -793,15 +858,37 @@ class SportsDataService:
 
         fresh = self.get_event(event.id, event.league)
         fields = {
-            f: (getattr(fresh, f, "") or "") if fresh else "" for f in self._PREVIEW_FIELDS
+            field_name: getattr(fresh, field_name, None) if fresh else None
+            for field_name in self._PREVIEW_FIELDS
         }
-        ttl = max(300, min(self.PREVIEW_CACHE_TTL, int(seconds_to_start)))
+        candidate = replace(
+            event,
+            **{
+                field_name: value if value not in (None, "") else getattr(event, field_name)
+                for field_name, value in fields.items()
+            },
+        )
+        complete = has_generated_preview_enrichment(candidate)
+        cache_ttl = self.PREVIEW_CACHE_TTL if complete else self.PREVIEW_SPARSE_CACHE_TTL
+        # Complete snapshots deliberately survive kickoff. A later live
+        # summary contains in-game leaders/team stats and must not rewrite the
+        # guide description. Event-id scoping naturally drops the snapshot
+        # when the channel advances to its next game.
+        ttl = cache_ttl
+        if complete:
+            ttl += self.PREVIEW_SNAPSHOT_AFTER_START_TTL
         # Negative results cache too — a league without lastFiveGames data
         # shouldn't re-spend budget every run.
         self._cache.set(preview_key, fields, ttl)
         if not any(fields.values()):
             return event
-        return replace(event, **{f: fields[f] or getattr(event, f) for f in self._PREVIEW_FIELDS})
+        return replace(
+            event,
+            **{
+                field_name: value if value not in (None, "") else getattr(event, field_name)
+                for field_name, value in fields.items()
+            },
+        )
 
     def get_team_stats(self, team_id: str, league: str) -> TeamStats | None:
         """Get detailed team statistics."""
@@ -824,11 +911,36 @@ class SportsDataService:
             if provider.supports_league(league):
                 stats = provider.get_team_stats(team_id, league)
                 if stats:
+                    if stats.rank is None:
+                        rank = self.get_rankings(league).get(team_id)
+                        if rank:
+                            stats = replace(stats, rank=rank)
                     # Serialize to dict before caching
                     self._cache.set(cache_key, stats_to_dict(stats), CACHE_TTL_TEAM_STATS)
                     return stats
         self._cache.set(cache_key, _NOT_FOUND, CACHE_TTL_NEGATIVE)
         return None
+
+    def get_rankings(self, league: str) -> dict[str, int]:
+        """Get the league's poll rankings as {team_id: rank}.
+
+        One fetch per league feeds every team's rank (#710) — ESPN's per-team
+        payload has no rank field, so the poll endpoint is the only source. The
+        empty result is cached too: most leagues publish no poll at all, and
+        re-asking them once per team would be the expensive way to learn that.
+        """
+        cache_key = make_cache_key("rankings", league)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.debug("[CACHE_HIT] %s", cache_key)
+            return cached
+
+        for provider in self._providers:
+            if provider.supports_league(league):
+                rankings = provider.get_rankings(league)
+                self._cache.set(cache_key, rankings, CACHE_TTL_RANKINGS)
+                return rankings
+        return {}
 
     # Cache management
 

@@ -44,7 +44,7 @@ export function DispatcharrOutputSettings() {
   )
 
   // Always fetch the full group list (with from_m3u flag) so a saved M3U-sourced
-  // group always has a matching <option> to bind to (teamarrv2-t6d). The
+  // group always has a matching <option> to bind to (teamarr-t6d). The
   // includeM3uGroups toggle filters the displayed list; the selected group is
   // always kept visible.
   const [includeM3uGroups, setIncludeM3uGroups] = useState(false)
@@ -65,6 +65,7 @@ export function DispatcharrOutputSettings() {
   // can round-trip every field (password intentionally blank: never edited here).
   const [dispatcharr, setDispatcharr] = useState<Partial<DispatcharrSettings>>({})
   const [selectedProfileIds, setSelectedProfileIds] = useState<(number | string)[]>([])
+  const [managedTeamProfileIds, setManagedTeamProfileIds] = useState<(number | string)[]>([])
 
   // Sync the form from the server blob during render (React's "adjusting
   // state when a prop changes" pattern) — re-seeds on every settings refetch,
@@ -82,6 +83,8 @@ export function DispatcharrOutputSettings() {
       default_stream_profile_id: settings.dispatcharr.default_stream_profile_id,
       default_channel_group_id: settings.dispatcharr.default_channel_group_id,
       default_channel_group_mode: settings.dispatcharr.default_channel_group_mode,
+      managed_team_channel_profile_ids: settings.dispatcharr.managed_team_channel_profile_ids,
+      managed_team_channel_group_id: settings.dispatcharr.managed_team_channel_group_id,
       cleanup_unused_logos: settings.dispatcharr.cleanup_unused_logos,
     })
   }
@@ -101,6 +104,9 @@ export function DispatcharrOutputSettings() {
     const allProfileIds = profilesData.map((p) => p.id)
     setSelectedProfileIds(
       apiToProfileIds(settings.dispatcharr.default_channel_profile_ids, allProfileIds)
+    )
+    setManagedTeamProfileIds(
+      apiToProfileIds(settings.dispatcharr.managed_team_channel_profile_ids, allProfileIds)
     )
   }
 
@@ -123,6 +129,8 @@ export function DispatcharrOutputSettings() {
         default_stream_profile_id: dispatcharr.default_stream_profile_id,
         default_channel_group_id: dispatcharr.default_channel_group_id,
         default_channel_group_mode: dispatcharr.default_channel_group_mode,
+        managed_team_channel_profile_ids: profileIdsToApi(managedTeamProfileIds, allProfileIds),
+        managed_team_channel_group_id: dispatcharr.managed_team_channel_group_id,
         cleanup_unused_logos: dispatcharr.cleanup_unused_logos,
       }
       if (dispatcharr.password) {
@@ -157,6 +165,50 @@ export function DispatcharrOutputSettings() {
             <p className="text-xs text-muted-foreground">
               These defaults apply to all groups unless overridden in individual group settings.
               Profile assignment is enforced on every EPG generation run.
+            </p>
+          </div>
+          {saveButton}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Managed Team Channel Output</CardTitle>
+          <CardDescription>Dedicated group and profiles for persistent Team EPG channels</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label className="text-sm font-medium">Channel Profiles</Label>
+            <ChannelProfileSelector
+              selectedIds={managedTeamProfileIds}
+              onChange={setManagedTeamProfileIds}
+              disabled={!dispatcharrStatus.data?.connected}
+            />
+            <p className="text-xs text-muted-foreground">
+              Separate from event channels. All profiles are used when no selection is made.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label className="text-sm font-medium">Channel Group</Label>
+            <Select
+              value={dispatcharr.managed_team_channel_group_id?.toString() ?? ""}
+              onChange={(e) => setDispatcharr({
+                ...dispatcharr,
+                managed_team_channel_group_id: e.target.value ? parseInt(e.target.value) : null,
+              })}
+              disabled={!dispatcharrStatus.data?.connected}
+              className="w-64"
+            >
+              <option value="">None</option>
+              {visibleChannelGroups(
+                channelGroupsQuery.data ?? [],
+                dispatcharr.managed_team_channel_group_id,
+              ).map((g) => (
+                <option key={g.id} value={g.id.toString()}>{g.name}</option>
+              ))}
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Managed team channels do not inherit event-channel group settings.
             </p>
           </div>
           {saveButton}
@@ -263,8 +315,8 @@ export function DispatcharrOutputSettings() {
             </Select>
             <p className="text-xs text-muted-foreground">
               Static uses the group above. Dynamic modes auto-create groups named by sport or league.
-              Custom lets you define a pattern with {"{sport}"}, {"{league}"}, and {"{conference}"}{" "}
-              (NCAA) placeholders.
+              Custom lets you define a pattern with {"{sport}"}, {"{league}"}, {"{conference}"},
+              {"{conference_abbrev}"}, and {"{division}"} (the last three NCAA) placeholders.
             </p>
           </div>
 
@@ -281,8 +333,11 @@ export function DispatcharrOutputSettings() {
                 className="w-64"
               />
               <p className="text-xs text-muted-foreground">
-                Use {"{sport}"}, {"{league}"}, and {"{conference}"} (NCAA leagues) as placeholders.
-                Example: "{"{sport}"} | {"{league}"}" creates groups like "Hockey | NHL".
+                Use {"{sport}"}, {"{league}"}, {"{conference}"}, {"{conference_abbrev}"}, and{" "}
+                {"{division}"} (the last three NCAA only) as placeholders. Example:{" "}
+                "{"{sport}"} | {"{league}"}" creates groups like "Hockey | NHL";{" "}
+                "{"{league}"} | {"{conference_abbrev}"}" buckets college football by "NCAAF | SEC"
+                instead of the full conference name.
               </p>
             </div>
           )}

@@ -6,7 +6,7 @@ nav_order: 1
 
 # Supported Sports & Leagues
 
-Teamarr supports **174 pre-configured leagues** across 15 sports, plus **~228 dynamically discovered soccer leagues** from ESPN. Most pre-configured leagues have full support (team import + event matching) — see the Support Levels table below for the event-only exceptions. Discovered leagues support event matching only.
+Teamarr supports **176 pre-configured leagues** across 15 sports, plus **~228 dynamically discovered soccer leagues** from ESPN. Most pre-configured leagues have full support (team import + event matching) — see the Support Levels table below for the event-only exceptions. Discovered leagues support event matching only.
 
 ## Support Levels
 
@@ -26,11 +26,11 @@ Leagues have different levels of support:
 | Provider | Description |
 |----------|-------------|
 | **ESPN** | Primary provider for most US leagues and international soccer. Discovers ~228 soccer leagues dynamically. |
-| **Bell Media** | Canadian Football League via TSN's public sports widget API. |
+| **Bell Media** | CFL plus CHL, OHL, WHL, QMJHL, AHL, and PWHL via TSN's public sports widget API. |
 | **NASCAR** | NASCAR Cup, O'Reilly (Xfinity), and Truck series via the official cf.nascar.com schedule API. Full race-weekend sessions, no API key required. See [provider docs](providers/nascar). |
 | **MLB Stats API** | Minor League Baseball (MiLB) — Triple-A, Double-A, High-A, Single-A, Rookie |
 | **Squiggle** | AFL (Australian Football League). Free, no API key required. See [provider docs](providers/squiggle). |
-| **HockeyTech** | Canadian and US junior/minor hockey leagues (CHL, AHL, ECHL, PWHL, USHL, Junior A) |
+| **HockeyTech** | Canadian and US junior/minor hockey leagues (ECHL, USHL, Junior A) |
 | **Supabase** | Supabase-backed leagues such as the Canadian Baseball League (CBL). No API key required. See [provider docs](providers/supabase). |
 | **TheSportsDB** | Rugby, cricket, boxing, Scandinavian leagues, and more. Requires a [premium API key](providers/tsdb.md). |
 
@@ -89,18 +89,18 @@ NCAA Football aggregates ESPN's FBS, FCS, lower-division, and cross-division fix
 
 | League | ID | Provider |
 |--------|-----|----------|
-| Canadian Hockey League | `chl` | HockeyTech |
-| Ontario Hockey League | `ohl` | HockeyTech |
-| Western Hockey League | `whl` | HockeyTech |
-| Quebec Major Junior Hockey League | `qmjhl` | HockeyTech |
+| Canadian Hockey League | `chl` | Bell Media |
+| Ontario Hockey League | `ohl` | Bell Media |
+| Western Hockey League | `whl` | Bell Media |
+| Quebec Major Junior Hockey League | `qmjhl` | Bell Media |
 
 ### Pro/Minor Pro
 
 | League | ID | Provider |
 |--------|-----|----------|
-| American Hockey League | `ahl` | HockeyTech |
+| American Hockey League | `ahl` | Bell Media |
 | East Coast Hockey League | `echl` | HockeyTech |
-| Professional Women's Hockey League | `pwhl` | HockeyTech |
+| Professional Women's Hockey League | `pwhl` | Bell Media |
 
 ### US Junior
 
@@ -298,6 +298,8 @@ Combat sports are **Event Only** - no team import available.
 | League | ID | Provider | Type |
 |--------|-----|----------|------|
 | Ultimate Fighting Championship | `ufc` | ESPN | Event Card |
+| Professional Fighters League | `pfl` | ESPN | Event Card |
+| Legacy Fighting Alliance | `lfa` | ESPN | Event Card |
 | Boxing | `boxing` | TSDB | Event Card |
 
 Combat sports use "Event Card" matching rather than team vs team matching.

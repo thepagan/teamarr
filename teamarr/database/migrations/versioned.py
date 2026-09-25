@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sqlite3
+import unicodedata
 
 from teamarr.database.checkpoint_v43 import apply_checkpoint_v43
 
@@ -327,6 +328,37 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             _migrate_v92_retire_tsdb_tier,
         )
         current_version = 92
+
+    if current_version < 93:
+        _apply_migration(
+            conn, 93,
+            "stop resurrecting deleted default exception keywords (#726)",
+            _migrate_v93_mark_default_exception_keywords_seeded,
+        )
+        current_version = 93
+
+    if current_version < 94:
+        _advance_version(conn, 94, "scoped stream-ordering rulesets")
+        current_version = 94
+
+    if current_version < 95:
+        # Managed team channels (#810). Tables and columns come from schema
+        # reconciliation; the only data transform seeds the team-template
+        # channel name/logo defaults on existing team templates.
+        _apply_migration(
+            conn, 95, "managed team channels: seed template channel name/logo defaults",
+            _migrate_v95_team_channel_defaults,
+        )
+        current_version = 95
+
+    if current_version < 96:
+        _apply_migration(
+            conn,
+            96,
+            "migrate supported HockeyTech leagues to Bell Media",
+            _migrate_v96_hockeytech_bellmedia,
+        )
+        current_version = 96
 
 
 # =============================================================================
@@ -1211,6 +1243,185 @@ def _migrate_v87_cfl_team_selections(conn: sqlite3.Connection) -> None:
                         f"UPDATE {table} SET {column} = ? WHERE rowid = ?",
                         (updated, row["_rowid"]),
                     )
+
+
+_BELL_HOCKEY_TEAM_IDS = {
+    # These values are Bell Media competitor IDs, captured from TSN's public
+    # score widget. Lookup normalizes punctuation and accents in persisted
+    # HockeyTech names before matching them to these entries.
+    "chl": {
+        "peterborough petes": "12", "kelowna rockets": "4", "london knights": "38",
+        "chicoutimi saguenens": "101", "moncton wildcats": "14",
+        "everett silvertips": "100", "medicine hat tigers": "1",
+        "rimouski oceanic": "5", "saginaw spirit": "96", "kitchener rangers": "32",
+    },
+    "ohl": {
+        "barrie colts": "7", "brampton steelheads": "18", "brantford bulldogs": "1",
+        "erie otters": "8", "flint firebirds": "13", "guelph storm": "9",
+        "kingston frontenacs": "2", "kitchener rangers": "10", "london knights": "14",
+        "niagara icedogs": "20", "north bay battalion": "19", "oshawa generals": "4",
+        "ottawa 67s": "5", "owen sound attack": "11", "peterborough petes": "6",
+        "saginaw spirit": "34", "sarnia sting": "15", "soo greyhounds": "16",
+        "sudbury wolves": "12", "windsor spitfires": "17",
+    },
+    "whl": {
+        "brandon wheat kings": "201", "calgary hitmen": "202", "edmonton oil kings": "228",
+        "everett silvertips": "226", "kamloops blazers": "203", "kelowna rockets": "204",
+        "lethbridge hurricanes": "205", "medicine hat tigers": "206", "moose jaw warriors": "207",
+        "penticton vees": "277", "portland winterhawks": "208", "prince albert raiders": "209",
+        "prince george cougars": "210", "red deer rebels": "211", "regina pats": "212",
+        "saskatoon blades": "213", "seattle thunderbirds": "214", "spokane chiefs": "215",
+        "swift current broncos": "216", "tricity americans": "217", "vancouver giants": "223",
+        "victoria royals": "227", "wenatchee wild": "222",
+    },
+    "qmjhl": {
+        "baiecomeau drakkar": "16", "blainvilleboisbriand armada": "19",
+        "cape breton eagles": "3", "charlottetown islanders": "7", "chicoutimi saguenens": "10",
+        "drummondville voltigeurs": "14", "gatineau olympiques": "12", "halifax mooseheads": "5",
+        "moncton wildcats": "1", "newfoundland regiment": "2", "quebec remparts": "9",
+        "rimouski oceanic": "18", "rouynnoranda huskies": "11", "saint john sea dogs": "8",
+        "shawinigan cataractes": "13", "sherbrooke phoenix": "60", "valdor foreurs": "15",
+        "victoriaville tigres": "17",
+    },
+    "ahl": {
+        "abbotsford canucks": "440", "bakersfield condors": "402", "belleville senators": "413",
+        "bridgeport islanders": "317", "calgary wranglers": "444", "charlotte checkers": "384",
+        "chicago wolves": "330", "cleveland monsters": "373", "coachella valley firebirds": "445",
+        "colorado eagles": "419", "grand rapids griffins": "328", "hartford wolf pack": "307",
+        "henderson silver knights": "437", "hershey bears": "319", "iowa wild": "389",
+        "laval rocket": "415", "lehigh valley phantoms": "313", "manitoba moose": "321",
+        "milwaukee admirals": "327", "ontario reign": "403", "providence bruins": "309",
+        "rochester americans": "323", "rockford icehogs": "372", "san diego gulls": "404",
+        "san jose barracuda": "405", "springfield thunderbirds": "411", "syracuse crunch": "324",
+        "texas stars": "380", "toronto marlies": "335", "tucson roadrunners": "412",
+        "utica comets": "390", "wilkesbarrescranton penguins": "316",
+    },
+    "pwhl": {
+        "boston fleet": "1", "minnesota frost": "2", "montreal victoire": "3",
+        "new york sirens": "4", "ottawa charge": "5", "toronto sceptres": "6",
+        "seattle torrent": "8", "vancouver goldeneyes": "9",
+    },
+}
+
+
+def _normalize_hockey_team_name(name: str) -> str:
+    """Return a punctuation- and accent-insensitive team-name lookup key."""
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", ascii_name.lower())
+
+
+def _bell_hockey_team_id(league: str, name: str) -> str | None:
+    """Look up a Bell ID while tolerating historical HockeyTech name formatting."""
+    normalized_name = _normalize_hockey_team_name(name)
+    return next(
+        (
+            team_id
+            for team_name, team_id in _BELL_HOCKEY_TEAM_IDS[league].items()
+            if _normalize_hockey_team_name(team_name) == normalized_name
+        ),
+        None,
+    )
+
+
+def _migrate_v96_hockeytech_bellmedia(conn: sqlite3.Connection) -> None:
+    """v96: replace HockeyTech identifiers for Bell-supported hockey leagues."""
+    leagues = tuple(_BELL_HOCKEY_TEAM_IDS)
+    placeholders = ", ".join("?" for _ in leagues)
+
+    if _table_exists(conn, "team_cache"):
+        conn.execute(f"DELETE FROM team_cache WHERE league IN ({placeholders})", leagues)
+    if _table_exists(conn, "league_cache"):
+        conn.execute(f"DELETE FROM league_cache WHERE league_slug IN ({placeholders})", leagues)
+    if _table_exists(conn, "service_cache") and _column_exists(
+        conn, "service_cache", "cache_key"
+    ):
+        for league in leagues:
+            conn.execute(
+                "DELETE FROM service_cache WHERE cache_key LIKE ? OR cache_key LIKE ? "
+                "OR cache_key LIKE ? OR cache_key LIKE ? OR cache_key LIKE ?",
+                tuple(
+                    f"{kind}:{league}:%"
+                    for kind in ("events", "schedule", "team", "event", "stats")
+                ),
+            )
+
+    for table, league_column in (
+        ("teams", "primary_league"),
+        ("channel_priority_teams", "league"),
+    ):
+        if not _table_exists(conn, table) or not all(
+            _column_exists(conn, table, column)
+            for column in ("provider", "provider_team_id", league_column, "team_name")
+        ):
+            continue
+        rows = conn.execute(
+            f"SELECT rowid AS _rowid, {league_column}, team_name FROM {table} "
+            f"WHERE provider = 'hockeytech' AND {league_column} IN ({placeholders})",
+            leagues,
+        ).fetchall()
+        for row in rows:
+            team_id = _bell_hockey_team_id(row[league_column], row["team_name"])
+            if team_id:
+                conn.execute(
+                    f"UPDATE OR IGNORE {table} SET provider = 'bellmedia', provider_team_id = ? "
+                    "WHERE rowid = ?",
+                    (team_id, row["_rowid"]),
+                )
+
+    def remap(value: str | None) -> str | None:
+        if not value:
+            return value
+        try:
+            teams = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return value
+        if not isinstance(teams, list):
+            return value
+        changed = False
+        for team in teams:
+            if not isinstance(team, dict) or team.get("provider") != "hockeytech":
+                continue
+            league = team.get("league")
+            name = team.get("name")
+            if league not in _BELL_HOCKEY_TEAM_IDS or not isinstance(name, str):
+                continue
+            team_id = _bell_hockey_team_id(league, name)
+            if team_id:
+                team["provider"] = "bellmedia"
+                team["team_id"] = team_id
+                changed = True
+        return json.dumps(teams) if changed else value
+
+    for table, where, columns in (
+        ("settings", "id = 1", ("default_include_teams", "default_exclude_teams")),
+        ("event_epg_groups", "1 = 1", ("include_teams", "exclude_teams")),
+    ):
+        if not _table_exists(conn, table):
+            continue
+        for column in columns:
+            if not _column_exists(conn, table, column):
+                continue
+            rows = conn.execute(
+                f"SELECT rowid AS _rowid, {column} FROM {table} WHERE {where}"
+            )
+            for row in rows:
+                updated = remap(row[column])
+                if updated != row[column]:
+                    conn.execute(
+                        f"UPDATE {table} SET {column} = ? WHERE rowid = ?",
+                        (updated, row["_rowid"]),
+                    )
+
+    if _table_exists(conn, "managed_channels") and all(
+        _column_exists(conn, "managed_channels", column)
+        for column in ("deleted_at", "delete_reason", "event_provider", "league")
+    ):
+        conn.execute(
+            "UPDATE managed_channels SET deleted_at = CURRENT_TIMESTAMP, "
+            "delete_reason = 'provider_migration' WHERE event_provider = 'hockeytech' "
+            f"AND league IN ({placeholders}) AND deleted_at IS NULL",
+            leagues,
+        )
 
 
 def _clear_cfl_service_cache(conn: sqlite3.Connection) -> None:
@@ -2510,6 +2721,31 @@ def _migrate_v90_consolidate_group_subruns(conn: sqlite3.Connection) -> None:
     logger.info("[MIGRATE] v90: consolidated %d per-group sub-run row(s)", deleted)
 
 
+def _migrate_v93_mark_default_exception_keywords_seeded(conn: sqlite3.Connection) -> None:
+    """#726: record every default exception keyword as already seeded.
+
+    The defaults used to live in a schema.sql `INSERT OR IGNORE` that
+    executescript replayed on every startup, so a default the user deleted
+    reappeared on the next restart. Seeding moved into Python, guarded by
+    `seeded_default_exception_keywords`; existing installs are backfilled with
+    the full default set here so the move itself doesn't re-add the rows one
+    last time. Defaults introduced after v93 are absent from the marker table
+    and so still reach these installs.
+    """
+    from teamarr.database.exception_keywords import (
+        DEFAULT_EXCEPTION_KEYWORDS,
+        mark_defaults_seeded,
+    )
+
+    # Safety net for tests that run migrations against partial schemas.
+    if not _table_exists(conn, "seeded_default_exception_keywords"):
+        return
+
+    labels = {label for label, _terms, _behavior in DEFAULT_EXCEPTION_KEYWORDS}
+    mark_defaults_seeded(conn, labels)
+    logger.info("[MIGRATE] v93: marked %d default exception keyword(s) as seeded", len(labels))
+
+
 def _migrate_v92_retire_tsdb_tier(conn: sqlite3.Connection) -> None:
     """#676: the TSDB free tier is deprecated — every TSDB league needs a key.
 
@@ -2523,3 +2759,24 @@ def _migrate_v92_retire_tsdb_tier(conn: sqlite3.Connection) -> None:
         "UPDATE leagues SET tsdb_tier = NULL WHERE tsdb_tier IS NOT NULL"
     ).rowcount
     logger.info("[MIGRATE] v92: cleared tsdb_tier on %d league row(s)", cleared)
+
+
+def _migrate_v95_team_channel_defaults(conn: sqlite3.Connection) -> None:
+    """Seed the managed-channel name/logo defaults on existing team templates.
+
+    Custom values are never touched (only NULL is filled). PRAGMA-guarded so
+    tests that call ``_run_migrations`` on a bare schema still pass.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(templates)").fetchall()}
+    if {"template_type", "team_channel_logo_url"} <= columns:
+        conn.execute(
+            """UPDATE templates SET team_channel_logo_url = ?
+               WHERE template_type = 'team' AND team_channel_logo_url IS NULL""",
+            ("{league_id}/{team_name|pascal}/logo.png?style=1&logo=true&fallback=true",),
+        )
+    if {"template_type", "team_channel_name"} <= columns:
+        conn.execute(
+            """UPDATE templates SET team_channel_name = ?
+               WHERE template_type = 'team' AND team_channel_name IS NULL""",
+            ("{league} | {team_name}",),
+        )

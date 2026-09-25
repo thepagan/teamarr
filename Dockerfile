@@ -36,6 +36,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY teamarr/ ./teamarr/
 COPY app.py ./
 COPY data/tsdb_seed.json ./data/
+COPY LICENSE ./
 
 # Copy built frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

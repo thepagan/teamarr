@@ -8,82 +8,58 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from teamarr.channelsdvr.client import ChannelsDVRClient
+from teamarr.consumers.generation_pipeline.models import (
+    CallbackCancellationToken,
+    GenerationCancelled,
+    GenerationResult,
+    GenerationSettingsSnapshot,
+    ProgressCallback,
+    ProgressUpdate,
+    legacy_progress_reporter,
+)
 from teamarr.dispatcharr import EPGManager, M3UManager
 from teamarr.dispatcharr.factory import DispatcharrConnection
 from teamarr.dispatcharr.managers import ChannelManager
 from teamarr.emby.client import EmbyClient
 from teamarr.jellyfin.client import JellyfinClient
-from teamarr.services import create_default_service
+from teamarr.services import TeamChannelManager, create_default_service
 from teamarr.services.sports_data import flush_shared_cache
-from teamarr.services.stream_ordering import StreamOrderingService
 from teamarr.utilities import call_metrics
 from teamarr.utilities.xmltv import merge_xmltv_content
 
 logger = logging.getLogger(__name__)
 
+# GenerationCancelled, GenerationResult and ProgressCallback now live in
+# generation_pipeline.models and are re-exported here: this module is the
+# public composition root, and the API, the scheduler, teamarr.consumers and
+# several test modules import them from this path.
+__all__ = [
+    "GenerationCancelled",
+    "GenerationResult",
+    "ProgressCallback",
+    "run_full_generation",
+    "run_stream_ordering_only",
+]
 
-class GenerationCancelled(Exception):
-    """Raised when a generation run is cancelled by the user."""
 
+# Concurrency for the stream-order push phase (#735). Bounded well under the
+# client's pool so a run cannot monopolize Dispatcharr, and matched to what an
+# ordinary self-hosted Django instance answers comfortably.
+_ORDERING_PUSH_WORKERS = 8
 
 # Global lock to prevent concurrent EPG generation runs
 _generation_lock = threading.Lock()
 _generation_running = False
 
-
-@dataclass
-class GenerationResult:
-    """Result of a full EPG generation run."""
-
-    success: bool = True
-    error: str | None = None
-
-    # Timing
-    started_at: float = 0.0
-    completed_at: float = 0.0
-    duration_seconds: float = 0.0
-
-    # EPG stats
-    teams_processed: int = 0
-    teams_programmes: int = 0
-    groups_processed: int = 0
-    groups_programmes: int = 0
-    programmes_total: int = 0
-
-    # File output
-    file_written: bool = False
-    file_path: str | None = None
-    file_size: int = 0
-
-    # Sub-task results
-    m3u_refresh: dict = field(default_factory=dict)
-    stream_ordering: dict = field(default_factory=dict)
-    epg_refresh: dict = field(default_factory=dict)
-    epg_association: dict = field(default_factory=dict)
-    deletions: dict = field(default_factory=dict)
-    reconciliation: dict = field(default_factory=dict)
-    cleanup: dict = field(default_factory=dict)
-    logo_cleanup: dict = field(default_factory=dict)
-    channel_conflicts: dict = field(default_factory=dict)
-    emby_refresh: dict = field(default_factory=dict)
-    jellyfin_refresh: dict = field(default_factory=dict)
-    channelsdvr_refresh: dict = field(default_factory=dict)
-    channelsdvr_epg_refresh: dict = field(default_factory=dict)
-    # One entry per media server refreshed this run (#649): persisted on the
-    # run row so a server that fails every run is visible after the fact.
-    media_server_outcomes: list[dict] = field(default_factory=list)
-
-    # For stats run tracking
-    run_id: int | None = None
-
-    # Wall-clock seconds per generation phase (persisted to run stats so any
-    # two runs — local or live — can be compared phase-by-phase).
-    phase_timings: dict = field(default_factory=dict)
+# Guide refreshes can take minutes. Keep batches serialized without holding the
+# generation lock so a new EPG run can complete while an older guide refresh runs.
+_media_refresh_lock = threading.Lock()
 
 
 class _PhaseTimer:
@@ -97,11 +73,6 @@ class _PhaseTimer:
         now = time.time()
         self._timings[phase] = round(self._timings.get(phase, 0.0) + (now - self._last), 2)
         self._last = now
-
-
-# Type alias for progress callback
-# (phase: str, percent: int, message: str, current: int, total: int, item_name: str) -> None
-ProgressCallback = Callable[[str, int, str, int, int, str], None]
 
 
 def run_full_generation(
@@ -175,6 +146,11 @@ def run_full_generation(
     result = GenerationResult()
     result.started_at = time.time()
 
+    # Structured progress in, the public six-argument callback out. Stage
+    # bodies still call update_progress positionally; Packet 3 onward moves
+    # them onto ProgressUpdate as they are extracted.
+    report_progress = legacy_progress_reporter(progress_callback)
+
     def update_progress(
         phase: str,
         percent: int,
@@ -183,8 +159,16 @@ def run_full_generation(
         total: int = 0,
         item_name: str = "",
     ):
-        if progress_callback:
-            progress_callback(phase, percent, message, current, total, item_name)
+        report_progress(
+            ProgressUpdate(
+                phase=phase,
+                percent=percent,
+                message=message,
+                current=current,
+                total=total,
+                item_name=item_name,
+            )
+        )
 
     # Create stats run for tracking with database-level lock
     # Use BEGIN IMMEDIATE to acquire exclusive write lock BEFORE checking
@@ -239,10 +223,12 @@ def run_full_generation(
     # Import cancellation helpers
     from teamarr.consumers.generation_status import cancel_generation, is_cancellation_requested
 
-    def check_cancelled():
-        """Check if cancellation was requested and raise if so."""
-        if is_cancellation_requested():
-            raise GenerationCancelled("Cancelled by user")
+    # The token only raises. Persisting the cancelled run and calling
+    # cancel_generation() stay with the outer handler below, so no stage can
+    # half-finish a run. The import above runs per call, so patching
+    # generation_status.is_cancellation_requested still controls this.
+    cancellation = CallbackCancellationToken(requested=is_cancellation_requested)
+    check_cancelled = cancellation.checkpoint
 
     try:
         # Increment generation counter ONCE at start of full EPG run
@@ -263,11 +249,18 @@ def run_full_generation(
         # (Previously each consumer created its own service with a cold cache)
         shared_service = create_default_service()
 
-        # Get settings
+        # Get settings. Snapshotted together, in this order, on one connection:
+        # every stage below reads the values this run started with, so a
+        # setting edited mid-run cannot change behavior halfway through.
+        # Deliberately only these three — reconciliation, media-server,
+        # ordering and cleanup settings keep their phase-local reads and their
+        # own failure policies.
         with db_factory() as conn:
-            settings = get_epg_settings(conn)
-            dispatcharr_settings = get_dispatcharr_settings(conn)
-            display_settings = get_display_settings(conn)
+            settings = GenerationSettingsSnapshot(
+                epg=get_epg_settings(conn),
+                dispatcharr=get_dispatcharr_settings(conn),
+                display=get_display_settings(conn),
+            )
 
         timer = _PhaseTimer(result.phase_timings)
 
@@ -299,10 +292,30 @@ def run_full_generation(
                 msg = f"{name} ({current}/{total}) [{elapsed:.1f}s]"
             update_progress("teams", pct, msg, current, total, name)
 
-        team_result = process_all_teams(db_factory=db_factory, progress_callback=team_progress)
+        # Reuse the run-scoped service so teams share the warm event cache with
+        # group processing and lifecycle, instead of building a cold one here.
+        team_result = process_all_teams(
+            db_factory=db_factory,
+            progress_callback=team_progress,
+            service=shared_service,
+        )
         result.teams_processed = team_result.teams_processed
         result.teams_programmes = team_result.total_programmes
         timer.mark("teams")
+
+        # Persistent Team EPG channels are owned exclusively through
+        # managed_team_channels. Reconcile them after the XMLTV guide is written.
+        team_channels = (
+            dispatcharr_client
+            if isinstance(dispatcharr_client, DispatcharrConnection)
+            else None
+        )
+        team_channel_manager = TeamChannelManager(
+            db_factory,
+            team_channels.channels if team_channels else None,
+            team_channels.epg if team_channels else None,
+            team_channels.logos if team_channels else None,
+        )
 
         # Transition message - teams done, starting groups
         logger.info("[GENERATION] Sending transition message: teams -> groups")
@@ -357,6 +370,15 @@ def run_full_generation(
                 db_factory, external_occupied
             )
 
+        team_matched_streams: list[dict] = []
+        # Groups whose matching finished this run. Only their memberships are
+        # reconciled; a group that errored says nothing about its streams (#826).
+        team_completed_groups: set[int] = set()
+
+        def collect_team_matches(group_id: int, matches: list[dict]) -> None:
+            team_completed_groups.add(group_id)
+            team_matched_streams.extend({**match, "source_group_id": group_id} for match in matches)
+
         group_result = process_all_event_groups(
             db_factory=db_factory,
             dispatcharr_client=dispatcharr_client,
@@ -368,6 +390,7 @@ def run_full_generation(
             # whole guide a second time for a value nothing reads.
             aggregate_xmltv=False,
             run_id=stats_run.id,  # Details + per-group breakdown key on this run (#645)
+            matched_stream_callback=collect_team_matches,
         )
         result.groups_processed = group_result.groups_processed
         result.groups_programmes = group_result.total_programmes
@@ -376,11 +399,26 @@ def run_full_generation(
 
         # Step 3b: Global channel reassignment (if enabled)
         check_cancelled()
-        _sync_global_channels(
+        relayout = _sync_global_channels(
             db_factory, dispatcharr_client, update_progress,
             external_occupied=external_occupied,
         )
         timer.mark("channel_reassign")
+
+        # Step 3a: Reconcile persistent Team EPG channels and their stream
+        # memberships. Runs before ordering so the ordering pass pushes this
+        # run's memberships, not last run's. Guarded like every other step:
+        # a failure here must not stop event channels being created/deleted.
+        check_cancelled()
+        try:
+            result.managed_team_channels = team_channel_manager.sync(relayout=relayout)
+            result.managed_team_streams = team_channel_manager.sync_stream_memberships(
+                team_matched_streams, completed_group_ids=team_completed_groups
+            )
+        except Exception as e:  # noqa: BLE001 - per-step isolation
+            logger.exception("[GENERATION] Managed team channel sync failed: %s", e)
+            result.managed_team_channels = {"error": str(e)}
+        timer.mark("team_channels")
 
         # Step 3b: Apply stream ordering rules to all channels (93-95%)
         check_cancelled()
@@ -401,12 +439,12 @@ def run_full_generation(
             group_xmltv = get_all_group_xmltv(conn)
             xmltv_contents.extend(group_xmltv)
 
-        output_path = settings.epg_output_path
+        output_path = settings.epg.epg_output_path
         if xmltv_contents and output_path:
             merged_xmltv = merge_xmltv_content(
                 xmltv_contents,
-                generator_name=display_settings.xmltv_generator_name,
-                generator_url=display_settings.xmltv_generator_url,
+                generator_name=settings.display.xmltv_generator_name,
+                generator_url=settings.display.xmltv_generator_url,
             )
             output_file = Path(output_path)
             output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -428,10 +466,11 @@ def run_full_generation(
         )
         # Compute external channel numbers to avoid collisions (#146)
         lifecycle_service.compute_external_occupied()
+        lifecycle_service.sync_stream_profiles()
 
         # Step 5: Dispatcharr EPG refresh + channel association (96-98%)
         check_cancelled()
-        if dispatcharr_client and dispatcharr_settings.epg_id:
+        if dispatcharr_client and settings.dispatcharr.epg_id:
             update_progress("dispatcharr", 96, "Refreshing Dispatcharr EPG...")
 
             raw_client = (
@@ -441,7 +480,7 @@ def run_full_generation(
             )
             epg_manager = EPGManager(raw_client)
             refresh_result = epg_manager.wait_for_refresh(
-                dispatcharr_settings.epg_id,
+                settings.dispatcharr.epg_id,
                 timeout=300,
                 cancellation_check=is_cancellation_requested,
             )
@@ -453,94 +492,22 @@ def run_full_generation(
 
             update_progress("dispatcharr", 97, "Associating EPG with channels...")
             result.epg_association = lifecycle_service.associate_epg_with_channels(
-                dispatcharr_settings.epg_id
+                settings.dispatcharr.epg_id
             )
+            try:
+                result.epg_association["managed_team_channels"] = (
+                    team_channel_manager.associate_epg(settings.dispatcharr.epg_id)
+                )
+            except Exception as e:  # noqa: BLE001 - per-step isolation
+                logger.exception("[GENERATION] Managed team EPG association failed: %s", e)
         timer.mark("dispatcharr_epg_refresh")
 
-        # Steps 5b-5d: media-server guide refreshes — Emby, Jellyfin, and
-        # Channels DVR servers ALL refresh in parallel (#471). They are
-        # independent HTTP targets; per-server failures are isolated and
-        # non-blocking, and one slow/offline server never delays the rest.
+        # Capture the configured guide refreshes now, then run them after the
+        # EPG itself has completed and its run has been persisted.
         check_cancelled()
-        try:
-            from teamarr.database.settings import (
-                get_channelsdvr_settings,
-                get_emby_settings,
-                get_jellyfin_settings,
-            )
-
-            with db_factory() as conn:
-                emby_settings = get_emby_settings(conn)
-                jellyfin_settings = get_jellyfin_settings(conn)
-                channelsdvr_settings = get_channelsdvr_settings(conn)
-
-            jobs: list[tuple[str, Any]] = []
-            if emby_settings.enabled:
-                jobs += [("emby", s) for s in emby_settings.servers if s.url]
-            if jellyfin_settings.enabled:
-                jobs += [("jellyfin", s) for s in jellyfin_settings.servers if s.url]
-            if channelsdvr_settings.enabled:
-                jobs += [("channelsdvr", s) for s in channelsdvr_settings.servers if s.url]
-
-            if jobs and _dry_run_media_refresh(result, jobs):
-                jobs = []
-            if jobs:
-                update_progress(
-                    "media_servers", 97,
-                    f"Refreshing {len(jobs)} media server(s) in parallel...",
-                )
-                outcomes = _run_media_server_refreshes(
-                    jobs, update_progress, is_cancellation_requested
-                )
-                result.media_server_outcomes = [
-                    _media_server_outcome(kind, label, o) for kind, label, o in outcomes
-                ]
-
-                emby_results = [
-                    {"server": label, **o["guide"]}
-                    for kind, label, o in outcomes
-                    if kind == "emby" and o.get("guide") is not None
-                ]
-                if emby_results:
-                    result.emby_refresh = {
-                        "success": all(r.get("success") for r in emby_results),
-                        "servers": emby_results,
-                    }
-
-                jellyfin_results = [
-                    {"server": label, **o["guide"]}
-                    for kind, label, o in outcomes
-                    if kind == "jellyfin" and o.get("guide") is not None
-                ]
-                if jellyfin_results:
-                    result.jellyfin_refresh = {
-                        "success": all(r.get("success") for r in jellyfin_results),
-                        "servers": jellyfin_results,
-                    }
-
-                cdvr_m3u = [
-                    {"server": label, **o["m3u"]}
-                    for kind, label, o in outcomes
-                    if kind == "channelsdvr" and o.get("m3u") is not None
-                ]
-                if cdvr_m3u:
-                    result.channelsdvr_refresh = {
-                        "success": all(r.get("success") for r in cdvr_m3u),
-                        "servers": cdvr_m3u,
-                    }
-                cdvr_epg = [
-                    {"server": label, **o["epg"]}
-                    for kind, label, o in outcomes
-                    if kind == "channelsdvr" and o.get("epg") is not None
-                ]
-                if cdvr_epg:
-                    result.channelsdvr_epg_refresh = {
-                        "success": all(r.get("success") for r in cdvr_epg),
-                        "servers": cdvr_epg,
-                    }
-        except Exception as e:
-            logger.warning("[MEDIA_SERVERS] Refresh failed (non-blocking): %s", e)
-        timer.mark("media_server_refresh")
+        media_jobs = _get_media_refresh_jobs(db_factory)
+        if media_jobs and _dry_run_media_refresh(result, media_jobs):
+            media_jobs = []
 
         # Step 6: Process scheduled deletions (98-99%)
         check_cancelled()
@@ -606,6 +573,9 @@ def run_full_generation(
             channels_deleted_count, db_factory,
         )
 
+        if media_jobs and result.run_id is not None:
+            _start_media_server_refresh(db_factory, result.run_id, media_jobs)
+
         result.completed_at = time.time()
         result.duration_seconds = round(result.completed_at - result.started_at, 1)
         result.success = True
@@ -662,6 +632,119 @@ def run_full_generation(
     return result
 
 
+def _get_media_refresh_jobs(db_factory: Callable[[], Any]) -> list[tuple[str, Any]]:
+    """Snapshot enabled media servers for the post-generation refresh batch."""
+    from teamarr.database.settings import (
+        get_channelsdvr_settings,
+        get_emby_settings,
+        get_jellyfin_settings,
+    )
+
+    try:
+        with db_factory() as conn:
+            emby_settings = get_emby_settings(conn)
+            jellyfin_settings = get_jellyfin_settings(conn)
+            channelsdvr_settings = get_channelsdvr_settings(conn)
+    except Exception as exc:
+        logger.warning("[MEDIA_SERVERS] Could not load refresh settings: %s", exc)
+        return []
+
+    jobs: list[tuple[str, Any]] = []
+    if emby_settings.enabled:
+        jobs.extend(("emby", server) for server in emby_settings.servers if server.url)
+    if jellyfin_settings.enabled:
+        jobs.extend(("jellyfin", server) for server in jellyfin_settings.servers if server.url)
+    if channelsdvr_settings.enabled:
+        jobs.extend(
+            ("channelsdvr", server) for server in channelsdvr_settings.servers if server.url
+        )
+    return jobs
+
+
+def _start_media_server_refresh(
+    db_factory: Callable[[], Any], run_id: int, jobs: list[tuple[str, Any]]
+) -> None:
+    """Run a guide refresh batch after generation completion.
+
+    Batches wait for one another so a server never receives overlapping guide
+    refreshes, but this worker never blocks the next generation's core work.
+    """
+
+    def run() -> None:
+        with _media_refresh_lock:
+            started_at = time.time()
+            try:
+                from teamarr.consumers.media_refresh_status import (
+                    complete_refresh,
+                    start_refresh,
+                    update_refresh,
+                )
+
+                start_refresh(len(jobs))
+                outcomes = _run_media_server_refreshes(
+                    jobs,
+                    lambda phase, _percent, _message, *_: update_refresh(
+                        f"Refreshing {_media_refresh_title(phase)} guide..."
+                    ),
+                    lambda: False,
+                    lambda current, _total: update_refresh("Refreshing media servers...", current),
+                )
+                flattened = [
+                    _media_server_outcome(kind, label, outcome)
+                    for kind, label, outcome in outcomes
+                ]
+                complete_refresh(flattened)
+            except Exception as exc:  # noqa: BLE001 - detached worker must not escape
+                logger.exception("[MEDIA_SERVERS] Background refresh failed")
+                from teamarr.consumers.media_refresh_status import fail_refresh
+
+                fail_refresh(str(exc))
+                flattened = [
+                    {
+                        "kind": kind,
+                        "server": getattr(server, "name", None) or getattr(server, "url", ""),
+                        "success": False,
+                        "duration": 0.0,
+                        "error": str(exc),
+                    }
+                    for kind, server in jobs
+                ]
+
+            _save_media_refresh_outcomes(
+                db_factory, run_id, flattened, round(time.time() - started_at, 2)
+            )
+
+    threading.Thread(target=run, daemon=True, name=f"media-refresh-{run_id}").start()
+
+
+def _media_refresh_title(kind: str) -> str:
+    """Return a user-facing integration name without exposing server details."""
+    return {"emby": "Emby", "jellyfin": "Jellyfin", "channelsdvr": "Channels DVR"}.get(
+        kind, "media server"
+    )
+
+
+def _save_media_refresh_outcomes(
+    db_factory: Callable[[], Any], run_id: int, outcomes: list[dict], duration: float
+) -> None:
+    """Attach detached refresh outcomes to the EPG run that scheduled them."""
+    from teamarr.database.stats import get_run, save_run
+
+    try:
+        with db_factory() as conn:
+            run = get_run(conn, run_id)
+            if run is None:
+                logger.warning(
+                    "[MEDIA_SERVERS] Run %d disappeared before refresh completed", run_id
+                )
+                return
+            run.extra_metrics["media_servers"] = outcomes
+            run.extra_metrics.setdefault("phase_timings", {})["media_server_refresh"] = duration
+            save_run(conn, run)
+    except Exception as exc:  # noqa: BLE001 - guide refresh must never affect generation
+        logger.exception("[MEDIA_SERVERS] Could not save background refresh outcomes: %s", exc)
+
+
 def _dry_run_media_refresh(result: Any, jobs: list[tuple[str, Any]]) -> bool:
     """DRY_RUN (#554): record what would have been refreshed, run nothing.
 
@@ -696,6 +779,7 @@ def _run_media_server_refreshes(
     jobs: list[tuple[str, Any]],
     update_progress: Callable[..., None],
     is_cancellation_requested: Callable[[], bool],
+    completion_callback: Callable[[int, int], None] | None = None,
 ) -> list[tuple[str, str, dict]]:
     """Run every media-server refresh job concurrently (#471).
 
@@ -720,7 +804,8 @@ def _run_media_server_refreshes(
             ): (kind, server)
             for kind, server in jobs
         }
-        for future, (kind, server) in futures.items():
+        for completed, future in enumerate(as_completed(futures), start=1):
+            kind, server = futures[future]
             label = server.name or server.url or ""
             try:
                 results.append((kind, label, future.result()))
@@ -734,6 +819,8 @@ def _run_media_server_refreshes(
                 results.append(
                     (kind, label, {"guide": {"success": False, "error": str(e)}})
                 )
+            if completion_callback:
+                completion_callback(completed, len(jobs))
     return results
 
 
@@ -1021,13 +1108,16 @@ def _sync_global_channels(
     dispatcharr_client: Any | None,
     update_progress: Callable,
     external_occupied: set[int] | None = None,
-) -> None:
+) -> bool:
     """Reassign channel numbers globally by sort priority.
 
     This is the single authoritative pass that pushes numbers to Dispatcharr.
     In sticky (gap/strict) modes it places only new channels, unless the daily
     reset window has arrived (should_run_channel_reset) — then it re-grids
     everything once.
+
+    Returns whether that full re-layout ran, so the managed team channel sync
+    can re-sort its own numbers in the same run (#810).
     """
     from teamarr.database.channel_numbers import (
         reassign_all_channels,
@@ -1043,7 +1133,7 @@ def _sync_global_channels(
             conn, external_occupied=external_occupied, force_reset=force_reset
         )
         if global_result["channels_moved"] == 0:
-            return
+            return force_reset
 
         logger.info(
             "[GENERATION] Global reassignment: %d channels processed, %d moved",
@@ -1052,7 +1142,7 @@ def _sync_global_channels(
         )
 
         if not dispatcharr_client:
-            return
+            return force_reset
 
         synced = 0
         for ch in global_result.get("drift_details", []):
@@ -1072,6 +1162,118 @@ def _sync_global_channels(
                     )
         if synced:
             logger.info("[GENERATION] Synced %d channel numbers to Dispatcharr", synced)
+        return force_reset
+
+
+@dataclass
+class _OrderingPlan:
+    """One channel's decided stream-ordering state, ready for the push phase.
+
+    Carries everything the push decision needs so phase 2 can run without going
+    back to the database and phase 3 can run without touching it at all (#735).
+    """
+
+    channel: Any
+    current_order: list[int] | None  # what Dispatcharr is holding (#712)
+    pinned_top: int | None  # live-event #1 pin (#232)
+    reordered_count: int
+    has_windowed: bool
+
+
+def _push_stream_orders(
+    channel_mgr: Any,
+    pushes: list[tuple["_OrderingPlan", list[int]]],
+    update_progress: Callable,
+) -> int:
+    """PATCH each channel's stream order to Dispatcharr, concurrently (#735).
+
+    One PATCH per channel used to go out serially, and since #712 any order
+    difference triggers one — so a windowed install re-pushes most of its
+    channels every run and this was the longest serial stretch left. The work
+    is pure network wait: ``update_channel`` guards only a cache write, and the
+    client pools its connections.
+
+    Failures are logged and counted, never raised: Dispatcharr still holds the
+    wrong order, so the drift check re-detects it and retries next run. Nothing
+    is rolled back for the same reason (see #712).
+
+    Returns:
+        The number of channels whose push failed.
+    """
+    workers = min(_ORDERING_PUSH_WORKERS, len(pushes))
+    failures = 0
+    done = 0
+    total = len(pushes)
+
+    def push(plan: "_OrderingPlan", ordered_ids: list[int]):
+        return plan, channel_mgr.update_channel(
+            plan.channel.dispatcharr_channel_id, {"streams": ordered_ids}
+        )
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="order-push") as executor:
+        futures = [executor.submit(push, plan, ids) for plan, ids in pushes]
+        for future in as_completed(futures):
+            done += 1
+            try:
+                plan, sync_result = future.result()
+            except Exception as e:  # noqa: BLE001 — per-channel isolation
+                failures += 1
+                logger.warning("[ORDERING] Stream-order push raised: %s", e)
+            else:
+                if not sync_result.success:
+                    failures += 1
+                    logger.warning(
+                        "[ORDERING] Failed to sync channel %s to Dispatcharr: %s",
+                        plan.channel.channel_name,
+                        sync_result.error,
+                    )
+            if done % 10 == 0 or done == total:
+                pct = 93 + int((done / total) * 2)
+                update_progress(
+                    "ordering", pct, f"Ordering streams ({done}/{total})", done, total, ""
+                )
+
+    logger.info(
+        "[ORDERING] Pushed stream order for %d channel(s) across %d worker(s); %d failed",
+        total, workers, failures,
+    )
+    return failures
+
+
+def run_stream_ordering_only(
+    db_factory: Callable[[], Any],
+    dispatcharr_client: Any | None,
+    manual: bool = True,
+) -> dict | None:
+    """Re-sort every managed channel's streams without a generation run (#576).
+
+    The whole ordering step and nothing else: pull current stats from
+    Dispatcharr, re-apply the rules, push only the channels whose order
+    changed. No matching, no provider calls, no EPG rebuild, no media-server
+    refresh, no run-history row. Takes the generation lock so it can never
+    overlap a real run (or vice versa); returns None when a run is in
+    progress so the caller can answer 409.
+
+    ``manual`` defaults True: this is the user's button, and like a manual
+    generation it bypasses the live-event #1 pin (#232) — the escape hatch
+    when the pinned stream is wrong. A scheduled caller must pass False.
+    """
+    global _generation_running
+
+    if not _generation_lock.acquire(blocking=False):
+        return None
+    if _generation_running:
+        _generation_lock.release()
+        return None
+    _generation_running = True
+    try:
+        logger.info("[ORDERING] Manual stream re-order (no generation)")
+        return _apply_stream_ordering(
+            db_factory, dispatcharr_client, lambda *a, **k: None, manual=manual
+        )
+    finally:
+        _generation_running = False
+        _generation_lock.release()
 
 
 def _apply_stream_ordering(
@@ -1086,13 +1288,16 @@ def _apply_stream_ordering(
     the escape hatch when the pinned stream is wrong. Scheduled runs keep the
     top slot of an in-window event's channel stable so a re-gen can't displace
     the stream a viewer is currently watching; rule-truth priorities are still
-    persisted, so normal ordering resumes on the first post-event push.
+    persisted, so normal ordering resumes on the first post-event push. That
+    post-event push is guaranteed since #712: once the pin lifts, the intended
+    order no longer matches what Dispatcharr holds, and order drift alone is
+    enough to trigger a push.
     """
     from teamarr.consumers.lifecycle import is_channel_event_live
     from teamarr.database.channels import (
+        get_all_channel_streams,
         get_all_managed_channels,
-        get_channel_streams,
-        get_ordered_stream_ids,
+        get_all_ordered_stream_ids,
         update_stream_priority,
     )
     from teamarr.database.channels.streams import (
@@ -1100,11 +1305,15 @@ def _apply_stream_ordering(
         refresh_stream_stats_bulk,
     )
     from teamarr.database.settings import get_stream_ordering_settings
+    from teamarr.database.stream_ordering_scopes import get_stream_ordering_scopes
+    from teamarr.services.stream_ordering import get_stream_ordering_service
+    from teamarr.utilities.tz import now_utc
 
     reorder_result: dict = {
         "channels_reordered": 0,
         "streams_reordered": 0,
         "windows_synced": 0,
+        "order_drift_synced": 0,
         "stats_refreshed": 0,
     }
     try:
@@ -1112,16 +1321,11 @@ def _apply_stream_ordering(
             ordering_settings = get_stream_ordering_settings(conn)
             # No early return when rules are absent: time-windowed (EPG-matched)
             # streams still need their membership synced each run so they attach
-            # when their window opens and detach when it closes (bead teamarrv2-uye).
-            ordering_service = (
-                StreamOrderingService(rules=ordering_settings.rules, conn=conn)
-                if ordering_settings.rules
-                else None
-            )
-            if ordering_service:
-                logger.info(
-                    "[ORDERING] Applying %d ordering rule(s)", len(ordering_settings.rules)
-                )
+            # when their window opens and detach when it closes (bead teamarr-uye).
+            scoped_ordering = get_stream_ordering_scopes(conn)
+            has_scoped_rules = any(scope.rules for scope in scoped_ordering)
+            if ordering_settings.rules or has_scoped_rules:
+                logger.info("[ORDERING] Applying scoped stream ordering rules")
             else:
                 logger.debug(
                     "[ORDERING] No ordering rules configured; running window sync only"
@@ -1138,8 +1342,37 @@ def _apply_stream_ordering(
                 )
                 channel_mgr = ChannelManager(raw_client)
 
+            # Dispatcharr's ACTUAL stream order per channel (#712). Until now the
+            # push below was gated purely on whether a local priority CHANGED, and
+            # priorities are already computed at insert time
+            # (creator.py::compute_stream_priority_from_rules) — so a steady-state
+            # channel recomputes to the value it already has, reordered_count is 0,
+            # and Teamarr never pushed no matter what order Dispatcharr was holding.
+            # Any divergence (a rejected push, a hand edit in Dispatcharr, a
+            # reconciliation fix that wrote the wrong order) was therefore permanent.
+            # One list call on a fresh manager cache — the audit at the end of the
+            # run pays the same cost — gives us the real order to converge against.
+            dispatcharr_order: dict[int, list[int]] = {}
+            if channel_mgr:
+                try:
+                    for d_channel in channel_mgr.get_channels():
+                        dispatcharr_order[d_channel.id] = list(d_channel.streams or ())
+                except Exception as e:
+                    # Order convergence is best-effort: without it we fall back to
+                    # the old change-gated behavior rather than failing the run.
+                    logger.warning("[ORDERING] Could not read Dispatcharr stream order: %s", e)
+
             all_channels = get_all_managed_channels(conn, include_deleted=False)
-            total_channels = len(all_channels)
+
+            # One scan each instead of two queries per channel (#735). The
+            # window instant is pinned for the whole pass so every channel's
+            # attach/detach state is evaluated at the same moment — walking
+            # channels one at a time re-read the clock per channel, so a long
+            # pass could open a window partway through and treat two channels
+            # sharing a stream inconsistently.
+            window_now = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+            streams_by_channel = get_all_channel_streams(conn)
+            pre_order_by_channel = get_all_ordered_stream_ids(conn, now=window_now)
 
             # stats_metric rules score against the cached stream_stats column,
             # and until now that column was only ever refreshed by the streams
@@ -1151,9 +1384,14 @@ def _apply_stream_ordering(
             #
             # Skipped outright when no rule reads stats: the fetch buys nothing
             # for a ruleset built from m3u/group/regex, and most are.
-            if ordering_service and any(
+            has_stats_rule = any(
                 rule.type == "stats_metric" for rule in ordering_settings.rules
-            ):
+            ) or any(
+                rule.get("type") == "stats_metric"
+                for scope in scoped_ordering
+                for rule in scope.rules
+            )
+            if has_stats_rule:
                 stat_stream_ids = get_active_dispatcharr_stream_ids(conn)
                 refreshed = refresh_stream_stats_bulk(conn, stat_stream_ids)
                 reorder_result["stats_refreshed"] = refreshed
@@ -1163,19 +1401,42 @@ def _apply_stream_ordering(
                     len(stat_stream_ids),
                 )
 
-            for idx, channel in enumerate(all_channels):
-                streams = get_channel_streams(conn, channel.id)
+            # Phase 1 (serial, database): recompute and persist priorities.
+            # Nothing here touches the network, so it stays on the one
+            # connection; the pushes are batched up and issued afterwards.
+            plans: list[_OrderingPlan] = []
+
+            for channel in all_channels:
+                streams = streams_by_channel.get(channel.id)
                 if not streams:
                     continue
+
+                current_order = (
+                    dispatcharr_order.get(channel.dispatcharr_channel_id)
+                    if channel.dispatcharr_channel_id
+                    else None
+                )
 
                 # Live-event #1 pin (#232): capture the currently-pushed top
                 # stream BEFORE priorities are recomputed, so the push below
                 # can keep it in the top slot mid-broadcast.
+                #
+                # Read it from Dispatcharr's real order when we have it (#712):
+                # the pin's premise is that slot 1 is what somebody is watching,
+                # and that is Dispatcharr's slot 1, not ours. Falling back to the
+                # DB order would pin the wrong stream on exactly the channels
+                # whose order has drifted — and now that drift alone triggers a
+                # push, that would displace the live stream instead of leaving it
+                # alone.
                 pinned_top: int | None = None
                 if not manual and is_channel_event_live(
                     channel.event_date, channel.scheduled_delete_at
                 ):
-                    pre_order = get_ordered_stream_ids(conn, channel.id)
+                    pre_order = (
+                        current_order
+                        if current_order is not None
+                        else pre_order_by_channel.get(channel.id, [])
+                    )
                     pinned_top = pre_order[0] if pre_order else None
                     # The pin's premise is that slot 1 is what somebody is
                     # watching. A probe saying the stream is dead or a black
@@ -1205,7 +1466,10 @@ def _apply_stream_ordering(
                             pinned_top = None
 
                 reordered_count = 0
-                if ordering_service:
+                ordering_service = get_stream_ordering_service(
+                    conn, channel.sport, channel.league
+                )
+                if ordering_service.rules:
                     for stream in streams:
                         new_priority = ordering_service.compute_priority(stream)
                         if stream.priority != new_priority:
@@ -1216,75 +1480,122 @@ def _apply_stream_ordering(
                     reorder_result["channels_reordered"] += 1
                     reorder_result["streams_reordered"] += reordered_count
 
-                # Push the window-gated active set to Dispatcharr when priorities
-                # changed OR the channel has any time-windowed stream (whose
-                # membership flips as its attach/detach window opens and closes).
-                # An empty set IS pushed — a channel whose sole source is currently
-                # out-of-window must be cleared (it re-attaches on a later run).
-                has_windowed = any(s.attach_at for s in streams)
-                if (reordered_count > 0 or has_windowed) and (
-                    channel_mgr and channel.dispatcharr_channel_id
-                ):
-                    ordered_ids = get_ordered_stream_ids(conn, channel.id)
-                    if (
-                        pinned_top is not None
-                        and ordered_ids
-                        and ordered_ids[0] != pinned_top
-                        and pinned_top in ordered_ids
-                    ):
-                        # Event is live: rule-truth priorities are in the DB,
-                        # but the push keeps the current #1 on top so the
-                        # stream being watched isn't displaced mid-broadcast.
-                        ordered_ids.remove(pinned_top)
-                        ordered_ids.insert(0, pinned_top)
-                        logger.info(
-                            "[STREAM_AUDIT] pin: ch='%s' (d_id=%s) live event — "
-                            "kept stream %d at #1 (#232)",
-                            channel.channel_name,
-                            channel.dispatcharr_channel_id,
-                            pinned_top,
+                if channel_mgr and channel.dispatcharr_channel_id:
+                    plans.append(
+                        _OrderingPlan(
+                            channel=channel,
+                            current_order=current_order,
+                            pinned_top=pinned_top,
+                            reordered_count=reordered_count,
+                            # A channel with any time-windowed stream must be
+                            # synced every run: membership flips as the window
+                            # opens and closes.
+                            has_windowed=any(s.attach_at for s in streams),
                         )
-                    if has_windowed:
-                        reorder_result["windows_synced"] += 1
+                    )
+
+            # Phase 2 (serial, database): one scan for the post-update active
+            # sets, then decide what actually needs pushing.
+            post_order_by_channel = get_all_ordered_stream_ids(conn, now=window_now)
+            pushes: list[tuple[_OrderingPlan, list[int]]] = []
+
+            for plan in plans:
+                channel = plan.channel
+                # An empty set IS pushed — a channel whose sole source is
+                # currently out-of-window must be cleared (it re-attaches on a
+                # later run).
+                ordered_ids = list(post_order_by_channel.get(channel.id, []))
+
+                if (
+                    plan.pinned_top is not None
+                    and ordered_ids
+                    and ordered_ids[0] != plan.pinned_top
+                    and plan.pinned_top in ordered_ids
+                ):
+                    # Event is live: rule-truth priorities are in the DB, but
+                    # the push keeps the current #1 on top so the stream being
+                    # watched isn't displaced mid-broadcast.
+                    ordered_ids.remove(plan.pinned_top)
+                    ordered_ids.insert(0, plan.pinned_top)
                     logger.info(
-                        "[STREAM_AUDIT] sync: ch='%s' (d_id=%s) setting streams=%s "
-                        "count=%d (reordered=%d windowed=%s)",
+                        "[STREAM_AUDIT] pin: ch='%s' (d_id=%s) live event — "
+                        "kept stream %d at #1 (#232)",
                         channel.channel_name,
                         channel.dispatcharr_channel_id,
-                        ordered_ids,
-                        len(ordered_ids),
-                        reordered_count,
-                        has_windowed,
-                    )
-                    sync_result = channel_mgr.update_channel(
-                        channel.dispatcharr_channel_id, {"streams": ordered_ids}
-                    )
-                    if not sync_result.success:
-                        logger.warning(
-                            "[ORDERING] Failed to sync channel %s to Dispatcharr: %s",
-                            channel.channel_name,
-                            sync_result.error,
-                        )
-
-                if (idx + 1) % 10 == 0 or idx == total_channels - 1:
-                    pct = 93 + int(((idx + 1) / total_channels) * 2)
-                    update_progress(
-                        "ordering",
-                        pct,
-                        f"Ordering streams ({idx + 1}/{total_channels})",
-                        idx + 1,
-                        total_channels,
-                        channel.channel_name,
+                        plan.pinned_top,
                     )
 
-            if reorder_result["channels_reordered"] > 0 or reorder_result["windows_synced"] > 0:
-                logger.info(
-                    "[ORDERING] Reordered %d streams across %d channels; "
-                    "window-synced %d channel(s)",
-                    reorder_result["streams_reordered"],
-                    reorder_result["channels_reordered"],
-                    reorder_result["windows_synced"],
+                # Compared AFTER the pin is applied, so a pinned channel is
+                # measured against the order we actually intend to push and
+                # doesn't re-push every run.
+                order_drifted = (
+                    plan.current_order is not None and ordered_ids != plan.current_order
                 )
+
+                if not (plan.reordered_count > 0 or plan.has_windowed or order_drifted):
+                    continue
+
+                if plan.has_windowed:
+                    reorder_result["windows_synced"] += 1
+                if order_drifted and plan.reordered_count == 0 and not plan.has_windowed:
+                    reorder_result["order_drift_synced"] += 1
+                    logger.info(
+                        "[STREAM_AUDIT] drift: ch='%s' (d_id=%s) Dispatcharr order "
+                        "%s does not match intended %s — re-pushing (#712)",
+                        channel.channel_name,
+                        channel.dispatcharr_channel_id,
+                        plan.current_order,
+                        ordered_ids,
+                    )
+                logger.info(
+                    "[STREAM_AUDIT] sync: ch='%s' (d_id=%s) setting streams=%s "
+                    "count=%d (reordered=%d windowed=%s drifted=%s)",
+                    channel.channel_name,
+                    channel.dispatcharr_channel_id,
+                    ordered_ids,
+                    len(ordered_ids),
+                    plan.reordered_count,
+                    plan.has_windowed,
+                    order_drifted,
+                )
+                pushes.append((plan, ordered_ids))
+
+        # Team channels are durable and use their own membership table, but
+        # their streams obey the same scoped ordering rules and windows. This
+        # opens its own connection and issues its own PATCHes, so it runs only
+        # once the block above has committed and closed (#735, #826).
+        team_ordering = TeamChannelManager(db_factory, channel_mgr).sync_stream_ordering()
+        reorder_result["managed_team_channels_reordered"] = team_ordering["channels"]
+        reorder_result["managed_team_streams_reordered"] = team_ordering["streams"]
+        if team_ordering["errors"]:
+            reorder_result["managed_team_order_errors"] = team_ordering["errors"]
+
+        # Phase 3 (parallel, network only): issue the pushes. Outside the `with`
+        # so the database connection is closed before any thread runs — every
+        # decision is already made and nothing below writes to it.
+        #
+        # This was the longest serial stretch left in a run: one PATCH per
+        # channel, and since #712 any order difference triggers one, so a
+        # windowed install pushes most of its channels every run. update_channel
+        # is thread-safe (its only shared state is a locked cache write) and the
+        # client pools connections, so the wait is pure overlap.
+        if pushes:
+            failed = _push_stream_orders(channel_mgr, pushes, update_progress)
+            reorder_result["push_failures"] = failed
+
+        if (
+            reorder_result["channels_reordered"] > 0
+            or reorder_result["windows_synced"] > 0
+            or reorder_result["order_drift_synced"] > 0
+        ):
+            logger.info(
+                "[ORDERING] Reordered %d streams across %d channels; "
+                "window-synced %d channel(s); order-drift re-pushed %d channel(s)",
+                reorder_result["streams_reordered"],
+                reorder_result["channels_reordered"],
+                reorder_result["windows_synced"],
+                reorder_result["order_drift_synced"],
+            )
     except Exception as e:
         logger.warning("[ORDERING] Stream ordering failed: %s", e)
         reorder_result["error"] = str(e)
@@ -1301,7 +1612,8 @@ def _run_stream_audit(
     Logs any channels where the DB and Dispatcharr disagree on stream
     assignments. This is diagnostic-only — no changes are made.
     """
-    from teamarr.database.channels import get_all_managed_channels, get_ordered_stream_ids
+    from teamarr.consumers.lifecycle import is_channel_event_live
+    from teamarr.database.channels import get_all_managed_channels, get_all_ordered_stream_ids
 
     if not dispatcharr_client:
         return
@@ -1313,9 +1625,12 @@ def _run_stream_audit(
 
     channel_mgr = ChannelManager(raw_client)
     mismatches = []
+    order_mismatches = []
 
     with db_factory() as conn:
         channels = get_all_managed_channels(conn, include_deleted=False)
+        # One scan for every channel's active set instead of a query each (#735).
+        ordered_by_channel = get_all_ordered_stream_ids(conn)
 
         for channel in channels:
             if not channel.dispatcharr_channel_id:
@@ -1325,7 +1640,13 @@ def _run_stream_audit(
             # Using the raw stream list here would false-flag time-shared EPG
             # streams that are correctly out of their attach/detach window (183.5)
             # as mismatches. Mirrors reconciliation's expected-set logic.
-            db_stream_ids = sorted(get_ordered_stream_ids(conn, channel.id))
+            #
+            # Kept in priority order (#712): this audit used to sort both sides
+            # before comparing, so it could only ever see membership — it logged
+            # "All channels match" on runs where Dispatcharr held a visibly
+            # different order. Order is the whole point of the ordering step, so
+            # the audit has to be able to see it.
+            db_stream_ids = ordered_by_channel.get(channel.id, [])
 
             d_channel = channel_mgr.get_channel(channel.dispatcharr_channel_id)
             if not d_channel:
@@ -1338,20 +1659,44 @@ def _run_stream_audit(
                 )
                 continue
 
-            d_stream_ids = sorted(d_channel.streams or ())
+            d_stream_ids = list(d_channel.streams or ())
 
-            if db_stream_ids != d_stream_ids:
+            if sorted(db_stream_ids) != sorted(d_stream_ids):
                 mismatches.append(channel.channel_name)
                 logger.warning(
                     "[STREAM_AUDIT] MISMATCH: ch='%s' (d_id=%s) "
                     "db_streams=%s (%d) vs dispatcharr_streams=%s (%d)",
                     channel.channel_name,
                     channel.dispatcharr_channel_id,
-                    db_stream_ids,
+                    sorted(db_stream_ids),
                     len(db_stream_ids),
-                    d_stream_ids,
+                    sorted(d_stream_ids),
                     len(d_stream_ids),
                 )
+            elif db_stream_ids != d_stream_ids:
+                # Same streams, different order. Expected on a live channel: the
+                # #1 pin (#232) deliberately holds the watched stream on top,
+                # against the DB's rule-truth order, until the event ends.
+                if is_channel_event_live(channel.event_date, channel.scheduled_delete_at):
+                    logger.debug(
+                        "[STREAM_AUDIT] pinned order: ch='%s' (d_id=%s) "
+                        "db_order=%s vs dispatcharr_order=%s (live event, #232)",
+                        channel.channel_name,
+                        channel.dispatcharr_channel_id,
+                        db_stream_ids,
+                        d_stream_ids,
+                    )
+                else:
+                    order_mismatches.append(channel.channel_name)
+                    logger.warning(
+                        "[STREAM_AUDIT] ORDER MISMATCH: ch='%s' (d_id=%s) same %d "
+                        "stream(s), different order: db_order=%s vs dispatcharr_order=%s",
+                        channel.channel_name,
+                        channel.dispatcharr_channel_id,
+                        len(db_stream_ids),
+                        db_stream_ids,
+                        d_stream_ids,
+                    )
 
     if mismatches:
         logger.warning(
@@ -1359,7 +1704,13 @@ def _run_stream_audit(
             len(mismatches),
             mismatches[:20],  # Cap at 20 to avoid log spam
         )
-    else:
+    if order_mismatches:
+        logger.warning(
+            "[STREAM_AUDIT] %d channel(s) have stream ORDER mismatches: %s",
+            len(order_mismatches),
+            order_mismatches[:20],
+        )
+    if not mismatches and not order_mismatches:
         logger.info("[STREAM_AUDIT] All channels match between DB and Dispatcharr")
 
 
@@ -1491,4 +1842,3 @@ def _finalize_stats_run(
 
     with db_factory() as conn:
         save_run(conn, stats_run)
-

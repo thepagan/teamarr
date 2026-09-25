@@ -10,7 +10,7 @@ nav_order: 1
 
 ## What is Teamarr?
 
-Teamarr is an add-on for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) that generates enriched EPG for sports channels. It pulls rich sports data from providers (ESPN, TheSportsDB, HockeyTech, MLB Stats, NASCAR, Squiggle, and more) — schedules, venues, records, scores, standings, broadcasts — and uses it to manage your IPTV sports channels in Dispatcharr.
+Teamarr is an add-on for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) that generates enriched EPG for sports channels. It pulls rich sports data from providers (ESPN, Bell Media, TheSportsDB, HockeyTech, MLB Stats, NASCAR, Squiggle, and more) — schedules, venues, records, scores, standings, broadcasts — and uses it to manage your IPTV sports channels in Dispatcharr.
 
 The workflow is simple: point Teamarr at your IPTV stream groups, tell it which leagues you follow, and it matches streams to real sporting events, creates and manages channels in Dispatcharr, and generates the guide. It works with several kinds of stream source:
 
@@ -43,9 +43,9 @@ EPG:     Kansas City Chiefs @ Philadelphia Eagles
 
 ## Features
 
-- **174 pre-configured leagues across 15 sports**, plus ~228 more soccer leagues discovered live from ESPN — football, basketball, hockey, baseball, soccer, cricket, lacrosse, MMA, boxing, rugby, volleyball, Australian football, softball, racing (F1, NASCAR, IndyCar, IMSA, WEC), and tennis (ATP, WTA)
+- **176 pre-configured leagues across 15 sports**, plus ~228 more soccer leagues discovered live from ESPN — football, basketball, hockey, baseball, soccer, cricket, lacrosse, MMA, boxing, rugby, volleyball, Australian football, softball, racing (F1, NASCAR, IndyCar, IMSA, WEC), and tennis (ATP, WTA)
 - **Custom leagues** — add any competition from TheSportsDB (premium key required)
-- **258 template variables + chainable filters** — customize channel names and EPG with records, scores, venues, broadcasts, standings, playoff status, motorsports sessions, tennis context, and more
+- **266 template variables + chainable filters** — customize channel names and EPG with records, scores, venues, broadcasts, standings, playoff status, motorsports sessions, tennis context, and more
 - **Flexible matching** — stream-name matching, team streams, and EPG program matching per source; aliases, fuzzy matching, and custom regex extractors for inconsistent IPTV naming
 - **Channel management** — automatic create/update/delete lifecycle, numbering strategies, consolidation, feed separation, and stream priority rules
 - **Dynamic groups & profiles** — use existing Dispatcharr groups/profiles or create them on the fly with `{sport}` / `{league}` wildcards
@@ -57,3 +57,7 @@ EPG:     Kansas City Chiefs @ Philadelphia Eagles
 
 - [User Guide](guide/) — get started with Teamarr
 - [Technical Reference](reference/) — architecture and API documentation
+
+## License
+
+Teamarr is free software under the [GNU Affero General Public License v3.0 only](https://github.com/Pharaoh-Labs/teamarr/blob/main/LICENSE). Releases before v2.18.0 were MIT.

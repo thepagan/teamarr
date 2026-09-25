@@ -117,6 +117,26 @@ class StreamMatchCache:
             finally:
                 self._session_conn = None
 
+    def _commit(self, conn) -> None:
+        """Commit this write, unless a session is batching them.
+
+        ``session()`` pins one connection so a batch of cache operations shares
+        it, and its context exit commits once. Every write method still called
+        ``conn.commit()`` itself, so the batching only ever saved the connection
+        setup — never the fsync. On a run that matches a couple of thousand
+        streams that is a couple of thousand fsyncs, and on network-backed
+        storage (the usual Kubernetes/NAS deployment) an fsync costs far more
+        than the write it durably commits; it profiled as the single largest
+        cost in the match phase (#742).
+
+        Losing an uncommitted tail to a crash is acceptable here in a way it
+        would not be elsewhere: this table is a cache, every entry is
+        re-derivable by matching again, and a session that ends normally — the
+        only way the match loop ends — commits.
+        """
+        if self._session_conn is None:
+            conn.commit()
+
     @contextmanager
     def _conn(self):
         """Yield the session connection if one is pinned, else a fresh one."""
@@ -271,7 +291,7 @@ class StreamMatchCache:
                         match_method,
                     ),
                 )
-                conn.commit()
+                self._commit(conn)
                 self._stats["sets"] += 1
                 logger.debug(
                     "[STREAM_CACHE_SET] stream_id=%d event_id=%s method=%s",
@@ -290,22 +310,32 @@ class StreamMatchCache:
         stream_id: int,
         stream_name: str,
         generation: int,
+        reason: str | None = None,
     ) -> bool:
         """Cache a failed match attempt.
 
-        Failed matches are cached with a shorter TTL to avoid re-attempting
-        expensive matching on every run for streams that never match.
+        Failed matches are cached with a shorter TTL
+        (``PURGE_FAILED_AFTER_GENERATIONS``) to avoid re-attempting expensive
+        matching every run for streams that never match.
+
+        ``reason`` is stored so a cache hit can report the SAME
+        ``FailedReason`` the real attempt produced (#754). Without it a hit
+        would flatten every cached failure to one generic verdict and quietly
+        wreck the failure taxonomy the UI reads — the same trap #747 hit with
+        FIXTURE_NOT_IN_LEAGUE.
 
         Args:
             group_id: Event group ID
             stream_id: Stream ID
             stream_name: Exact stream name
             generation: Current EPG generation counter
+            reason: The FailedReason value this attempt produced
 
         Returns:
             True if cached successfully
         """
         fingerprint = compute_fingerprint(group_id, stream_id, stream_name)
+        failed_payload = json.dumps({"failed_reason": reason}) if reason else None
 
         try:
             with self._conn() as conn:
@@ -316,10 +346,11 @@ class StreamMatchCache:
                          event_id, league, cached_event_data, last_seen_generation,
                          match_method, user_corrected,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, '', NULL, ?, 'no_match', 0,
+                    VALUES (?, ?, ?, ?, ?, '', ?, ?, 'no_match', 0,
                             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (fingerprint)
                     DO UPDATE SET
+                        cached_event_data = excluded.cached_event_data,
                         last_seen_generation = excluded.last_seen_generation,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE stream_match_cache.user_corrected = 0  -- Don't overwrite user corrections
@@ -330,10 +361,11 @@ class StreamMatchCache:
                         stream_id,
                         stream_name,
                         FAILED_MATCH_EVENT_ID,
+                        failed_payload,
                         generation,
                     ),
                 )
-                conn.commit()
+                self._commit(conn)
                 self._stats["failed_cached"] += 1
                 logger.debug("[STREAM_CACHE_FAILED] stream_id=%d (no match)", stream_id)
                 return True
@@ -397,7 +429,7 @@ class StreamMatchCache:
                         cached_json,
                     ),
                 )
-                conn.commit()
+                self._commit(conn)
                 self._stats["user_corrections"] += 1
                 logger.info(
                     "[STREAM_CACHE_CORRECTED] stream_id=%d event_id=%s", stream_id, event_id
@@ -429,7 +461,7 @@ class StreamMatchCache:
                     """,
                     (fingerprint,),
                 )
-                conn.commit()
+                self._commit(conn)
                 return cursor.rowcount > 0
         except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Remove user correction: %s", e)
@@ -467,7 +499,7 @@ class StreamMatchCache:
                     """,
                     (generation, fingerprint),
                 )
-                conn.commit()
+                self._commit(conn)
                 return cursor.rowcount > 0
         except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Touch failed: %s", e)
@@ -527,7 +559,7 @@ class StreamMatchCache:
                         )
                     purged_total += success_purged
 
-                conn.commit()
+                self._commit(conn)
 
                 if purged_total > 0:
                     self._stats["purged"] += purged_total
@@ -564,7 +596,7 @@ class StreamMatchCache:
                     "DELETE FROM stream_match_cache WHERE fingerprint = ?",
                     (fingerprint,),
                 )
-                conn.commit()
+                self._commit(conn)
                 deleted = cursor.rowcount > 0
                 if deleted:
                     logger.debug("[STREAM_CACHE_DELETE] stream_id=%d", stream_id)
@@ -572,6 +604,43 @@ class StreamMatchCache:
         except sqlite3.Error as e:
             logger.warning("[STREAM_CACHE_ERROR] Delete failed: %s", e)
             return False
+
+    def clear_failed(self) -> int:
+        """Drop every cached FAILURE, leaving successes and pins untouched (#757).
+
+        Cached failures are derived from team identity, aliases and league
+        membership, so any change to those invalidates them — and the way it
+        fails is silent: the stale verdict short-circuits before the newly-fixed
+        logic ever runs, so a user who adds an alias sees nothing happen and
+        reasonably concludes the fix did not work.
+
+        Successful matches are deliberately kept: they are validated on read,
+        and clearing them would throw away the bulk of the cache for no
+        correctness gain. User corrections are pinned and never cleared.
+
+        Returns:
+            Number of entries cleared
+        """
+        try:
+            with self._conn() as conn:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM stream_match_cache
+                    WHERE event_id = ? AND user_corrected = 0
+                    """,
+                    (FAILED_MATCH_EVENT_ID,),
+                )
+                cleared = cursor.rowcount
+                self._commit(conn)
+                if cleared:
+                    logger.info(
+                        "[STREAM_CACHE] Cleared %d cached failure(s) after a config change",
+                        cleared,
+                    )
+                return cleared
+        except sqlite3.Error as e:
+            logger.warning("[STREAM_CACHE_ERROR] Clear failed entries: %s", e)
+            return 0
 
     def clear_group(self, group_id: int) -> int:
         """Clear all cache entries for a specific group.
@@ -591,7 +660,7 @@ class StreamMatchCache:
                     (group_id,),
                 )
                 cleared = cursor.rowcount
-                conn.commit()
+                self._commit(conn)
                 logger.info("[STREAM_CACHE_CLEAR] group=%d entries=%d", group_id, cleared)
                 return cleared
         except sqlite3.Error as e:
@@ -608,7 +677,7 @@ class StreamMatchCache:
             with self._conn() as conn:
                 cursor = conn.execute("DELETE FROM stream_match_cache")
                 cleared = cursor.rowcount
-                conn.commit()
+                self._commit(conn)
                 logger.info("[STREAM_CACHE_CLEAR] All entries cleared: %d", cleared)
                 return cleared
         except sqlite3.Error as e:

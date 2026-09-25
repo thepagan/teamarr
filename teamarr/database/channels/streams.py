@@ -52,9 +52,11 @@ def add_stream_to_channel(
         "exception_keyword",
         "match_type",
         "match_method",  # how matched ('epg', 'fuzzy', …); drives the epg_match ordering rule
+        "epg_program_title",  # matched programme title|sub_title; exception keywords (#829)
         "feed_team_id",  # resolved feed/matched team; drives team_feed rules (#489)
         "feed_side",  # 'home'/'away'; NULL = unknown. Drives home_feed/away_feed rules (#533)
         "dispatcharr_channel_group",  # DP channel group; drives dispatcharr_group rule (ybt.3)
+        "dispatcharr_channel_group_id",  # Stable DP channel group id for profile overrides
         "attach_at",   # time-windowed membership (183.5); None = full-life
         "detach_at",
     ]
@@ -186,6 +188,8 @@ def compute_stream_priority_from_rules(
     dispatcharr_channel_group: str | None = None,
     feed_team_id: str | None = None,
     feed_side: str | None = None,
+    sport: str | None = None,
+    league: str | None = None,
 ) -> int:
     """Compute priority for a stream based on ordering rules.
 
@@ -218,7 +222,7 @@ def compute_stream_priority_from_rules(
     from teamarr.database.channels.types import ManagedChannelStream
     from teamarr.services.stream_ordering import get_stream_ordering_service
 
-    ordering_service = get_stream_ordering_service(conn)
+    ordering_service = get_stream_ordering_service(conn, sport, league)
     if not ordering_service.rules:
         # No rules - use sequential ordering (will be assigned by get_next_stream_priority)
         return None  # type: ignore
@@ -292,6 +296,26 @@ def update_stream_name(
             dispatcharr_stream_id,
             new_name,
         )
+    return cursor.rowcount > 0
+
+
+def update_stream_channel_source_group(
+    conn: Connection,
+    managed_channel_id: int,
+    dispatcharr_stream_id: int,
+    dispatcharr_channel_group_id: int,
+) -> bool:
+    """Backfill channel-source group metadata for an active stream.
+
+    Only channel-source candidates supply this immutable Dispatcharr group id;
+    ordinary M3U/name-matched streams must remain NULL.
+    """
+    cursor = conn.execute(
+        """UPDATE managed_channel_streams
+           SET dispatcharr_channel_group_id = ?
+           WHERE managed_channel_id = ? AND dispatcharr_stream_id = ? AND removed_at IS NULL""",
+        (dispatcharr_channel_group_id, managed_channel_id, dispatcharr_stream_id),
+    )
     return cursor.rowcount > 0
 
 
@@ -455,7 +479,7 @@ def update_stream_window(
 ) -> bool:
     """Refresh the time-window (attach_at/detach_at) of an attached stream.
 
-    Used by epic teamarrv2-183.5 (bead teamarrv2-095): the window is recomputed
+    Used by epic teamarr-183.5 (bead teamarr-095): the window is recomputed
     every generation run from the fresh EPG program slot + current buffers, so a
     change to epg_stream_pre/post_buffer_minutes takes effect on already-attached
     streams instead of only at first attach. Targets the active (not removed) row.
@@ -491,6 +515,32 @@ def update_stream_window(
     return False
 
 
+def update_stream_program_title(
+    conn: Connection,
+    managed_channel_id: int,
+    dispatcharr_stream_id: int,
+    epg_program_title: str,
+) -> bool:
+    """Refresh the matched EPG programme text of an attached stream (#829).
+
+    Keyword enforcement re-checks exception keywords from the stored row, so
+    the programme text must follow the guide: a stream attached before the
+    column existed, or whose best programme for the event changed, would
+    otherwise be judged on stale text. Targets the active row; returns True
+    when the value actually changed.
+    """
+    cursor = conn.execute(
+        """UPDATE managed_channel_streams
+           SET epg_program_title = ?
+           WHERE managed_channel_id = ?
+             AND dispatcharr_stream_id = ?
+             AND removed_at IS NULL
+             AND epg_program_title IS NOT ?""",
+        (epg_program_title, managed_channel_id, dispatcharr_stream_id, epg_program_title),
+    )
+    return cursor.rowcount > 0
+
+
 def reorder_channel_streams(
     conn: Connection,
     managed_channel_id: int,
@@ -514,8 +564,14 @@ def reorder_channel_streams(
     if not streams:
         return 0
 
-    # Get ordering service with rules
-    ordering_service = get_stream_ordering_service(conn)
+    channel = conn.execute(
+        "SELECT sport, league FROM managed_channels WHERE id = ?", (managed_channel_id,)
+    ).fetchone()
+    ordering_service = get_stream_ordering_service(
+        conn,
+        channel["sport"] if channel else None,
+        channel["league"] if channel else None,
+    )
     if not ordering_service.rules:
         # No rules defined - skip reordering
         return 0
@@ -816,6 +872,68 @@ def clear_stream_stats(conn: Connection, group_id: int | None = None) -> int:
     return cursor.rowcount
 
 
+def get_all_channel_streams(
+    conn: Connection,
+) -> dict[int, list[ManagedChannelStream]]:
+    """Every active stream on every managed channel, grouped by channel id.
+
+    The bulk form of :func:`get_channel_streams` (#735). Callers that walk all
+    managed channels — stream ordering, the post-run audit — were issuing one
+    query per channel; on an install with several hundred channels that is a
+    few thousand round trips through SQLite for data one scan already has.
+
+    Channels with no active streams are simply absent, matching what the
+    per-channel call returns for them (an empty list).
+
+    Returns:
+        ``{managed_channel_id: [ManagedChannelStream, ...]}`` in priority order.
+    """
+    cursor = conn.execute(
+        """SELECT * FROM managed_channel_streams
+           WHERE removed_at IS NULL
+           ORDER BY managed_channel_id, priority, added_at"""
+    )
+    grouped: dict[int, list[ManagedChannelStream]] = {}
+    for row in cursor.fetchall():
+        stream = ManagedChannelStream.from_row(dict(row))
+        grouped.setdefault(stream.managed_channel_id, []).append(stream)
+    return grouped
+
+
+def get_all_ordered_stream_ids(
+    conn: Connection,
+    now: str | None = None,
+) -> dict[int, list[int]]:
+    """The ACTIVE, priority-ordered stream ids for every managed channel.
+
+    The bulk form of :func:`get_ordered_stream_ids` (#735), running the exact
+    same window predicate in one scan so the two cannot drift apart. Pass an
+    explicit ``now`` to evaluate every channel's attach/detach window at ONE
+    instant — walking channels one at a time re-reads the clock per channel, so
+    a long ordering pass could open a window partway through and treat two
+    channels sharing a stream inconsistently.
+
+    Returns:
+        ``{managed_channel_id: [dispatcharr_stream_id, ...]}``; channels whose
+        active set is empty are absent (callers read them as an empty list).
+    """
+    now_expr = "datetime('now')" if now is None else "?"
+    params: tuple = () if now is None else (now, now)
+    cursor = conn.execute(
+        f"""SELECT managed_channel_id, dispatcharr_stream_id
+           FROM managed_channel_streams
+           WHERE removed_at IS NULL
+             AND (attach_at IS NULL
+                  OR (attach_at <= {now_expr} AND {now_expr} < detach_at))
+           ORDER BY managed_channel_id, priority, added_at""",
+        params,
+    )
+    grouped: dict[int, list[int]] = {}
+    for channel_id, stream_id in cursor.fetchall():
+        grouped.setdefault(channel_id, []).append(stream_id)
+    return grouped
+
+
 def get_ordered_stream_ids(
     conn: Connection,
     managed_channel_id: int,
@@ -824,7 +942,7 @@ def get_ordered_stream_ids(
     """Get the ACTIVE stream IDs for a channel in priority order.
 
     This is the set pushed to Dispatcharr. It honors time-windowed membership
-    (epic teamarrv2-183.5): a stream is active when it has no window
+    (epic teamarr-183.5): a stream is active when it has no window
     (attach_at IS NULL — full-life, the default) OR the current time is inside
     its window (attach_at <= now < detach_at). Out-of-window time-shared linear
     streams are excluded so they swap out of the channel until their next slot.

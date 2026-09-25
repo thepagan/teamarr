@@ -91,9 +91,11 @@ Recap published → it renders verbatim. Game still running → the in-progress
 line. Final but no recap → neither row fires and the base register's
 constructed result line renders.
 
-The idle register's **offseason override** (no upcoming game in the
-lookahead) stays separate from condition rows — it's a no-game state, and
-condition rows need a reference game to evaluate.
+The idle register's **no-schedule override** (no upcoming game in the
+lookahead) stays separate from condition rows. It applies both in the
+off-season and when a provider has not published a schedule. Each enabled
+title, subtitle, or description field replaces only its corresponding normal
+idle field. Condition rows need a reference game to evaluate.
 
 ---
 
@@ -237,6 +239,7 @@ These shine in [filler condition rows](#filler-condition-rows), where the refere
 | Condition | Value | Description |
 |-----------|-------|-------------|
 | `has_preview` | - | Provider preview blurb is available (populates same-day pregame) |
+| `has_generated_preview` | - | Optional generated preview is available from typed provider facts |
 | `has_recap` | - | Provider recap headline is available (populates once the game is final) |
 | `has_structured_preview` | - | Recent-form data is available (populates days ahead) |
 | `has_event_note` | - | Marquee/playoff note is available (`NBA Finals - Game 5`, `CFP Quarterfinal at the Cotton Bowl Classic`); empty for ordinary games |

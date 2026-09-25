@@ -1,0 +1,188 @@
+"""Managed channel list route tests."""
+
+import sqlite3
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+from teamarr.api.routes import channels
+
+
+@contextmanager
+def _connection(conn):
+    yield conn
+
+
+def test_managed_channel_list_appends_owned_enabled_team_channels(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE teams (
+            id INTEGER PRIMARY KEY, active INTEGER, managed_channel_enabled INTEGER,
+            channel_id TEXT, team_name TEXT, team_logo_url TEXT, channel_logo_url TEXT,
+            primary_league TEXT, sport TEXT, template_id INTEGER
+        );
+        CREATE TABLE managed_team_channels (
+            team_id INTEGER PRIMARY KEY, dispatcharr_channel_id INTEGER,
+            dispatcharr_uuid TEXT, channel_number INTEGER, sync_status TEXT,
+            created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO teams VALUES
+            (7, 1, 1, 'team-blue', 'Blue', 'team-logo', 'deprecated-logo', 'nba',
+             'basketball', NULL);
+        INSERT INTO teams VALUES
+            (8, 0, 1, 'team-disabled', 'Disabled', NULL, NULL, 'nba', 'basketball', NULL);
+        INSERT INTO managed_team_channels VALUES
+            (7, 90, 'team-uuid', 9000, 'ready', '2026-01-01', '2026-01-02');
+        INSERT INTO managed_team_channels VALUES
+            (8, 91, 'disabled-uuid', 9001, 'ready', '2026-01-01', '2026-01-02');
+        """
+    )
+    monkeypatch.setattr(channels, "get_db", lambda: _connection(conn))
+    event_channel = SimpleNamespace(
+        id=-7,
+        event_epg_group_id=None,
+        event_id="event-1",
+        event_provider="espn",
+        tvg_id="teamarr-event-1",
+        channel_name="Event channel",
+        channel_number=100,
+        logo_url=None,
+        dispatcharr_channel_id=10,
+        dispatcharr_uuid="event-uuid",
+        home_team=None,
+        home_team_abbrev=None,
+        away_team=None,
+        away_team_abbrev=None,
+        event_date=None,
+        event_name="Event",
+        league="nba",
+        sport="basketball",
+        scheduled_delete_at=None,
+        sync_status="ready",
+        created_at=None,
+        updated_at=None,
+        deleted_at=None,
+    )
+    monkeypatch.setattr(
+        channels, "get_all_managed_channels", lambda *_args, **_kwargs: [event_channel]
+    )
+    monkeypatch.setattr(
+        channels,
+        "get_dispatcharr_connection",
+        lambda *_: SimpleNamespace(
+            channels=SimpleNamespace(
+                get_channels=lambda: [
+                    SimpleNamespace(
+                        id=90,
+                        name="NBA | Blue",
+                        logo_id=42,
+                        logo_url="epg-channel-logo",
+                    )
+                ],
+            ),
+            # No per-row logo GET on a polled list (#826): the route must not
+            # touch the logos manager at all.
+            logos=None,
+        ),
+    )
+
+    response = channels.list_managed_channels(
+        group_id=None, sport=None, league=None, include_deleted=False
+    )
+
+    # Both managed teams are listed: the channel of an inactive team persists
+    # (only the managed toggle releases it), so the audit view shows it.
+    assert response.total == 3
+    channel = response.channels[1]
+    assert channel.id == -8
+    assert channel.channel_type == "team"
+    assert channel.team_id == 7
+    assert channel.tvg_id == "team-blue"
+    assert channel.dispatcharr_channel_id == 90
+    assert channel.channel_name == "NBA | Blue"
+    assert channel.logo_url == "epg-channel-logo"
+    inactive = response.channels[2]
+    assert inactive.team_id == 8
+    assert inactive.logo_url is None
+
+
+def test_managed_team_channel_streams_show_the_attached_event(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE teams (
+            id INTEGER PRIMARY KEY, active INTEGER, managed_channel_enabled INTEGER,
+            channel_id TEXT, team_name TEXT, team_logo_url TEXT, channel_logo_url TEXT,
+            primary_league TEXT, sport TEXT, template_id INTEGER
+        );
+        CREATE TABLE managed_team_channels (
+            team_id INTEGER PRIMARY KEY, dispatcharr_channel_id INTEGER,
+            dispatcharr_uuid TEXT, channel_number INTEGER, sync_status TEXT,
+            created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE managed_team_channel_streams (
+            id INTEGER PRIMARY KEY, team_id INTEGER, dispatcharr_stream_id INTEGER,
+            event_id TEXT, event_provider TEXT, source_group_id INTEGER, stream_name TEXT,
+            m3u_account_name TEXT, match_method TEXT, match_type TEXT, feed_side TEXT,
+            feed_team_id TEXT, dispatcharr_channel_group TEXT, priority INTEGER,
+            event_start TEXT, attach_at TEXT, detach_at TEXT, removed_at TEXT
+        );
+        CREATE TABLE team_epg_xmltv (team_id INTEGER, xmltv_content TEXT, updated_at TEXT);
+        INSERT INTO teams VALUES
+            (7, 1, 1, 'team-blue', 'Blue', NULL, NULL, 'nba', 'basketball', NULL);
+        INSERT INTO managed_team_channels VALUES
+            (7, 90, 'team-uuid', 9000, 'ready', '2026-01-01', '2026-01-02');
+        INSERT INTO managed_team_channel_streams VALUES
+            (1, 7, 44, 'game-1', 'espn', 3, 'Blue at Red', 'Sports', 'epg', 'event',
+             'away', 'home', NULL, 1, NULL, NULL, NULL, NULL);
+        INSERT INTO team_epg_xmltv VALUES (
+            7,
+            '<tv><programme channel="team-blue" start="20260913090000 +0000" '
+            || 'stop="20260913110000 +0000"><title>Blue at Red</title>'
+            || '<category>Sports</category><live/></programme></tv>',
+            '2026-09-13'
+        );
+        """
+    )
+    monkeypatch.setattr(channels, "get_db", lambda: _connection(conn))
+    monkeypatch.setattr(channels, "get_group_names_by_ids", lambda *_args: {3: "Sports"})
+    monkeypatch.setattr(channels, "resolve_stream_ordering_rules", lambda *_args: ([], None))
+    monkeypatch.setattr(channels, "get_stream_match_details", lambda *_args: {})
+    monkeypatch.setattr(channels, "get_dispatcharr_client", lambda *_args: None)
+    monkeypatch.setattr(
+        channels,
+        "create_default_service",
+        lambda: SimpleNamespace(
+            get_event=lambda event_id, league: SimpleNamespace(
+                name=f"Attached {event_id} in {league}",
+                start_time="2026-09-13T09:00:00+00:00",
+            )
+        ),
+    )
+    import teamarr.consumers.team_processor as team_processor
+
+    monkeypatch.setattr(
+        team_processor,
+        "TeamProcessor",
+        lambda *_: SimpleNamespace(
+            render_event_programme=lambda *_: SimpleNamespace(
+                title="NBA Basketball",
+                subtitle="Blue at Red",
+                start="2026-09-13T09:00:00+00:00",
+                stop="2026-09-13T11:00:00+00:00",
+            )
+        ),
+    )
+
+    response = channels.get_managed_channel_streams(-7)
+
+    assert response.current_event is not None
+    assert response.current_event.title == "NBA Basketball"
+    assert response.current_event.sub_title == "Blue at Red"
+    assert response.current_event.is_attached is True
+    assert response.current_event.start == "2026-09-13T09:00:00+00:00"
+    assert response.current_event.stop == "2026-09-13T11:00:00+00:00"
+    assert response.current_event.attach_at is None
+    assert response.streams[0].dispatcharr_stream_id == 44

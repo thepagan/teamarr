@@ -10,7 +10,7 @@ redirect_from:
 
 # Template Variables
 
-Templates use variables enclosed in curly braces that get replaced with real data when EPG is generated. Teamarr provides 258 variables across 20 categories, plus [filters](#filters-transforming-variable-values) that transform any variable's value.
+Templates use variables enclosed in curly braces that get replaced with real data when EPG is generated. Teamarr provides 266 variables across 20 categories, plus [filters](#filters-transforming-variable-values) that transform any variable's value.
 
 ## Team vs Event Templates
 
@@ -47,7 +47,7 @@ Click the badge to toggle to **Sample** mode, which uses generic, intentionally-
 **Event templates** don't need suffixes - each channel exists for a single game, so there's no "next" or "last" to reference.
 
 {: .note }
-> **When there's no next (or last) game** — offseason, end of a season — suffixed variables resolve to empty and the usual cleanup removes leftover wrappers, so raw `{…}` braces never reach your guide. A misspelled variable name, or a suffix the variable doesn't support, still renders literally so you can spot the mistake. For a proper offseason message, use the **Offseason** idle register on the Fillers tab (enabled with generic content by default on new templates).
+> **When there's no next (or last) game** — offseason, an unpublished provider schedule, or the end of a season — suffixed variables resolve to empty and the usual cleanup removes leftover wrappers, so raw `{…}` braces never reach your guide. A misspelled variable name, or a suffix the variable doesn't support, still renders literally so you can spot the mistake. For a proper no-schedule message, use the idle no-schedule overrides on the Fillers tab. Each enabled field replaces its corresponding normal idle field.
 
 In the tables below, the **Suffixes** column indicates which suffixes are available:
 - **base** = no suffix (current game)
@@ -64,6 +64,8 @@ Three template fields hold image URLs and accept the same variables as any other
 |-------|----------|
 | **Program Art URL** (`program_art_url`) | the programme `<icon>` in the EPG (per-game artwork) |
 | **Channel Logo URL** (`event_channel_logo_url`, event templates) | the Dispatcharr channel logo **and** the EPG channel icon |
+| **Team Channel Logo URL** (`team_channel_logo_url`, team templates) | logo for an opt-in managed Team EPG channel |
+| **Team Channel Name** (`team_channel_name`, team templates) | XMLTV and managed Dispatcharr channel name |
 | **Filler Art URL** (pregame/postgame/idle `art_url`) | artwork on filler programmes |
 
 ### Game-Thumbs base URL
@@ -101,12 +103,18 @@ Any variable accepts a `|filter` modifier that transforms its resolved value:
 | `lower` | lowercase | `detroit lions` |
 | `upper` | UPPERCASE | `DETROIT LIONS` |
 | `title` | Title Case each word | `Detroit Lions` |
-| `pascal` | PascalCase, accents folded, punctuation dropped | `DetroitLions` |
-| `slug` | lowercase, hyphen-separated, URL-safe | `detroit-lions` |
+| `pascal` | PascalCase, accents folded, punctuation dropped (`/` pairings kept as `+`) | `DetroitLions` |
+| `slug` | lowercase, hyphen-separated, URL-safe (`/` pairings kept as `+`) | `detroit-lions` |
 | `urlencode` (alias `url`) | percent-encode for URL query strings | `Detroit%20Lions` |
 
 Filters **chain** left-to-right: `{home_team|pascal|url}` PascalCases the name, then
 URL-encodes the result. Suffixes come before the filter: `{opponent.next|upper}`.
+
+`pascal` and `slug` are the path filters, and they treat `/` as a **pairing separator**
+rather than punctuation to drop: a tennis doubles side arrives from the provider as one
+name (`Isabelle Haverlag / Nika Radisic`) and renders as `IsabelleHaverlag+NikaRadisic`
+(`isabelle-haverlag+nika-radisic` for `slug`) — `+` is how Game Thumbs addresses a pair,
+so both players end up in the artwork. Singles names are unaffected.
 
 - Filters are **opt-in**: variables without one are unchanged, so a variable that already
   holds a full URL is never double-encoded.
@@ -405,7 +413,8 @@ Season type indicators. All providers normalize their native season codes to a c
 |----------|-------------------|
 | ESPN | Full — derived from season slug (`post-season`, `semifinals`, etc.) with numeric-type fallback |
 | MLB Stats | Full — `gameType` codes (`F`/`D`/`L`/`W`/`P` → postseason, `S`/`E` → preseason) |
-| HockeyTech | Full — via per-season `playoff` flag (CHL, AHL, PWHL, USHL) |
+| Bell Media | Full — via `seasonTypeId` (CHL, OHL, WHL, QMJHL, AHL, PWHL) |
+| HockeyTech | Full — via per-season `playoff` flag (ECHL, USHL, Junior A) |
 | TSDB | Partial — postseason detected via special `intRound` codes (125/150/160/170/180/200) used by some leagues (NBA, NHL, IPL, European knockouts). Leagues that keep normal round numbering through finals (AFL, NRL, boxing) can't be detected and return empty. Preseason is never detected for TSDB. |
 
 ---
@@ -447,11 +456,31 @@ Provider editorial/context copy for a game, passed through raw. These are **spar
 |----------|-------------|----------|--------|
 | `{game_recap}` | Postgame recap headline — short, self-contained, carries the result. Empty until a game is final | base, .next, .last | `Brunson scores 45, and New York tops Spurs for title` |
 | `{game_preview}` | Pregame preview blurb. Empty once a game is final (use `{game_recap}` then) | base, .next, .last | `Toronto Blue Jays (35-38) vs. Boston Red Sox` |
+| `{generated_preview}` | Opt-in sport-specific preview for baseball, football, and basketball, with a generic matchup sentence for other sports; composed from public fields and never betting information | base, .next, .last | `The Packers visit the Broncos at Empower Field...` |
+| `{week}` | Provider-reported football week number | base, .next, .last | `3` |
+| `{home_total_yards_per_game}` / `{away_total_yards_per_game}` | Football team total yards per game | base, .next, .last | `360` |
+| `{home_rushing_yards_per_game}` / `{away_rushing_yards_per_game}` | Football team rushing yards per game | base, .next, .last | `162` |
+| `{home_points_allowed_per_game}` / `{away_points_allowed_per_game}` | Basketball points allowed per game | base, .next, .last | `87.0` |
 | `{game_event_note}` | Marquee/playoff designation. Empty for ordinary regular-season games | base, .next, .last | `NBA Finals - Game 5` |
 | `{series_summary}` | Playoff/season-series state. Empty when there's no series context | base, .next, .last | `Series tied 1-1` |
 | `{home_last_five}` | Home team's W-L over its last five games (populates days ahead) | base, .next, .last | `4-1` |
 | `{away_last_five}` | Away team's W-L over its last five games | base, .next, .last | `2-3` |
 | `{last_five_summary}` | Recent-form prose for both teams; empty without data — pair with `has_structured_preview` | base, .next, .last | `The Rays have won 2 of their last five; the Red Sox have won 4 of their last five.` |
+
+`{generated_preview}` is not included in any starter template. To opt in, add
+the `has_generated_preview` condition and use `{generated_preview}` in that
+row. The formatter omits missing facts. Baseball includes the probable starter
+and home-run leader, falling back to the batting-average or RBI leader when the
+home-run leader is unavailable. Football includes every available passing,
+rushing, and receiving leader; basketball likewise includes every available
+points, rebounds, and assists leader. Records and recent form are added when
+available, as are football yardage and basketball points-for/points-allowed team stats.
+Hockey and other sports receive only a complete generic matchup sentence using
+the away team, home team, and venue. All prose is deterministic, source-grounded,
+and excludes betting data.
+
+Dedicated prose for additional sports, including hockey, can be added separately
+once representative provider payloads are available for validation.
 
 {: .note }
 Because these populate only for some games, pair them with other content or a static fallback so a template never renders blank. In main descriptions, gate them with condition rows (`has_preview`, `has_recap`, …); in filler registers, use [filler condition rows](conditions#filler-condition-rows) — the starter set's postgame `has_recap → {game_recap.last}` row is the canonical example. `{game_recap}` and `{game_event_note}` come free from the scoreboard; `{game_preview}` and `{series_summary}` come from the per-event summary fetch that EPG generation already makes (no extra API calls).
@@ -460,7 +489,10 @@ Because these populate only for some games, pair them with other content or a st
 
 ## Rankings
 
-College rankings (NCAAF, NCAAM, NCAAW).
+College rankings — any college league ESPN polls, including NCAAF (AP, FCS and Division II polls), NCAAM and NCAAW (AP), plus college hockey, volleyball, lacrosse and NCAA soccer.
+
+{: .note }
+Ranks come from the current published poll and are empty out of season: ESPN keeps serving a season's final poll year-round, so Teamarr ignores polls older than 45 days rather than stamping last season's ranks onto this season's listings. College basketball ranks appear once the preseason AP poll lands in November, football's in August.
 
 | Variable | Description | Suffixes | Sample |
 |----------|-------------|----------|--------|

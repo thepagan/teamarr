@@ -27,7 +27,7 @@ Exception keywords let certain streams break out of the default behavior — use
 Each keyword has:
 
 - **Label** — the display name. It's appended to the variant channel's name, resolves the `{exception_keyword}` template variable, and is part of the channel's tvg-id.
-- **Match Terms** — comma-separated terms matched against stream names.
+- **Match Terms** — comma-separated terms matched against stream names. For a stream matched through its EPG guide (e.g. a linear `ESPN 2` feed), the matched programme's title and subtitle are checked too, so a *ManningCast* keyword with the term `Peyton and Eli` catches `Monday Night Football with Peyton and Eli` even though the stream is only named `ESPN 2`. The stream name is checked first.
 - **Behavior** — one of three:
 
 | Behavior | Description |
@@ -38,12 +38,30 @@ Each keyword has:
 
 - **Enabled** — an API-only flag (there's no UI toggle); keywords disabled via the API disappear from the card.
 
-A fresh install ships with eight language keywords seeded (Spanish, French, German, Portuguese, Italian, Japanese, Korean, Chinese — all Sub-Consolidate), so alternate-language feeds split out of the box.
+A fresh install ships with eight language keywords seeded (Spanish, French, German, Portuguese, Italian, Japanese, Korean, Chinese — all Sub-Consolidate), so alternate-language feeds split out of the box. Each seeded keyword is offered **once**: delete or rename one and it stays gone across restarts and upgrades. To get a deleted default back, add it again by hand.
 
 {: .note }
+A keyword never fires on a word the event itself is named with: the *Spanish* keyword leaves a `Spanish Grand Prix` stream alone (and *French* a French Open stream), while `En Español` or `(ESP)` on that same event still counts as a language feed.
+
 The Exception Keywords card is only *shown* in Consolidate mode, but stored keywords are checked on every run regardless of mode — a keyword's behavior overrides the global mode per-stream (an **Ignore** keyword drops its streams even in Separate mode).
 
-Keyword placement is **enforced every generation**: if a stream should move between a main channel and its keyword variant (because keywords or stream names changed), it's moved, and the main channel is always kept on the lower channel number than its variants.
+Keyword placement is **enforced every generation**: if a stream should move between a main channel and its keyword variant (because keywords, stream names, or a matched programme's title changed), it's moved, and the main channel is always kept on the lower channel number than its variants.
+
+## Race Feeds
+
+Race weekends come with many simultaneous views of the same session — a camera on every driver, the pit lane, the driver tracker, live timing, team radio. Teamarr keeps a **Race Feeds** list for each racing league it has a roster for (Formula 1 today), one row per driver and one per feed type, and every row works like an exception keyword scoped to that league:
+
+| Behavior | What happens to a matching stream |
+|----------|-----------------------------------|
+| **Own channel** | The feed gets its own channel for each session (`Spanish GP - Qualifying - Charles Leclerc`), with the session's guide data. A 4K copy of the same feed joins that channel. |
+| **Separate** | Every matching stream gets its own channel. |
+| **Ignore** | The stream is dropped. |
+
+Everything starts as **Ignore**, so out of the box no onboard or pit-lane stream reaches any channel — the main broadcast is the only channel per session. Switch on the drivers you follow and each gets a channel per session; leave the rest ignored. "All own channel" and "All ignore" set every driver at once.
+
+The driver names, the forms providers write them in (`Charles Leclerc`, `Leclerc`, `C. Leclerc`, `LEC`) and the feed vocabulary come from the provider roster and refresh with the team cache, so a mid-season substitute appears after their first race. Only the behavior and on/off switch are yours; a refresh never changes them. A driver who leaves the grid keeps their row so your choice survives if they return.
+
+Because the rows are scoped to their league, a driver's surname never affects other sports — `Hamilton` fires on F1 streams and not on the Tiger-Cats.
 
 ## Feed Separation
 
@@ -66,10 +84,31 @@ Feed **identification** always runs — every stream's resolved feed team *and* 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Feed Separation** | Off | Master toggle for the feature |
+| **Apply To Sports** | *(empty — all sports)* | Restrict splitting to the selected sports — see below |
 | **Home Feed Terms** | `HOME` | Comma-separated terms that indicate a home feed |
 | **Away Feed Terms** | `AWAY` | Comma-separated terms that indicate an away feed |
 | **Detect Team Names** | On | Also match team names in stream names (e.g., "Orioles Feed") |
 | **Feed Label Style** | Team Name | How feed channels are labeled — see below |
+
+### Scoping It To Certain Sports
+
+Home and away feeds are a regional-sports-network phenomenon. They're real and
+common in baseball, basketball, hockey and football, and they don't exist at
+all in racing, combat sports, tennis and golf — those have no home or away
+side to broadcast from.
+
+**Apply To Sports** restricts the split to the sports you pick. Leave it empty
+and separation applies everywhere, which is how it has always behaved and what
+existing setups keep on upgrade. Pick Baseball, say, and MLB events split into
+home and away feed channels while every other sport keeps a single shared
+channel per event.
+
+The list only ever *narrows* the master toggle — it can't switch separation on
+for a sport while the toggle is off. And it changes only the channel splitting:
+feed **identification** still runs for every sport, so the Specific Team's Feed
+and Feed Side stream-priority rules keep working in sports you left unselected.
+
+The sports offered are the ones your subscribed leagues cover.
 
 ### Turning It Off
 
@@ -79,6 +118,9 @@ event's shared channel in that same pass, freeing the channel numbers the feed
 block held. Only events matched by that run are reclaimed — a feed channel for
 an event that isn't in today's slate keeps its normal end-of-event deletion
 rather than being pulled mid-broadcast.
+
+Removing a sport from **Apply To Sports** un-splits that sport the same way, on
+the same schedule — the reclaim isn't limited to the master toggle.
 
 ### Label Styles
 

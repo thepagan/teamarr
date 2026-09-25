@@ -161,6 +161,61 @@ def test_qualified_upsert_boolean_guard_is_translated_for_postgres():
     assert "WHERE stream_match_cache.user_corrected = FALSE" in translated
 
 
+def test_managed_team_channel_boolean_alias_is_translated_for_postgres():
+    wrapper = _wrapper_with_columns(
+        {
+            "teams": {
+                "id": "integer",
+                "active": "boolean",
+                "managed_channel_enabled": "boolean",
+            },
+            "managed_team_channels": {
+                "team_id": "integer",
+                "dispatcharr_channel_id": "integer",
+            },
+        }
+    )
+
+    translated = wrapper._translate_query(
+        """
+        SELECT t.id
+        FROM teams t
+        LEFT JOIN managed_team_channels mtc ON mtc.team_id = t.id
+        WHERE t.managed_channel_enabled = 1 AND t.active = 1
+        """
+    )
+
+    assert "t.managed_channel_enabled = TRUE" in translated
+    assert "t.active = TRUE" in translated
+
+
+def test_race_feed_boolean_update_and_insert_are_translated_for_postgres():
+    wrapper = _wrapper_with_columns(
+        {
+            "race_feeds": {
+                "league": "text",
+                "feed_key": "text",
+                "enabled": "boolean",
+                "managed": "boolean",
+            }
+        }
+    )
+
+    update_sql = wrapper._translate_query(
+        "UPDATE race_feeds SET enabled = 0 WHERE managed = 1"
+    )
+    insert_sql = wrapper._translate_query(
+        """
+        INSERT INTO race_feeds (league, feed_key, enabled, managed)
+        VALUES (?, ?, 1, 1)
+        """
+    )
+
+    assert "SET enabled = FALSE" in update_sql
+    assert "WHERE managed = TRUE" in update_sql
+    assert "VALUES (%s, %s, TRUE, TRUE)" in insert_sql
+
+
 def test_null_safe_parameter_comparisons_are_translated_for_postgres():
     wrapper = _wrapper_with_columns({})
 

@@ -6,8 +6,28 @@ Full CRUD is in database/exception_keywords.py.
 
 import re
 from sqlite3 import Connection
+from typing import Any
 
 from teamarr.database.exception_keywords import ExceptionKeyword, get_all_keywords
+
+
+def get_keywords_for_league(
+    conn: Connection,
+    league: str | None,
+    global_keywords: list[ExceptionKeyword] | None = None,
+) -> list[ExceptionKeyword]:
+    """Race feeds for ``league`` (#245) first, then the global exception keywords.
+
+    Race feeds are league-scoped keywords (driver onboards, pit lane, tracker
+    …); a driver's surname is somebody else's team elsewhere, so they only
+    ever join the list for streams of their own league. Precedence is the
+    more specific list first: a stream that names a driver is that driver's
+    feed even if a global keyword would also match it.
+    """
+    from teamarr.database.race_feeds import race_feed_keywords
+
+    base = global_keywords if global_keywords is not None else get_exception_keywords(conn)
+    return race_feed_keywords(conn, league) + base
 
 
 def get_exception_keywords(conn: Connection, enabled_only: bool = True) -> list[ExceptionKeyword]:
@@ -56,9 +76,30 @@ def _make_keyword_pattern(term: str) -> str:
     return start + escaped + end
 
 
+def event_identity_text(event: Any) -> str:
+    """The words an event is named with, for :func:`check_exception_keyword`.
+
+    Name, short name and venue country — "Tag Heuer Spanish Grand Prix",
+    "Spanish GP", "Spain". Accepts an Event, a managed-channel row (which
+    only carries ``event_name``) or a plain string.
+    """
+    if event is None:
+        return ""
+    if isinstance(event, str):
+        return event
+    parts = [
+        getattr(event, "name", None) or getattr(event, "event_name", None),
+        getattr(event, "short_name", None),
+        getattr(getattr(event, "venue", None), "country", None),
+    ]
+    return " | ".join(p for p in parts if p)
+
+
 def check_exception_keyword(
     stream_name: str,
     keywords: list[ExceptionKeyword],
+    event_text: str | None = None,
+    program_title: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Check if stream name matches any exception keyword.
 
@@ -66,22 +107,43 @@ def check_exception_keyword(
     "Pelicans", while still supporting terms with special characters like "(ESP)"
     and multi-word phrases like "Peyton and Eli".
 
+    A term never fires on a word the matched event is itself named with
+    (#803): the seeded "Spanish" keyword, set to Ignore, dropped every
+    "Spanish Grand Prix" stream on a live install. Pass the event's identity
+    text (:func:`event_identity_text`) and any term found inside it is
+    skipped for that stream — "Spanish" for the Spanish GP, "French" for the
+    French Open — while "En Español" / "(ESP)" still fire, since the event
+    is not named with them.
+
+    An EPG-matched linear stream (#829) is named for its network ("ESPN 2"),
+    so the feed evidence lives in the guide programme instead: "Monday Night
+    Football with Peyton and Eli | Denver Broncos at Kansas City Chiefs".
+    ``program_title`` is that matched programme's title|sub_title and is
+    searched after the stream name — the stream's own name is the more
+    direct evidence, so a keyword it names wins over one only the guide
+    names. The event-name guard applies to both.
+
     Args:
         stream_name: Stream name to check
         keywords: List of ExceptionKeyword objects
+        event_text: The matched event's name/short name/venue country, or None
+        program_title: The matched EPG programme's title|sub_title, or None
 
     Returns:
         Tuple of (label, behavior) or (None, None) if no match.
         The label is the configured display name for the keyword, used for
         channel naming and the {exception_keyword} template variable.
     """
-    stream_lower = stream_name.lower()
-
-    for kw in keywords:
-        for term in kw.match_term_list:
-            pattern = _make_keyword_pattern(term)
-            if re.search(pattern, stream_lower):
-                # Return the label (not the matched term) for channel naming
-                return (kw.label, kw.behavior)
-
+    event_lower = event_text.lower() if event_text else ""
+    for text in (stream_name, program_title):
+        if not text:
+            continue
+        text_lower = text.lower()
+        for kw in keywords:
+            for term in kw.match_term_list:
+                pattern = _make_keyword_pattern(term)
+                if event_lower and re.search(pattern, event_lower):
+                    continue
+                if re.search(pattern, text_lower):
+                    return (kw.label, kw.behavior)
     return (None, None)

@@ -49,6 +49,8 @@ def update_dispatcharr_settings(update: DispatcharrSettingsUpdate):
             default_stream_profile_id=update.default_stream_profile_id,
             default_channel_group_id=update.default_channel_group_id,
             default_channel_group_mode=update.default_channel_group_mode,
+            managed_team_channel_profile_ids=update.managed_team_channel_profile_ids,
+            managed_team_channel_group_id=update.managed_team_channel_group_id,
             cleanup_unused_logos=update.cleanup_unused_logos,
         )
 
@@ -105,8 +107,13 @@ def test_dispatcharr_connection(request: ConnectionTestRequest | None = None):
 def get_dispatcharr_status() -> dict:
     """Get current Dispatcharr connection status.
 
-    Actually tests the connection to verify it works, not just that
-    settings are configured.
+    Actually reaches Dispatcharr to verify the connection works, not just that
+    settings are filled in — but via ``probe_connection`` rather than
+    ``test_connection`` (#736). The UI polls this every 30s from every open tab
+    and reads two booleans off it; ``test_connection`` answered them by building
+    a throwaway client and making three calls, one of which pulls every channel
+    group just to count it (1.09s measured). The probe is one request on the
+    pooled connection with a short-lived verdict (51ms cold, ~2ms warm).
 
     Returns:
         configured: Settings are filled in (enabled, url, username)
@@ -123,8 +130,7 @@ def get_dispatcharr_status() -> dict:
                 "connected": False,
             }
 
-        # Actually test the connection to verify it works
-        result = factory.test_connection()
+        result = factory.probe_connection()
 
         response: dict[str, object] = {
             "configured": True,

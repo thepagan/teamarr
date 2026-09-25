@@ -99,7 +99,9 @@ class BellMediaClient(BaseHTTPClient):
             self._cache.set(cache_key, calendar, _TTL_CALENDAR)
         return calendar
 
-    def get_schedule_group(self, league: str, grouping: int, season: int | None) -> list[dict]:
+    def get_schedule_group(
+        self, league: str, grouping: int | str, season: int | None
+    ) -> list[dict]:
         mapping = self.get_mapping(league)
         if not mapping:
             return []
@@ -107,7 +109,7 @@ class BellMediaClient(BaseHTTPClient):
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
-        params: dict[str, int] = {"grouping": grouping, "nbDaysOrWeeksToShow": 1}
+        params: dict[str, int | str] = {"grouping": grouping, "nbDaysOrWeeksToShow": 1}
         if season is not None:
             params["season"] = season
         data = self._request_for_mapping(
@@ -130,17 +132,33 @@ class BellMediaClient(BaseHTTPClient):
     def get_events_between(self, league: str, start: date, end: date) -> list[dict]:
         calendar = self.get_calendar(league)
         season = calendar.get("season")
-        groups = calendar.get("weeklyCalendar") or {}
-        grouping_ids = {
+        weekly_groups = calendar.get("weeklyCalendar") or {}
+        grouping_ids: set[int | str] = {
             int(group_id)
-            for group_id, group in groups.items()
+            for group_id, group in weekly_groups.items()
             if (group.get("startDate") or "") <= end.isoformat()
             and (group.get("endDate") or "") >= start.isoformat()
         }
+        monthly_groups = calendar.get("monthlyCalendar") or {}
+        grouping_ids.update(
+            calendar_date
+            for month in monthly_groups.values()
+            for calendar_date in month.get("calendarDates") or []
+            if start.isoformat() <= calendar_date <= end.isoformat()
+        )
         events: list[dict] = []
-        for grouping in sorted(grouping_ids):
+        for grouping in sorted(grouping_ids, key=str):
             events.extend(self.get_schedule_group(league, grouping, season))
-        return events
+        unique_events = []
+        event_ids = set()
+        for event in events:
+            event_id = event.get("eventId")
+            if event_id is not None and event_id in event_ids:
+                continue
+            if event_id is not None:
+                event_ids.add(event_id)
+            unique_events.append(event)
+        return unique_events
 
     def get_event(self, league: str, event_id: str) -> dict | None:
         mapping = self.get_mapping(league)

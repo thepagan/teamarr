@@ -18,6 +18,7 @@ from typing import cast
 from teamarr.consumers.matching.normalizer import (
     QUALITY_TOKEN,
     NormalizedStream,
+    is_datetime_tail,
     normalize_stream,
 )
 from teamarr.services.detection_keywords import DetectionKeywordService
@@ -896,6 +897,15 @@ def is_placeholder(text: str) -> bool:
 def find_game_separator(text: str) -> tuple[str | None, int]:
     """Find game separator in stream name.
 
+    A separator whose right side is only date/time material is not a matchup
+    separator (#787): ``"<title> @ Sep 11 12:00 PM ET"`` has no second team,
+    yet ``@`` outranks ``at`` in GAME_SEPARATORS, so winning the scan handed
+    the whole title to the matcher as a lone junk "team" — which then
+    false-matched via single-team abbreviation hits ("... Day 1 ..." →
+    DAY → Dayton). Such an occurrence is skipped and the scan continues, so
+    "Ohio State at Wisconsin Fri @ Sep 11 08:00PM ET" still splits at "at"
+    and "Court 8 @ Sep 10 10:00AM ET" finds no separator at all.
+
     Args:
         text: Stream name (should be normalized)
 
@@ -905,7 +915,15 @@ def find_game_separator(text: str) -> tuple[str | None, int]:
     if not text:
         return None, -1
 
-    return DetectionKeywordService.find_separator(text)
+    lower = text.lower()
+    for sep in DetectionKeywordService.get_separators():
+        needle = sep.lower()
+        start = 0
+        while (pos := lower.find(needle, start)) != -1:
+            if not is_datetime_tail(text[pos + len(sep) :]):
+                return sep, pos
+            start = pos + 1
+    return None, -1
 
 
 def extract_teams_from_separator(
@@ -932,13 +950,30 @@ def extract_teams_from_separator(
     team2 = _clean_team_name(team2)
 
     # Validate: both teams should have substance
-    # Minimum 3 chars - even short team abbrevs are 3+ (USC, LSU, BYU, etc.)
-    if not team1 or len(team1) < 3:
+    if not _is_substantial_side(team1):
         team1 = None
-    if not team2 or len(team2) < 3:
+    if not _is_substantial_side(team2):
         team2 = None
 
     return team1, team2
+
+
+def _is_substantial_side(side: str | None) -> bool:
+    """Whether an extracted separator side is worth handing to the matcher.
+
+    Three characters clear it outright. A two-letter side is kept only when it
+    is purely alphabetic — the shape of a real team code (TB, SF, KC, NY, LA),
+    which the matcher scores by abbreviation equality alone (#472). The old
+    flat 3-char floor dropped those, so "TB vs DET" reached the matcher with
+    one side and "NY vs LA" fell through to TEAM_ONLY as a single junk team
+    (#821). Two-character sides with digits or punctuation ("F1", "12", "-:")
+    stay rejected.
+    """
+    if not side:
+        return False
+    if len(side) >= 3:
+        return True
+    return len(side) == 2 and side.isascii() and side.isalpha()
 
 
 # One quality token, optionally bracketed: "HD", "1080p", "[1080p]", "(4K)".
@@ -1108,6 +1143,17 @@ def _clean_team_name(name: str) -> str:
     # Re-strip channel numbers in case league prefix revealed one
     # "NFL 03 Bills" → after league strip: "03 Bills" → "Bills"
     name = re.sub(r"^\d{1,2}\s+", "", name)
+
+    # NFL schedule feeds prepend a channel and broadcast-window label after the
+    # league prefix, e.g. "NFL | 02 - TNF 8:35pm 49ers at Rams". Strip only
+    # that anchored metadata so it cannot become part of the first team name.
+    name = re.sub(r"^(?:LIVE\s+)?\d{1,2}\s*-\s*", "", name, flags=re.IGNORECASE)
+    name = re.sub(
+        r"^(?:TNF|SNF|MNF)\b(?:\s+(?:TIME_MASK|\d{1,2}(?::\d{2})?\s*(?:AM|PM)))?\s+",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
 
     # Remove leading punctuation and whitespace
     name = re.sub(r"^[\s\-:.,]+", "", name)
@@ -1432,8 +1478,8 @@ def extract_event_card_hint(text: str) -> str | None:
     if ufc_match:
         return ufc_match.group(1).upper().replace("  ", " ")
 
-    # PFL 5, Bellator 300, etc.
-    org_match = re.search(r"\b((?:pfl|bellator|one\s*fc)\s*\d+)\b", text, re.IGNORECASE)
+    # PFL 5, LFA 235, Bellator 300, etc.
+    org_match = re.search(r"\b((?:pfl|lfa|bellator|one\s*fc)\s*\d+)\b", text, re.IGNORECASE)
     if org_match:
         return org_match.group(1).upper()
 
@@ -1559,12 +1605,12 @@ def _clean_fighter_name(name: str) -> str | None:
     # Strip empty parentheses left after segment removal
     name = re.sub(r"\(\s*\)", "", name)
 
-    # Strip UFC event number prefix: "324 - Gaethje" → "Gaethje"
-    # Also handles "UFC 324 Gaethje"
-    name = re.sub(r"^(?:ufc\s+)?\d+\s*[-:]?\s*", "", name, flags=re.IGNORECASE)
+    # Strip promotion event number prefix: "324 - Gaethje" → "Gaethje"
+    # Also handles "UFC 324 Gaethje" / "PFL 5 Gaethje"
+    name = re.sub(r"^(?:(?:ufc|pfl|lfa|bellator)\s+)?\d+\s*[-:]?\s*", "", name, flags=re.IGNORECASE)
 
-    # Strip "UFC" prefix
-    name = re.sub(r"^ufc\s+", "", name, flags=re.IGNORECASE)
+    # Strip promotion prefix
+    name = re.sub(r"^(?:ufc|pfl|lfa|bellator)\s+", "", name, flags=re.IGNORECASE)
 
     # Strip channel prefixes like "LIVE EVENT 03 -"
     name = re.sub(r"^live\s+event\s+\d+\s*[-:]\s*", "", name, flags=re.IGNORECASE)
@@ -1713,12 +1759,19 @@ def _resolve_hints(
     if custom_regex and custom_regex.league_enabled:
         custom_league = extract_league_with_custom_regex(stream_name, custom_regex)
         if custom_league:
-            league_hint = custom_league
+            # The capture is provider text, often a display name ("Serie A")
+            # that no subscription contains — resolve it to league code(s)
+            # (#820). Unresolvable text is kept so the filter still names it.
+            resolved = DetectionKeywordService.resolve_league_name(custom_league)
             logger.debug(
-                "[CLASSIFY] Custom league regex extracted: %s from '%s'",
+                "[CLASSIFY] Custom league regex extracted: %s → %s from '%s'",
                 custom_league,
+                resolved,
                 stream_name[:50],
             )
+            league_hint = resolved or custom_league
+            if isinstance(league_hint, list) and len(league_hint) > 1:
+                league_hint = _narrow_by_gender(league_hint, stream_name)
 
     return league_hint, sport_hint
 
@@ -1822,8 +1875,8 @@ def _classify_racing_event(ctx: _ClassifyContext) -> ClassifiedStream | None:
             # UNLESS the left side is itself a racing series name ("NASCAR @
             # Daytona", "F1 at Monaco"): series names are the venue-style
             # naming this step exists to catch. Checked on the raw left text,
-            # not sep_team1: "F1" is under the 3-char extraction minimum and
-            # comes back as None.
+            # not sep_team1: "F1" fails the extraction floor (two chars, not
+            # alphabetic — see _is_substantial_side) and comes back as None.
             left_raw = ctx.text[:sep_position].strip()
             if sep.strip() in ("at", "@") and (
                 (sep_team1 and len(sep_team1.split()) > 1) or has_racing_text_evidence(left_raw)

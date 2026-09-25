@@ -25,6 +25,8 @@ class TeamCreate(BaseModel):
     channel_logo_url: str | None = None
     template_id: int | None = None
     active: bool = True
+    managed_channel_enabled: bool = False
+    managed_channel_number: int | None = None
 
 
 class TeamUpdate(BaseModel):
@@ -38,6 +40,8 @@ class TeamUpdate(BaseModel):
     channel_logo_url: str | None = None
     template_id: int | None = None
     active: bool | None = None
+    managed_channel_enabled: bool | None = None
+    managed_channel_number: int | None = None
     primary_league: str | None = None
     leagues: list[str] | None = None
 
@@ -61,6 +65,11 @@ class TeamResponse(BaseModel):
     channel_logo_url: str | None
     template_id: int | None
     active: bool
+    managed_channel_enabled: bool = False
+    managed_channel_number: int | None = None
+    managed_channel_assigned_number: int | None = None
+    managed_channel_sync_status: str | None = None
+    managed_channel_sync_message: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -111,6 +120,7 @@ class TeamChannelStatusResponse(BaseModel):
 
     team: TeamChannelStatusTeam
     dispatcharr_channel: TeamChannelStatusDispatcharrChannel
+    management: dict
     next_live_window: TeamChannelStatusProgramme
     status: str
     missing: list[str] = Field(default_factory=list)
@@ -169,7 +179,7 @@ class ConditionalContent(BaseModel):
 
 
 class IdleOffseasonContent(BaseModel):
-    """Offseason content settings (no game in 30-day lookahead).
+    """Idle-state override content settings.
 
     Each field (title, subtitle, description) can be independently enabled
     to override the default idle content when there's no upcoming game.
@@ -254,7 +264,9 @@ class TemplateCreate(BaseModel):
 
     # Event template specific
     event_channel_name: str | None = None
+    team_channel_name: str | None = None
     event_channel_logo_url: str | None = None
+    team_channel_logo_url: str | None = None
 
 
 class TemplateUpdate(BaseModel):
@@ -300,7 +312,9 @@ class TemplateUpdate(BaseModel):
 
     # Event template specific
     event_channel_name: str | None = None
+    team_channel_name: str | None = None
     event_channel_logo_url: str | None = None
+    team_channel_logo_url: str | None = None
 
 
 class TemplateResponse(BaseModel):
@@ -316,6 +330,8 @@ class TemplateResponse(BaseModel):
     title_format: str | None
     subtitle_template: str | None
     program_art_url: str | None
+    event_channel_logo_url: str | None = None
+    team_channel_logo_url: str | None = None
     game_duration_mode: str | None
     game_duration_override: float | None
     pregame_enabled: bool | None
@@ -348,7 +364,9 @@ class TemplateFullResponse(TemplateResponse):
     idle_conditional_rows: list[dict] | None = None
     conditional_descriptions: list[dict] | None = None
     event_channel_name: str | None = None
+    team_channel_name: str | None = None
     event_channel_logo_url: str | None = None
+    team_channel_logo_url: str | None = None
 
 
 class TemplateValidationWarning(BaseModel):
