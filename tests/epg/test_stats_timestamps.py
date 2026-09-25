@@ -143,3 +143,26 @@ def test_summary_endpoints_emit_offset_iso(conn):
     summary = get_match_stats_summary(conn, run.id)
     assert summary["started_at"].endswith("+00:00")
     assert summary["completed_at"].endswith("+00:00")
+
+
+def test_match_summary_groups_selected_names_for_postgres(conn):
+    run = create_run(conn, run_type="full_epg")
+    run.complete(status="completed")
+    save_run(conn, run)
+
+    class RecordingConnection:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.queries = []
+
+        def execute(self, query, params=None):
+            self.queries.append(" ".join(query.split()))
+            return self.wrapped.execute(query, params or ())
+
+    recording = RecordingConnection(conn)
+
+    get_match_stats_summary(recording, run.id)
+
+    group_queries = [query for query in recording.queries if "group_name" in query]
+    assert len(group_queries) == 2
+    assert all("GROUP BY group_id, group_name" in query for query in group_queries)

@@ -179,6 +179,15 @@ class PostgresCursorWrapper:
     def close(self) -> None:
         self._cursor.close()
 
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> DBRow:
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
     def __enter__(self):
         return self
 

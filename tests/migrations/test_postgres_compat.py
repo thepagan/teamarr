@@ -2,7 +2,12 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 from teamarr.database import connection
-from teamarr.database.postgres_compat import DBRow, PostgresConnectionWrapper, StaticCursorWrapper
+from teamarr.database.postgres_compat import (
+    DBRow,
+    PostgresConnectionWrapper,
+    PostgresCursorWrapper,
+    StaticCursorWrapper,
+)
 
 
 def _wrapper_with_columns(columns: dict[str, dict[str, str]]) -> PostgresConnectionWrapper:
@@ -80,6 +85,25 @@ def test_static_cursor_wrapper_supports_sqlite_style_iteration():
     cols = {row[1] for row in cursor}
 
     assert cols == {"id", "channel_number_locked"}
+    assert cursor.fetchone() is None
+
+
+def test_postgres_cursor_wrapper_supports_sqlite_style_iteration():
+    class RawCursor:
+        description = [("m3u_group_id",)]
+        rowcount = 2
+
+        def __init__(self):
+            self.rows = iter([(10,), (20,)])
+
+        def fetchone(self):
+            return next(self.rows, None)
+
+    cursor = PostgresCursorWrapper(None, RawCursor())
+
+    group_ids = {row[0] for row in cursor}
+
+    assert group_ids == {10, 20}
     assert cursor.fetchone() is None
 
 
