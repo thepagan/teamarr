@@ -138,3 +138,19 @@ def test_run_enforcement_does_not_borrow_a_caller_connection(db_factory):
     assert "conn" not in params, (
         "_run_enforcement must not accept a caller's connection — see #607"
     )
+
+
+def test_xmltv_store_ignores_group_deleted_after_generation_snapshot(db_conn):
+    """A stale group object must not cause a foreign-key failure (#postgres)."""
+    processor = EventGroupProcessor(db_factory=MagicMock(), service=MagicMock())
+
+    stored = processor._store_group_xmltv(db_conn, 220, "")
+
+    assert stored is False
+    assert db_conn.execute("SELECT 1").fetchone()[0] == 1
+    assert (
+        db_conn.execute(
+            "SELECT COUNT(*) FROM event_epg_xmltv WHERE group_id = ?", (220,)
+        ).fetchone()[0]
+        == 0
+    )

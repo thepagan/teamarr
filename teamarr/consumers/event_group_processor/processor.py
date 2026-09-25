@@ -614,7 +614,15 @@ class EventGroupProcessor(
             # Clear any previously stored XMLTV for this group so that if
             # processing crashes or produces zero matches, stale rendered
             # output is never served in the merged EPG.
-            self._store_group_xmltv(conn, group.id, "")
+            if not self._store_group_xmltv(conn, group.id, ""):
+                logger.info(
+                    "[EVENT_GROUP_SKIP] Group '%s' (id=%d) was deleted before processing",
+                    group.name,
+                    group.id,
+                )
+                result.errors.append("Group was deleted before processing")
+                result.completed_at = now_utc()
+                return result
 
             # Step 1: Fetch M3U streams from Dispatcharr
             streams = self._fetch_streams(group)

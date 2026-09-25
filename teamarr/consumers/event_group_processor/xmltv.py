@@ -397,22 +397,30 @@ class XmltvRenderer:
         conn: Connection,
         group_id: int,
         xmltv_content: str,
-    ) -> None:
+    ) -> bool:
         """Store XMLTV content for a group in the database.
 
         This allows the XMLTV to be served at a predictable URL
-        that Dispatcharr can fetch.
+        that Dispatcharr can fetch. Returns ``False`` when the group was
+        deleted after generation loaded its group list.
         """
-        # Upsert into event_epg_xmltv table
-        conn.execute(
+        # Select the parent row as part of the INSERT so a concurrent group
+        # deletion becomes a harmless no-op instead of a foreign-key error
+        # that aborts the surrounding PostgreSQL transaction.
+        cursor = conn.execute(
             """
             INSERT INTO event_epg_xmltv (group_id, xmltv_content, updated_at)
-            VALUES (?, ?, datetime('now'))
+            SELECT id, ?, datetime('now')
+            FROM event_epg_groups
+            WHERE id = ?
             ON CONFLICT(group_id) DO UPDATE SET
                 xmltv_content = excluded.xmltv_content,
                 updated_at = datetime('now')
             """,
-            (group_id, xmltv_content),
+            (xmltv_content, group_id),
         )
         conn.commit()
+        if cursor.rowcount == 0:
+            return False
         logger.debug("[EVENT_EPG] Stored XMLTV for group %d", group_id)
+        return True
