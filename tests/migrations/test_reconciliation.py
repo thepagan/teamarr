@@ -5,8 +5,10 @@ import sqlite3
 import pytest
 
 from teamarr.database.reconciliation import (
+    _execute_add_column_candidate,
     _quote_identifier,
     _translate_column_definition,
+    _translate_verbatim_column_definition,
     reconcile_schema,
 )
 
@@ -274,6 +276,40 @@ class TestPostgresReconciliationSql:
             )
             == "JSONB DEFAULT '[]'"
         )
+
+    def test_postgres_verbatim_boolean_with_constraints_uses_native_default(self):
+        conn = type("PostgresConn", (), {"dialect": "postgres"})()
+
+        translated = _translate_verbatim_column_definition(
+            conn,
+            "managed_channel_enabled BOOLEAN NOT NULL DEFAULT 0",
+        )
+
+        assert translated == "managed_channel_enabled BOOLEAN NOT NULL DEFAULT FALSE"
+
+    def test_failed_postgres_candidate_rolls_back_to_savepoint(self):
+        class FakePostgresConnection:
+            dialect = "postgres"
+
+            def __init__(self):
+                self.statements = []
+
+            def execute(self, sql):
+                self.statements.append(sql)
+                if sql.startswith("ALTER TABLE"):
+                    raise sqlite3.OperationalError("invalid definition")
+
+        conn = FakePostgresConnection()
+
+        with pytest.raises(sqlite3.OperationalError, match="invalid definition"):
+            _execute_add_column_candidate(conn, "ALTER TABLE teams ADD COLUMN broken BOOLEAN")
+
+        assert conn.statements == [
+            "SAVEPOINT teamarr_reconcile_column",
+            "ALTER TABLE teams ADD COLUMN broken BOOLEAN",
+            "ROLLBACK TO SAVEPOINT teamarr_reconcile_column",
+            "RELEASE SAVEPOINT teamarr_reconcile_column",
+        ]
 
 
 class TestV65SchemaVersionCorrection:

@@ -255,7 +255,10 @@ def _reconcile_table(
         for idx, col_def in enumerate(candidates):
             translated_col_def = _translate_verbatim_column_definition(conn, col_def)
             try:
-                conn.execute(f"ALTER TABLE {table_ident} ADD COLUMN {translated_col_def}")
+                _execute_add_column_candidate(
+                    conn,
+                    f"ALTER TABLE {table_ident} ADD COLUMN {translated_col_def}",
+                )
                 added.append(col_name)
                 logger.info("[RECONCILE] Added %s.%s (%s)", table, col_name, translated_col_def)
                 if idx > 0:
@@ -278,6 +281,23 @@ def _reconcile_table(
             logger.warning("[RECONCILE] %s", msg)
 
     return added
+
+
+def _execute_add_column_candidate(conn: sqlite3.Connection, sql: str) -> None:
+    """Run a candidate ALTER without poisoning a PostgreSQL transaction."""
+    if getattr(conn, "dialect", None) != "postgres":
+        conn.execute(sql)
+        return
+
+    savepoint = "teamarr_reconcile_column"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        conn.execute(sql)
+    except DB_OPERATIONAL_EXCEPTIONS:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
 
 def _quote_identifier(conn: sqlite3.Connection, name: str) -> str:
@@ -324,14 +344,14 @@ def _translate_verbatim_column_definition(conn: sqlite3.Connection, col_def: str
     translated = re.sub(r"^\[([^\]]+)\]", r'"\1"', translated)
     translated = re.sub(r"\bJSON\b", "JSONB", translated, flags=re.IGNORECASE)
     translated = re.sub(
-        r"\bBOOLEAN\s+DEFAULT\s+0\b",
-        "BOOLEAN DEFAULT FALSE",
+        r"(\bBOOLEAN\b(?:(?:\s+NOT\s+NULL|\s+NULL|\s+UNIQUE))*\s+DEFAULT\s+)0\b",
+        r"\1FALSE",
         translated,
         flags=re.IGNORECASE,
     )
     translated = re.sub(
-        r"\bBOOLEAN\s+DEFAULT\s+1\b",
-        "BOOLEAN DEFAULT TRUE",
+        r"(\bBOOLEAN\b(?:(?:\s+NOT\s+NULL|\s+NULL|\s+UNIQUE))*\s+DEFAULT\s+)1\b",
+        r"\1TRUE",
         translated,
         flags=re.IGNORECASE,
     )
