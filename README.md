@@ -55,6 +55,12 @@ Backups remain backend-native:
 - SQLite instances create and restore `.db` backups
 - PostgreSQL instances create and restore `.sql` dumps
 
+From **Settings → Backup & Restore**, **Export SQLite** creates a portable
+`.db` snapshot from either backend. PostgreSQL exports are copied into the
+current SQLite schema, validated for integrity and foreign-key consistency,
+and protected from automatic backup rotation. Remove `DATABASE_URL` and mount
+the exported file as the configured SQLite database when switching backends.
+
 ## Upgrading from Legacy (1.x)
 
 **There is no automatic migration path from legacy 1.x releases** due to significant architectural changes.

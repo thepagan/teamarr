@@ -29,7 +29,15 @@ Backups are written to `./data/backups` (the path is settable via `PUT /backup/s
 
 ### Backup Files
 
-**Create Backup** takes a manual backup on demand. A dropdown below lists your backups; selecting one shows its size, date, and **manual**/**scheduled** type badge, with actions for the selected file:
+**Create Backup** takes a backend-native manual backup on demand: `.db` for
+SQLite or `.sql` for PostgreSQL. **Export SQLite** creates a portable `.db`
+snapshot from either backend. A PostgreSQL export is rebuilt against Teamarr's
+current SQLite schema and checked for database integrity and broken foreign
+keys before it is offered for download. SQLite exports are protected from
+automatic rotation by default.
+
+A dropdown below lists your backups; selecting one shows its size, date, and
+**manual**/**scheduled**/**export** type badge, with actions for the selected file:
 
 - **Download** the file
 - **Restore** from it
@@ -42,6 +50,12 @@ Upload a `.db` backup file to restore. A backup of your current data is automati
 
 {: .warning }
 Restoring a backup replaces ALL current data. Restart the application after a restore.
+
+To move from PostgreSQL to SQLite, create and download an **Export SQLite**
+file, stop Teamarr, remove `DATABASE_URL`, place the exported file at the
+configured SQLite database path (normally `./data/teamarr.db`), and restart.
+Keep the original PostgreSQL `.sql` backup until the SQLite instance has been
+verified.
 
 ## Scheduled Channel Reset
 

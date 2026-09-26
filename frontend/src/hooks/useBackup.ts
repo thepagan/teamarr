@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   listBackups,
   createBackup,
+  exportSqliteBackup,
   deleteBackup,
   protectBackup,
   unprotectBackup,
@@ -29,6 +30,18 @@ export function useCreateBackup() {
 
   return useMutation({
     mutationFn: createBackup,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["backups"] })
+    },
+  })
+}
+
+/** Create a portable SQLite export of the active database. */
+export function useExportSqliteBackup() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: exportSqliteBackup,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["backups"] })
     },

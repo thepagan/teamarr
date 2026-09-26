@@ -6,6 +6,8 @@ against CodeQL path-injection alerts #10-#25).
 """
 
 import sqlite3
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -77,3 +79,108 @@ def test_restore_backup_rejects_traversal(service):
     assert success is False
     assert message == "Invalid backup filename"
     assert path is None
+
+
+def test_postgres_export_creates_valid_portable_sqlite_database(
+    backup_dir, tmp_path, monkeypatch
+):
+    schema_path = tmp_path / "schema.sql"
+    schema_path.write_text(
+        """
+        CREATE TABLE settings (
+            id INTEGER PRIMARY KEY,
+            database_backend TEXT NOT NULL,
+            enabled BOOLEAN NOT NULL,
+            metadata JSON
+        );
+        CREATE TABLE children (
+            id INTEGER PRIMARY KEY,
+            settings_id INTEGER NOT NULL REFERENCES settings(id),
+            happened_at TIMESTAMP,
+            payload BLOB
+        );
+        """
+    )
+    monkeypatch.setattr("teamarr.services.backup_service.SCHEMA_PATH", schema_path)
+
+    source_rows = {
+        "settings": [
+            {
+                "id": 1,
+                "database_backend": "postgresql",
+                "enabled": True,
+                "metadata": {"teams": ["Louisville"]},
+            }
+        ],
+        "children": [
+            {
+                "id": 7,
+                "settings_id": 1,
+                "happened_at": datetime(2026, 9, 26, 12, 30, tzinfo=UTC),
+                "payload": memoryview(b"data"),
+            }
+        ],
+    }
+
+    class Cursor:
+        def __init__(self, rows=()):
+            self._rows = list(rows)
+
+        def fetchall(self):
+            return self._rows
+
+    class SourceConnection:
+        def execute(self, query, params=None):
+            normalized = " ".join(query.split())
+            if normalized.startswith("BEGIN TRANSACTION"):
+                return Cursor()
+            if "FROM pg_catalog.pg_tables" in normalized:
+                return Cursor(
+                    [{"table_name": "settings"}, {"table_name": "children"}]
+                )
+            if "FROM information_schema.columns" in normalized:
+                table = params[0]
+                return Cursor(
+                    [{"column_name": column} for column in source_rows[table][0]]
+                )
+            if 'FROM "settings"' in normalized:
+                return Cursor(source_rows["settings"])
+            if 'FROM "children"' in normalized:
+                return Cursor(source_rows["children"])
+            raise AssertionError(f"Unexpected SQL: {normalized}")
+
+    @contextmanager
+    def db_factory():
+        yield SourceConnection()
+
+    service = BackupService(db_factory=db_factory, backup_path=str(backup_dir))
+    monkeypatch.setattr(service, "_is_postgres", lambda: True)
+
+    result = service.create_sqlite_export()
+
+    assert result.success is True
+    assert result.filename and result.filename.startswith("teamarr_export_")
+    assert result.filepath
+    export_path = Path(result.filepath)
+    assert export_path.with_suffix(".db.protected").exists()
+
+    exported = sqlite3.connect(export_path)
+    exported.row_factory = sqlite3.Row
+    try:
+        settings = exported.execute("SELECT * FROM settings").fetchone()
+        child = exported.execute("SELECT * FROM children").fetchone()
+        assert settings["database_backend"] == "sqlite"
+        assert settings["enabled"] == 1
+        assert settings["metadata"] == '{"teams": ["Louisville"]}'
+        assert child["settings_id"] == 1
+        assert child["happened_at"] == "2026-09-26T12:30:00+00:00"
+        assert child["payload"] == b"data"
+        assert exported.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert exported.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        exported.close()
+
+    listed = service.list_backups()
+    assert len(listed) == 1
+    assert listed[0].backup_type == "export"
+    assert listed[0].is_protected is True

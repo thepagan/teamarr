@@ -109,6 +109,10 @@ If Teamarr fails to start after pulling a new image, check the logs for migratio
 
 Go to [Settings → Advanced](settings/advanced) → Backup & Restore. Upload a `.db` backup file. A backup of your current database is created automatically before restoring. The application needs to be restarted after restore.
 
+To switch a PostgreSQL installation to SQLite, use **Export SQLite** first.
+The resulting `.db` file is a current-schema, integrity-checked snapshot; it is
+not the same as the backend-native PostgreSQL `.sql` backup.
+
 ## Logs
 
 Teamarr writes to two log files in the `data/logs/` directory:

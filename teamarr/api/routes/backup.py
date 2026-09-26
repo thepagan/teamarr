@@ -35,7 +35,7 @@ def _validate_backup_filename(filename: str) -> None:
     """
     if (
         not filename.startswith("teamarr_")
-        or not filename.endswith(".db")
+        or not filename.endswith((".db", ".sql"))
         or "/" in filename
         or "\\" in filename
         or ".." in filename
@@ -151,6 +151,26 @@ def create_backup():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=result.error or "Failed to create backup",
+        )
+
+    return BackupCreateResponse(
+        success=True,
+        filename=result.filename,
+        filepath=result.filepath,
+        size_bytes=result.size_bytes,
+    )
+
+
+@router.post("/export-sqlite", response_model=BackupCreateResponse)
+def export_sqlite_backup():
+    """Create a portable SQLite snapshot of the active database."""
+    backup_service = create_backup_service(get_db)
+    result = backup_service.create_sqlite_export()
+
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.error or "Failed to export SQLite database",
         )
 
     return BackupCreateResponse(
@@ -283,7 +303,11 @@ def download_specific_backup(filename: str):
     return FileResponse(
         path=str(backup_path),
         filename=filename,
-        media_type="application/x-sqlite3",
+        media_type=(
+            "application/x-sqlite3"
+            if backup_path.suffix.lower() == ".db"
+            else "application/sql"
+        ),
     )
 
 

@@ -10,6 +10,7 @@ import {
   Shield,
   ShieldOff,
   HardDrive,
+  Database,
 } from "lucide-react"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -25,6 +26,7 @@ import { restoreBackup, downloadSpecificBackup } from "@/api/backup"
 import {
   useBackups,
   useCreateBackup,
+  useExportSqliteBackup,
   useDeleteBackup,
   useProtectBackup,
   useUnprotectBackup,
@@ -160,6 +162,7 @@ export function BackupRestoreCard() {
   // Backup files state
   const { data: backupsData, isLoading: backupsLoading, refetch } = useBackups()
   const createBackup = useCreateBackup()
+  const exportSqlite = useExportSqliteBackup()
   const deleteBackupMutation = useDeleteBackup()
   const protectBackupMutation = useProtectBackup()
   const unprotectBackupMutation = useUnprotectBackup()
@@ -186,6 +189,15 @@ export function BackupRestoreCard() {
       toast.success(`Backup created: ${result.filename}`)
     } catch {
       toast.error("Failed to create backup")
+    }
+  }
+
+  const handleExportSqlite = async () => {
+    try {
+      const result = await exportSqlite.mutateAsync()
+      toast.success(`SQLite export created: ${result.filename}`)
+    } catch {
+      toast.error("Failed to export SQLite database")
     }
   }
 
@@ -275,18 +287,33 @@ export function BackupRestoreCard() {
               Backup & Restore
             </CardTitle>
           </div>
-          <Button
-            size="sm"
-            onClick={handleCreateBackup}
-            disabled={createBackup.isPending}
-          >
-            {createBackup.isPending ? (
-              <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <Plus className="h-4 w-4 mr-2" />
-            )}
-            Create Backup
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExportSqlite}
+              disabled={exportSqlite.isPending}
+            >
+              {exportSqlite.isPending ? (
+                <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Database className="h-4 w-4 mr-2" />
+              )}
+              Export SQLite
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleCreateBackup}
+              disabled={createBackup.isPending}
+            >
+              {createBackup.isPending ? (
+                <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4 mr-2" />
+              )}
+              Create Backup
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-6">

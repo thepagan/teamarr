@@ -20,7 +20,7 @@ export interface BackupInfo {
   size_bytes: number
   created_at: string
   is_protected: boolean
-  backup_type: "scheduled" | "manual"
+  backup_type: "scheduled" | "manual" | "export"
 }
 
 export interface BackupListResponse {
@@ -96,6 +96,11 @@ export async function listBackups(): Promise<BackupListResponse> {
  */
 export async function createBackup(): Promise<BackupCreateResponse> {
   return api.post("/backup/create")
+}
+
+/** Create a portable SQLite snapshot, including from PostgreSQL. */
+export async function exportSqliteBackup(): Promise<BackupCreateResponse> {
+  return api.post("/backup/export-sqlite")
 }
 
 /**

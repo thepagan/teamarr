@@ -8,6 +8,7 @@ Provides functionality for:
 - Rotating old backups based on max count
 """
 
+import json
 import logging
 import os
 import re
@@ -15,11 +16,11 @@ import sqlite3
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
-from teamarr.database.connection import resolve_db_path
+from teamarr.database.connection import SCHEMA_PATH, resolve_db_path
 from teamarr.database.settings import get_backup_settings
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class BackupInfo:
     size_bytes: int
     created_at: datetime
     is_protected: bool
-    backup_type: str  # 'scheduled' or 'manual'
+    backup_type: str  # 'scheduled', 'manual', or 'export'
 
 
 @dataclass
@@ -202,7 +203,7 @@ class BackupService:
                 return None
 
             backup_type = parts[0]
-            if backup_type not in ("scheduled", "manual"):
+            if backup_type not in ("scheduled", "manual", "export"):
                 return None
 
             date_str = parts[1]
@@ -259,6 +260,156 @@ class BackupService:
                 success=False,
                 error=str(e),
             )
+
+    def create_sqlite_export(self) -> BackupResult:
+        """Create a portable SQLite snapshot of the active database.
+
+        PostgreSQL exports are copied into a fresh database built from the
+        current SQLite schema. Native SQLite installations use the online
+        backup API. Exports are protected from scheduled rotation by default.
+        """
+        self._ensure_backup_dir()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"teamarr_export_{timestamp}.db"
+        export_path = self._backup_path / filename
+
+        try:
+            if self._is_postgres():
+                self._create_postgres_sqlite_export(export_path)
+            else:
+                self._create_sqlite_backup(export_path)
+
+            self._get_protected_marker_path(export_path).touch()
+            size_bytes = export_path.stat().st_size
+            logger.info(
+                "[BACKUP] Created protected SQLite export: %s (%d bytes)",
+                filename,
+                size_bytes,
+            )
+            return BackupResult(
+                success=True,
+                filename=filename,
+                filepath=str(export_path),
+                size_bytes=size_bytes,
+            )
+        except Exception as exc:
+            logger.error("[BACKUP] Failed to create SQLite export: %s", exc)
+            if export_path.exists():
+                export_path.unlink()
+            marker = self._get_protected_marker_path(export_path)
+            if marker.exists():
+                marker.unlink()
+            return BackupResult(success=False, error=str(exc))
+
+    def _create_postgres_sqlite_export(self, export_path: Path) -> None:
+        """Copy a consistent PostgreSQL snapshot into a fresh SQLite file."""
+        destination = sqlite3.connect(str(export_path))
+        destination.row_factory = sqlite3.Row
+        try:
+            destination.execute("PRAGMA foreign_keys = OFF")
+            destination.executescript(SCHEMA_PATH.read_text())
+
+            with self._db_factory() as source:
+                source.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                source_tables = self._get_postgres_tables(source)
+                destination_tables = self._get_sqlite_tables(destination)
+                common_tables = [
+                    table for table in destination_tables if table in set(source_tables)
+                ]
+
+                for table_name in reversed(
+                    self._toposort_sqlite_tables(destination, common_tables)
+                ):
+                    destination.execute(f"DELETE FROM {self._quote_ident(table_name)}")
+
+                for table_name in self._toposort_sqlite_tables(
+                    destination, common_tables
+                ):
+                    self._copy_postgres_table_to_sqlite(
+                        source, destination, table_name
+                    )
+
+            # The copied settings describe the source backend; the exported
+            # artifact must identify the backend it will actually run on.
+            destination.execute(
+                "UPDATE settings SET database_backend = 'sqlite' WHERE id = 1"
+            )
+            destination.commit()
+            destination.execute("PRAGMA foreign_keys = ON")
+
+            violations = destination.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                first = tuple(violations[0])
+                raise RuntimeError(
+                    f"SQLite export failed foreign-key validation: {first}"
+                )
+            integrity = destination.execute("PRAGMA integrity_check").fetchone()
+            if not integrity or integrity[0] != "ok":
+                detail = integrity[0] if integrity else "no result"
+                raise RuntimeError(f"SQLite export failed integrity check: {detail}")
+        finally:
+            destination.close()
+
+    def _copy_postgres_table_to_sqlite(
+        self,
+        source: Any,
+        destination: sqlite3.Connection,
+        table_name: str,
+    ) -> int:
+        """Copy common columns from one PostgreSQL table into SQLite."""
+        source_columns = {
+            row["column_name"]
+            for row in source.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = ?
+                ORDER BY ordinal_position
+                """,
+                (table_name,),
+            ).fetchall()
+        }
+        pragma_table = table_name.replace('"', '""')
+        destination_columns = [
+            row["name"]
+            for row in destination.execute(
+                f'PRAGMA table_info("{pragma_table}")'
+            ).fetchall()
+        ]
+        columns = [column for column in destination_columns if column in source_columns]
+        if not columns:
+            return 0
+
+        quoted_columns = ", ".join(self._quote_ident(column) for column in columns)
+        rows = source.execute(
+            f"SELECT {quoted_columns} FROM {self._quote_ident(table_name)}"
+        ).fetchall()
+        if not rows:
+            return 0
+
+        placeholders = ", ".join("?" for _ in columns)
+        destination.executemany(
+            f"INSERT INTO {self._quote_ident(table_name)} ({quoted_columns}) "
+            f"VALUES ({placeholders})",
+            [
+                tuple(self._sqlite_export_value(row[column]) for column in columns)
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    @staticmethod
+    def _sqlite_export_value(value: Any) -> Any:
+        """Convert PostgreSQL-native values to SQLite storage values."""
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (dict, list)):
+            return json.dumps(value)
+        if isinstance(value, (datetime, date, time)):
+            return value.isoformat()
+        if isinstance(value, memoryview):
+            return value.tobytes()
+        return value
 
     def _create_sqlite_backup(self, backup_filepath: Path) -> None:
         """Create a SQLite file backup."""
