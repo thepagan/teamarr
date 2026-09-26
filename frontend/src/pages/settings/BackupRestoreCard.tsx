@@ -195,9 +195,14 @@ export function BackupRestoreCard() {
   const handleExportSqlite = async () => {
     try {
       const result = await exportSqlite.mutateAsync()
-      toast.success(`SQLite export created: ${result.filename}`)
-    } catch {
-      toast.error("Failed to export SQLite database")
+      if (!result.filename) {
+        throw new Error(result.error ?? "The server did not return an export file")
+      }
+      downloadSpecificBackup(result.filename)
+      toast.success(`SQLite export created and downloading: ${result.filename}`)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to export SQLite database"
+      toast.error(message)
     }
   }
 

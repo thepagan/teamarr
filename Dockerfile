@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     dnsutils \
     iputils-ping \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy uv binary from official image

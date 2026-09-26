@@ -111,7 +111,8 @@ Go to [Settings → Advanced](settings/advanced) → Backup & Restore. Upload a 
 
 To switch a PostgreSQL installation to SQLite, use **Export SQLite** first.
 The resulting `.db` file is a current-schema, integrity-checked snapshot; it is
-not the same as the backend-native PostgreSQL `.sql` backup.
+downloaded automatically and is not the same as the backend-native PostgreSQL
+`.sql` backup.
 
 ## Logs
 

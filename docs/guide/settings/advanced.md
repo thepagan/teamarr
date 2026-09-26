@@ -33,8 +33,8 @@ Backups are written to `./data/backups` (the path is settable via `PUT /backup/s
 SQLite or `.sql` for PostgreSQL. **Export SQLite** creates a portable `.db`
 snapshot from either backend. A PostgreSQL export is rebuilt against Teamarr's
 current SQLite schema and checked for database integrity and broken foreign
-keys before it is offered for download. SQLite exports are protected from
-automatic rotation by default.
+keys before its download starts. A copy remains in the backup list, and SQLite
+exports are protected from automatic rotation by default.
 
 A dropdown below lists your backups; selecting one shows its size, date, and
 **manual**/**scheduled**/**export** type badge, with actions for the selected file:
