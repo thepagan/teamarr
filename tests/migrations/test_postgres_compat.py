@@ -258,6 +258,18 @@ def test_null_safe_parameter_comparisons_are_translated_for_postgres():
     assert "removed_at IS NOT NULL" in translated
 
 
+def test_parameterized_datetime_modifier_is_translated_for_postgres():
+    wrapper = _wrapper_with_columns({})
+
+    translated = wrapper._translate_query(
+        "DELETE FROM managed_team_channel_streams "
+        "WHERE removed_at IS NOT NULL AND removed_at < datetime('now', ?)"
+    )
+
+    assert "removed_at < (CURRENT_TIMESTAMP + %s::interval)" in translated
+    assert "datetime(" not in translated
+
+
 def test_postgres_init_runs_structural_migrations_before_schema(monkeypatch):
     calls = []
 

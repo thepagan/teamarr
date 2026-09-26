@@ -807,6 +807,12 @@ def _translate_datetime_calls(query: str) -> str:
         flags=re.IGNORECASE,
     )
     translated = re.sub(
+        r"datetime\('now'\s*,\s*\?\s*\)",
+        "(CURRENT_TIMESTAMP + ?::interval)",
+        translated,
+        flags=re.IGNORECASE,
+    )
+    translated = re.sub(
         r"datetime\('now'\)",
         "CURRENT_TIMESTAMP",
         translated,
